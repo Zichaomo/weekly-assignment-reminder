@@ -63,7 +63,7 @@
 ```
 
 > 所有 Python 脚本用 `__file__` 定位 ROOT，所以可以从任意目录调，绝对路径也 OK：
-> `python "D:\项目\每周作业提醒\data\weekly.py" --days 7`
+> `python data\weekly.py --days 7`（从项目根目录跑）
 
 ## 自动登录（login.bat）
 
@@ -95,7 +95,7 @@ python data\login.py --check     # 只检查 storage_state.json 是否仍有效
 ## 在终端里跑
 
 ```powershell
-cd "D:\项目\每周作业提醒\data"
+cd "<项目目录>\data"
 & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" notify.py --self-test
 & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" weekly.py --days 7
 ```

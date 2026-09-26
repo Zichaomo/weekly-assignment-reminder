@@ -223,7 +223,7 @@ def main() -> int:
     if not ensure_login():
         alert = ("⚠️ 北化在线作业提醒：平台登录态已失效，且自动登录未成功"
                  "（可能平台要求验证码，或 Edge 里存的密码已过期）。"
-                 "请双击 D:\\项目\\每周作业提醒\\login.bat 手动登录一次后，再运行作业提醒。")
+                 f"请双击 {ROOT.parent / 'login.bat'} 手动登录一次后，再运行作业提醒。")
         print(alert)
         try:
             ok = send_alert(alert)
