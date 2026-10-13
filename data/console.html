@@ -417,9 +417,27 @@ $('#editSave').onclick = () => {
 
 /* ---------------- 黑名单弹窗 ---------------- */
 async function loadBlacklist() {
-  const res = await api('/api/blacklist?kind=' + state.blKind);
-  state.blData = res;
-  renderBlacklist();
+  // 刷新要有可见反馈：否则数据没变时，用户会以为按钮没反应
+  const btn = $('#blReload');
+  const label0 = btn.textContent;
+  btn.textContent = '刷新中…';
+  btn.disabled = true;
+  try {
+    const res = await api('/api/blacklist?kind=' + state.blKind);
+    state.blData = res;
+    renderBlacklist();
+    const n = (res.candidates || []).length, bl = (res.blacklist || []).length;
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    $('#blInfo').insertAdjacentHTML('beforeend',
+      `<br><span style="color:var(--faint)">✓ 已于 ${t} 刷新：候选 ${n} 门 · 已拉黑 ${bl} 门`
+      + (n === 0 ? '（候选为空时列表看起来不变，这是正常的）' : '') + '</span>');
+  } catch (e) {
+    $('#blInfo').insertAdjacentHTML('beforeend',
+      `<br><span style="color:var(--red)">✗ 刷新失败：${esc(e.message || e)}</span>`);
+  } finally {
+    btn.textContent = label0;
+    btn.disabled = false;
+  }
 }
 function renderBlacklist() {
   const res = state.blData, kind = state.blKind;

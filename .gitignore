@@ -42,3 +42,5 @@ data/scrape.lock
 # ── 本机权限修复产物（沙箱/ACL 诊断的备份与报告）────────
 # 含本机 SID、绝对路径与逐文件清单，只对这台机器有意义
 .acl-recovery/
+# 每课元数据的自动备份（本地状态）
+data/courses.meta.bak.json

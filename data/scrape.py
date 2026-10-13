@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 抓取北化在线（THEOL）待提交作业及其截止时间。
 
@@ -447,12 +447,36 @@ def load_index_meta() -> dict:
         return {}
 
 
-def save_index_meta(meta: dict) -> None:
-    """把每课元数据并回 courses.json（保留 courses 不动）。"""
+META_BACKUP_FILE = COURSES_FILE.with_name("courses.meta.bak.json")
+
+
+def save_index_meta(meta: dict, force: bool = False) -> None:
+    """把每课元数据并回 courses.json（保留 courses 不动）。
+
+    护栏（2026-10-13 事故后加）：
+      曾有一次调用方把「空 meta」写回，抹掉了全部课程的 last_homework / empty_streak，
+      后果是黑名单候选（陈旧 / 暂无作业）全部消失，界面看起来像功能坏了。
+      所以这里：
+        · 写之前先把旧 meta 备份到 courses.meta.bak.json
+        · 若旧 meta 非空而这次要写成空，直接拒绝（除非显式 force=True）
+    """
     try:
         d = json.loads(COURSES_FILE.read_text(encoding="utf-8")) if COURSES_FILE.exists() else {}
     except Exception:  # noqa: BLE001
         d = {}
+    old_meta = d.get("meta") or {}
+    if old_meta and not meta and not force:
+        print("WARN: 拒绝把非空元数据写成空（会丢失最近作业时间与空课计数）。"
+              "确实要清空请传 force=True。", file=sys.stderr)
+        return
+    if old_meta:
+        try:
+            META_BACKUP_FILE.write_text(
+                json.dumps({"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "meta": old_meta}, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except OSError:
+            pass
     d["meta"] = meta
     d.setdefault("refreshed_at", time.strftime("%Y-%m-%d %H:%M:%S"))
     COURSES_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
