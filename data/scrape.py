@@ -643,6 +643,8 @@ def sweep_all_courses(ctx, page, debug=False, delay=1.0, skip_lids=None,
             meta[lid] = m
         save_index_meta(meta)
         test_notes["auto_skip"] = [index.get(k, "?") for k in auto_test_skip]
+    # 落一份扫描快照：候选推导依赖它，且它不会被「刷新课程表」覆盖
+    save_scan_snapshot(per_course)
     return homeworks, tests, per_course, errors, skipped, test_notes
 
 
@@ -855,6 +857,93 @@ def get_hw_content(ctx, hwtid: str, debug: bool = False) -> dict:
             pass
 
 
+SCAN_SNAPSHOT_FILE = COURSES_FILE.with_name("courses.scan.json")
+
+
+def save_scan_snapshot(per_course: list, now=None) -> None:
+    """把本轮扫描的每课原始证据落一份独立快照。
+
+    与 courses.json 的 meta 分开存，专门保证「候选推导」有数据可用：
+    meta 会被刷新课程表等操作整体覆盖，而这份快照只在真正扫描后重写。
+    """
+    now = now or datetime.now()
+    try:
+        SCAN_SNAPSHOT_FILE.write_text(json.dumps({
+            "scanned_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "semester_start": _semester_start(now).strftime("%Y-%m-%d"),
+            "courses": [{k: v for k, v in pc.items() if not k.startswith("_")}
+                        | {"_deadlines": pc.get("_deadlines") or []}
+                        for pc in per_course],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_scan_snapshot() -> dict:
+    try:
+        return json.loads(SCAN_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def candidates_from_scan(scan: dict) -> list:
+    """由扫描证据直接推导候选（不依赖 meta）。
+
+    规则（与 update_index_meta 保持一致）：
+      · 该课最新一次作业早于本学期起点            -> stale（建议拉黑）
+      · 该课抓取出错                              -> no-homework-entry（建议拉黑）
+      · 该课能进页面但 0 条作业                    -> no-homework-yet（仅供参考）
+    """
+    if not scan:
+        return []
+    try:
+        sem_start = datetime.strptime(scan["semester_start"], "%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        sem_start = _semester_start()
+    out = []
+    for pc in scan.get("courses") or []:
+        lid = pc.get("lid")
+        if not lid:
+            continue
+        name = pc.get("course") or "?"
+        deadlines = [d for d in (pc.get("_deadlines") or []) if d]
+        latest = max(deadlines) if deadlines else None
+        entry = {
+            "lid": lid, "course": name,
+            "last_homework": latest,
+            "fail_streak": 1 if pc.get("error") else 0,
+            # 由本轮证据决定；历史累计由 update_index_meta/meta 负责，这里只表达"本轮是空课"
+            "empty_streak": 1 if (not pc.get("error") and not pc.get("total")) else 0,
+            "scanned": True, "from": "scan",
+            "last_error": pc.get("error"),
+        }
+        if pc.get("error"):
+            entry["reason"] = "no-homework-entry"
+            entry["advisory"] = False
+            entry["detail"] = f"本轮扫描未能进入「课程作业」：{str(pc['error'])[:60]}"
+            out.append(entry)
+            continue
+        if latest:
+            try:
+                dt = datetime.strptime(latest, "%Y-%m-%d %H:%M")
+            except ValueError:
+                dt = None
+            if dt is not None and dt < sem_start:
+                entry["reason"] = "stale"
+                entry["advisory"] = False
+                entry["detail"] = f"最近一次作业 {latest}，早于本学期 {sem_start:%Y-%m-%d}"
+                out.append(entry)
+            continue
+        # 没有任何作业记录：能进页面 -> 仅供参考的空课
+        entry["reason"] = "no-homework-yet"
+        entry["advisory"] = True
+        entry["detail"] = ("本轮扫描能正常进入课程页但 0 条作业"
+                           "（可能本学期还没布置，也可能已结课）；"
+                           "若这门课本学期还有课，请勿拉黑")
+        out.append(entry)
+    return out
+
+
 def build_blacklist_candidates(now=None) -> dict:
     """只读地算出当前的建议拉黑候选（不改任何文件）。
 
@@ -872,6 +961,12 @@ def build_blacklist_candidates(now=None) -> dict:
     meta = load_index_meta()
     bl = load_blacklist().get("courses", {})
     index = load_course_index()
+
+    # 优先用「扫描快照」的候选证据；meta 只作为兜底。
+    # 原因：meta 会被「刷新课程表」等操作整体覆盖成空，导致候选凭空消失。
+    scan = load_scan_snapshot()
+    from_scan = {c["lid"]: c for c in candidates_from_scan(scan)} if scan else {}
+
     candidates, kept = [], []
     for lid, name in index.items():
         m = meta.get(lid) or {}
@@ -882,14 +977,24 @@ def build_blacklist_candidates(now=None) -> dict:
                 lh_dt = datetime.strptime(lh, "%Y-%m-%d %H:%M")
             except ValueError:
                 lh_dt = None
+        sc = from_scan.get(lid) or {}
+        # 扫描证据优先：它能反映"刚刚这一轮"的真实情况，且不会被覆盖掉
+        if sc:
+            lh = sc.get("last_homework") or lh
+            if lh:
+                try:
+                    lh_dt = datetime.strptime(lh, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
         entry = {
             "lid": lid,
             "course": name,
             "blacklisted": lid in bl,
             "last_homework": lh,
-            "fail_streak": int(m.get("fail_streak", 0)),
-            "empty_streak": int(m.get("empty_streak", 0)),
-            "last_error": m.get("last_error"),
+            "fail_streak": max(int(m.get("fail_streak", 0)), int(sc.get("fail_streak", 0))),
+            "empty_streak": max(int(m.get("empty_streak", 0)), int(sc.get("empty_streak", 0))),
+            "last_error": m.get("last_error") or sc.get("last_error"),
+            "from": "scan" if sc else "meta",
         }
         if lid in bl:
             continue
@@ -903,7 +1008,12 @@ def build_blacklist_candidates(now=None) -> dict:
             entry["advisory"] = False
             entry["detail"] = f"连续 {entry['fail_streak']} 次扫描都没进入「课程作业」"
             candidates.append(entry)
-        elif lh_dt is None and entry["empty_streak"] >= EMPTY_CANDIDATE_STREAK:
+        elif (lh_dt is None
+              and (sc.get("reason") == "no-homework-yet"
+                   or entry["empty_streak"] >= EMPTY_CANDIDATE_STREAK)):
+            # 扫描证据优先：本轮快照显示是空课就直接列出来（不必等累计 2 轮）。
+            # empty_streak 设为至少 1，界面显示「连续 N 轮」时不会出现 0。
+            entry["empty_streak"] = max(entry["empty_streak"], 1)
             entry["reason"] = "no-homework-yet"
             entry["advisory"] = True
             entry["detail"] = (f"能正常进入课程页，但连续 {entry['empty_streak']} 轮扫描都是 0 条作业"

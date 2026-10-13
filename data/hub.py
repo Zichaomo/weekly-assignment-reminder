@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 统一控制台后端：给 PowerShell 图形界面（console.ps1）提供数据（列表）与动作（发布）。
 
@@ -203,11 +203,16 @@ def run_refresh_courses():
             pass
     if not index:
         return {"ok": False, "error": "课程总表解析为空（平台结构可能变了）"}
+    # 保留已有的每课元数据（最近作业时间 / 失败次数 / 空课轮数）。
+    # 曾经这里整体覆盖，导致点一次「刷新课程表」就把黑名单候选的证据清空，
+    # 界面上候选与「暂无作业」全部变 0（用户实测遇到）。
+    old_meta = scrape.load_index_meta()
     scrape.COURSES_FILE.write_text(
         json.dumps({
             "refreshed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "source": scrape.ALL_COURSES_URL,
             "courses": index,
+            "meta": old_meta,
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

@@ -44,3 +44,5 @@ data/scrape.lock
 .acl-recovery/
 # 每课元数据的自动备份（本地状态）
 data/courses.meta.bak.json
+# 扫描证据快照（本地状态，候选推导用）
+data/courses.scan.json
