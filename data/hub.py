@@ -238,15 +238,17 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
                 prefetched_age_sec: float = None):
     try:
         if prefetched:
-            # 复用刚才「检索北化在线」的结果：不再重复全量扫描（省 2 分钟）
+            # 复用最近一次抓取的结果：不再重复全量扫描（省 1-2 分钟）
             data = prefetched
             data_source = "cache"
+            _reuse_payload = None
         else:
             if pool:
                 data = weekly.fetch(["--sweep"] if sweep else None)
             else:
                 data = weekly.fetch(["--deadline-only"])
             data_source = "fresh"
+            _reuse_payload = data      # 交给上层写缓存，让随后的发布/预览能复用
         platform_hw = list(data.get("homeworks", []))
         for t in (data.get("tests") or []):          # 在线测试同一套规则
             t.setdefault("kind", "test")
@@ -265,6 +267,10 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
             "count": len(picked), "channel": channel or "默认",
         }
         out.update(_data_source_fields(data_source, prefetched_age_sec))
+        # 带上本次抓取的原始数据（若为复用则为 None），供 server 写缓存
+        out["_payload"] = _reuse_payload
+        out["data_fetched_at"] = (
+            time.strftime("%Y-%m-%d %H:%M:%S") if _reuse_payload else None)
         return out
 
     cfg = notify.load_config()
@@ -297,6 +303,9 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         "count": len(picked), "channel": ch,
     }
     out.update(_data_source_fields(data_source, prefetched_age_sec))
+    out["_payload"] = _reuse_payload
+    out["data_fetched_at"] = (
+        time.strftime("%Y-%m-%d %H:%M:%S") if _reuse_payload else None)
     return out
 
 

@@ -46,6 +46,7 @@ PAGE_FILE = ROOT / "console.html"
 # Playwright 会话不能并发（共享 storage_state / 课程上下文），长任务串行执行
 EXEC = ThreadPoolExecutor(max_workers=1)
 TASKS = {}          # id -> {status, op, started, finished, result, error}
+_CACHE_SIDE = {}    # id -> 该任务的原始抓取数据（内部用，不出网）
 TASKS_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------- 字体
@@ -180,6 +181,84 @@ def cache_get(need_days):
 
 
 # ---------------------------------------------------------------- 长任务
+def sanitize_result(obj):
+    """剥掉内部字段（下划线开头的键）与不可 JSON 序列化的值。
+
+    背景：_payload 里含 datetime 对象，直接返回给 HTTP 会让 json.dumps 抛
+    TypeError，连接被关闭，前端轮询永远失败。内部字段一律不出网。
+    """
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and k.startswith("_"):
+                continue
+            out[k] = sanitize_result(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_result(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    # datetime / date / set 等：转成字符串，保证可序列化
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def _cache_from_result(res, cache_days):
+    """统一写缓存：fetch / preview / publish 三条路径共用。
+
+    缓存天数由各路径给出：
+      · fetch（检索）    -> 用户选的窗口天数
+      · preview/publish  -> 9999（它们内部是 --deadline-only 全量抓取，
+                             覆盖任意窗口，否则用户改天数就会重抓）
+
+    注意：健康检查必须基于 **payload 本身**，不能依赖调用方返回值的字段。
+    run_list 返回 platform_count / sweep / warnings，而 run_publish 不返回 ——
+    曾经因此把 preview/publish 的结果一律判成「平台 0 条」而拒绝缓存，
+    导致「预览后点发布」永远重新抓取。
+    """
+    payload = res.get("_payload") if isinstance(res, dict) else None
+    if payload:
+        # 用 payload 的真实数据构造一份等价视图供守卫判断
+        view = {
+            "ok": True,
+            "platform_count": len(payload.get("homeworks") or []) + len(payload.get("tests") or []),
+            "sweep": payload.get("sweep") or {},
+            "warnings": payload.get("warnings") or {},
+        }
+    else:
+        view = res
+    reason = cache_reject_reason(view)
+    if payload and not reason:
+        cache_put(payload, cache_days)
+        res["cached_for_reuse"] = True
+        res["cache_days"] = cache_days
+    else:
+        if not payload:
+            # 本次是"复用"而非新抓，不清掉已有缓存
+            res["cached_for_reuse"] = False
+            res["cache_reject_reason"] = reason or "本次未抓取（复用了缓存）"
+            return
+        _FETCH_CACHE.update(payload=None, at=0.0, days=0)
+        res["cached_for_reuse"] = False
+        res["cache_reject_reason"] = reason or "没有可复用的数据"
+
+
+# 供自检：查看当前缓存状态
+def cache_state():
+    p, at, days = _FETCH_CACHE["payload"], _FETCH_CACHE["at"], _FETCH_CACHE["days"]
+    return {
+        "has_payload": bool(p),
+        "age_sec": (round(time.time() - at, 1) if at else None),
+        "cache_days": days,
+        "ttl": CACHE_TTL,
+        "homeworks": (len(p.get("homeworks", [])) if p else 0),
+        "tests": (len(p.get("tests", [])) if p else 0),
+    }
+
+
 def run_task(op, params):
     """长任务统一入口，全部走 hub.py 既有函数，串行执行。"""
     if op == "fetch":
@@ -189,22 +268,19 @@ def run_task(op, params):
         # 只有「真的抓到数据」才允许复用。
         # 教训（2026-10-13 实测）：一次全量扫描失败（0 条 + 18 门课全失败）曾被缓存，
         # 之后点「预览」会飞速复用它 —— 把一次失败伪装成成功，比慢更糟。
-        payload = res.get("_payload") if isinstance(res, dict) else None
-        reason = cache_reject_reason(res)
-        if payload and not reason:
-            cache_put(payload, days)
-            res["cached_for_reuse"] = True
-        else:
-            _FETCH_CACHE.update(payload=None, at=0.0, days=0)
-            res["cached_for_reuse"] = False
-            res["cache_reject_reason"] = reason or "没有可复用的数据"
+        _cache_from_result(res, days)
         return res
 
     if op in ("preview", "publish"):
         days = int(params.get("days", 7))
         payload, age = cache_get(days)
-        return hub.run_publish(days, op == "preview", None,
-                               prefetched=payload, prefetched_age_sec=age)
+        res = hub.run_publish(days, op == "preview", None,
+                              prefetched=payload, prefetched_age_sec=age)
+        # 关键修复：预览/发布自己抓的数据也要入缓存，
+        # 否则「预览 -> 5 分钟内发布」会再抓一遍。
+        # 天数传 9999：run_publish 内部是全量抓取，可覆盖任意窗口。
+        _cache_from_result(res, 9999)
+        return res
     if op == "content":
         return hub.run_content(str(params.get("hwtid", "")))
     if op == "refresh-courses":
@@ -219,6 +295,10 @@ def _task_worker(task_id, op, params):
         error = None
     except Exception as e:  # noqa: BLE001
         result, status, error = None, "error", f"{type(e).__name__}: {e}"
+    # 把内部抓取数据留在服务端（供缓存用），不随 result 出网
+    if isinstance(result, dict) and "_payload" in result:
+        _CACHE_SIDE[task_id] = result.get("_payload")
+        result = {k: v for k, v in result.items() if k != "_payload"}
     with TASKS_LOCK:
         TASKS[task_id].update(status=status, result=result, error=error,
                               finished=time.time())
@@ -275,7 +355,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 响应辅助
     def _send(self, code, body, mime="application/json; charset=utf-8", raw=None):
-        data = raw if raw is not None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        if raw is not None:
+            data = raw
+        else:
+            try:
+                data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            except (TypeError, ValueError) as e:
+                # 兜底：绝不因为序列化失败而让连接悬空（否则前端会一直轮询不到结果）
+                code = 500
+                data = json.dumps({"ok": False, "error": f"响应序列化失败：{e}",
+                                   "detail": sanitize_result(body)},
+                                  ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
@@ -292,8 +382,27 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return {}
 
+    # ---- 异常日志（定位"连接被关闭"这类问题）
+    LOG_FILE = ROOT / "server_error.log"
+
+    def _log_exc(self, where):
+        import traceback
+        try:
+            with open(self.LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {where} "
+                        f"{self.path} =====\n")
+                traceback.print_exc(file=f)
+        except OSError:
+            pass
+
     # ---- GET
     def do_GET(self):
+        try:
+            return self._do_GET()
+        except Exception:  # noqa: BLE001
+            self._log_exc("GET")
+
+    def _do_GET(self):
         u = urlparse(self.path)
         path, q = u.path, parse_qs(u.query)
 
@@ -310,6 +419,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"ok": False, "error": "font not found"})
             mime = FONT_MIME.get(fp.suffix.lower(), "application/octet-stream")
             return self._send(200, None, mime, raw=fp.read_bytes())
+
+        if path == "/api/cache":
+            return self._send(200, {"ok": True, **cache_state()})
 
         if path == "/api/config":
             return self._send(200, {"ok": True, "channel": load_channel(),
@@ -332,12 +444,21 @@ class Handler(BaseHTTPRequestHandler):
                 t = TASKS.get(task_id)
             if not t:
                 return self._send(404, {"ok": False, "error": "任务不存在"})
-            return self._send(200, {"ok": True, **t})
+            # 内部字段（_payload 等）必须剥掉：它含 datetime，直接序列化会抛错断连
+            return self._send(200, {"ok": True,
+                                    **{k: v for k, v in t.items() if k != "result"},
+                                    "result": sanitize_result(t.get("result"))})
 
         return self._send(404, {"ok": False, "error": "not found"})
 
     # ---- POST
     def do_POST(self):
+        try:
+            return self._do_POST()
+        except Exception:  # noqa: BLE001
+            self._log_exc("POST")
+
+    def _do_POST(self):
         u = urlparse(self.path)
         p = self._body()
 

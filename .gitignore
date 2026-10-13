@@ -46,3 +46,6 @@ data/scrape.lock
 data/courses.meta.bak.json
 # 扫描证据快照（本地状态，候选推导用）
 data/courses.scan.json
+
+# 服务端异常日志（排查用）
+data/server_error.log
