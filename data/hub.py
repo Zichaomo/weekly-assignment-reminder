@@ -129,7 +129,7 @@ def build_rows(platform_hw: list, manual_items: list, days: int) -> list:
 
 
 def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = False,
-             pool: bool = False):
+             pool: bool = False, no_tests: bool = False):
     platform_hw = []
     error = None
     warnings = {}
@@ -139,6 +139,8 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
     if fetch:
         try:
             extra = []
+            if no_tests:
+                extra.append("--no-tests")
             if with_content:
                 extra.append("--with-content")
             if pool:
@@ -173,8 +175,12 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
         "elapsed_human": (f"{elapsed / 60:.1f} 分钟" if elapsed and elapsed >= 60
                           else (f"{elapsed:.0f} 秒" if elapsed else None)),
         "timing": timing,
+        # 返回原始抓取结果，供 server.py 缓存后给「预览/提前发布」复用，避免重复抓取。
+        # 只在本次真的抓了（fetch 且成功）时带出；它是内部字段，前端可忽略。
+        "_payload": data if fetch and error is None else None,
+        "data_fetched_at": time.strftime("%Y-%m-%d %H:%M:%S") if fetch and error is None else None,
     }
-    print(json.dumps(out, ensure_ascii=False))
+    return out
 
 
 def run_refresh_courses():
@@ -208,13 +214,34 @@ def run_refresh_courses():
     return {"ok": True, "count": len(index), "file": str(scrape.COURSES_FILE)}
 
 
+def _data_source_fields(source: str, age_sec):
+    """给返回值标注「这次用的数据是刚抓的还是复用的」。"""
+    if source == "cache":
+        age = float(age_sec or 0)
+        human = f"{age / 60:.1f} 分钟" if age >= 60 else f"{age:.0f} 秒"
+        return {
+            "data_source": "cache",
+            "data_age_sec": round(age, 1),
+            "data_note": f"复用了 {human}前的检索结果，未重复抓取",
+        }
+    return {"data_source": "fresh", "data_age_sec": 0.0,
+            "data_note": "本次重新抓取了平台数据"}
+
+
 def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
-                pool: bool = False):
+                pool: bool = False, prefetched: dict = None,
+                prefetched_age_sec: float = None):
     try:
-        if pool:
-            data = weekly.fetch(["--sweep"] if sweep else None)
+        if prefetched:
+            # 复用刚才「检索北化在线」的结果：不再重复全量扫描（省 2 分钟）
+            data = prefetched
+            data_source = "cache"
         else:
-            data = weekly.fetch(["--deadline-only"])
+            if pool:
+                data = weekly.fetch(["--sweep"] if sweep else None)
+            else:
+                data = weekly.fetch(["--deadline-only"])
+            data_source = "fresh"
         platform_hw = list(data.get("homeworks", []))
         for t in (data.get("tests") or []):          # 在线测试同一套规则
             t.setdefault("kind", "test")
@@ -228,10 +255,12 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     (ROOT / "last_message.txt").write_text(msg, encoding="utf-8")
 
     if no_send:
-        return {
+        out = {
             "ok": True, "sent": False, "message": msg,
             "count": len(picked), "channel": channel or "默认",
         }
+        out.update(_data_source_fields(data_source, prefetched_age_sec))
+        return out
 
     cfg = notify.load_config()
     ch = (channel or cfg.get("channel", "clipboard")).lower()
@@ -258,10 +287,12 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         return {"ok": False, "error": f"推送异常：{e}", "message": msg}
     notify.log_push("hub", ch, msg, sent,
                     note="" if sent else "send-failed", target=target)
-    return {
+    out = {
         "ok": sent, "sent": sent, "message": msg,
         "count": len(picked), "channel": ch,
     }
+    out.update(_data_source_fields(data_source, prefetched_age_sec))
+    return out
 
 
 def run_blacklist_list():
@@ -408,6 +439,8 @@ def main():
                         help="旧行为：只用首页「待提交作业」视图（快，但会漏掉我已交、同学还没交的课）")
     p_list.add_argument("--sweep", action="store_true",
                         help="配合 --pool 使用：在全量里再算一遍首页漏报的课")
+    p_list.add_argument("--no-tests", action="store_true",
+                        help="不抓在线测试（省一半时间）；透传给 scrape.py，旧 console.ps1 就在传这个参数")
 
     p_pub = sub.add_parser("publish", help="抓取+合并+排版+(推送)")
     p_pub.add_argument("--days", type=int, default=7)
@@ -436,7 +469,7 @@ def main():
     args = ap.parse_args()
     if args.cmd == "list":
         run_list(9999 if args.all else args.days, args.fetch, args.with_content,
-                 args.sweep, args.pool)
+                 args.sweep, args.pool, no_tests=args.no_tests)
     elif args.cmd == "publish":
         print(json.dumps(
             run_publish(args.days, args.no_send, args.channel, args.sweep, args.pool),

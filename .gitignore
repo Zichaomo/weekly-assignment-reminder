@@ -36,3 +36,9 @@ data/course_blacklist.json
 data/test_blacklist.json
 # 推送台账：含消息首行的本地记录
 data/push_log.jsonl
+# 抓取互斥锁（运行时文件）
+data/scrape.lock
+
+# ── 本机权限修复产物（沙箱/ACL 诊断的备份与报告）────────
+# 含本机 SID、绝对路径与逐文件清单，只对这台机器有意义
+.acl-recovery/

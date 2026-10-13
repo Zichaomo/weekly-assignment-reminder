@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>作业提醒控制台</title>
+<style>
+@font-face{font-family:'Lanxi-鱼尾行书';src:url('/fonts/yuwei.woff2') format('woff2');font-display:swap}
+@font-face{font-family:'Lanxi-普惠体';src:url('/fonts/puhui-regular.ttf');font-display:swap}
+@font-face{font-family:'Lanxi-普惠体中黑';src:url('/fonts/puhui-medium.ttf');font-display:swap}
+@font-face{font-family:'Lanxi-普惠体粗';src:url('/fonts/puhui-bold.ttf');font-display:swap}
+:root{
+  --paper:#F0F0EE; --card:#F9F8F5; --ink:#1F1E1C; --line:#DBDAD3;
+  --gray:#55524A; --faint:#6B675C; --accent:#F5572F; --red:#B03A2E; --green:#3E7D5A;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font-family:'Lanxi-普惠体','Microsoft YaHei',sans-serif;font-size:13.5px;line-height:1.6;padding:24px 32px 40px}
+b,strong{font-family:'Lanxi-普惠体中黑';font-weight:600}
+/* ---------- 报头 ---------- */
+.masthead{display:flex;align-items:flex-end;justify-content:space-between;border-bottom:3px double var(--ink);padding-bottom:12px}
+.masthead h1{font-family:'Lanxi-鱼尾行书',serif;font-size:38px;font-weight:400;letter-spacing:.08em;line-height:1.1}
+.masthead .kicker{font-size:10.5px;letter-spacing:.32em;color:var(--faint);text-transform:uppercase;margin-bottom:4px}
+.masthead .meta{text-align:right;font-size:11px;color:var(--gray);line-height:1.9}
+.masthead .meta b{color:var(--ink)}
+/* ---------- 栏目骨架 ---------- */
+.sec{margin-top:24px}
+.sec-label{font-size:10.5px;letter-spacing:.22em;color:var(--gray);border-left:4px solid var(--ink);padding-left:8px;margin-bottom:12px;font-family:'Lanxi-普惠体粗'}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
+/* ---------- 操作栏 ---------- */
+.ops{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.btn{font-family:'Lanxi-普惠体中黑';font-size:13.5px;border:1px solid var(--ink);background:var(--card);color:var(--ink);border-radius:6px;padding:8px 16px;cursor:pointer}
+.btn:hover{background:var(--ink);color:var(--paper)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn:disabled:hover{background:var(--card);color:var(--ink)}
+.btn.accent{background:var(--accent);border-color:var(--accent);color:var(--ink)}
+.btn.accent:hover{background:#e0441f;border-color:#e0441f;color:var(--ink)}
+.btn.ghost{border-color:var(--line);color:var(--gray)}
+.btn.ghost:hover{border-color:var(--ink);color:var(--paper)}
+.btn.small{padding:4px 12px;font-size:12.5px;border-radius:5px}
+.ops .sep{width:1px;height:24px;background:var(--line)}
+.ops label.chk{font-size:12.5px;color:var(--gray);display:flex;align-items:center;gap:8px;cursor:pointer;position:relative;padding-left:24px;min-height:24px}
+.ops label.chk input[type=checkbox]{position:absolute;opacity:0;width:0;height:0}
+.ops label.chk::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:14px;height:14px;border:1.5px solid var(--gray);border-radius:4px;background:#fff}
+.ops label.chk:has(input:checked)::before{background:var(--ink);border-color:var(--ink);box-shadow:inset 0 0 0 2.5px #fff}
+.ops input[type=number]{width:52px;padding:4px 8px;border:1px solid var(--line);border-radius:5px;background:#fff;font-family:inherit;font-size:13.5px;text-align:center}
+.ops .spacer{flex:1}
+/* ---------- 任务进度条 ---------- */
+.taskbar{display:none;margin-top:16px;background:var(--ink);color:#EDEBE5;border-radius:8px;padding:12px 16px;font-size:12.5px;align-items:center;gap:12px}
+.taskbar.on{display:flex}
+.spin{width:13px;height:13px;border:2px solid #6E6A60;border-top-color:var(--accent);border-radius:50%;animation:rot .8s linear infinite;flex:none}
+@keyframes rot{to{transform:rotate(360deg)}}
+.taskbar .elapsed{margin-left:auto;color:#9B968A;font-variant-numeric:tabular-nums}
+/* ---------- 手动添加 ---------- */
+.addgrid{display:grid;grid-template-columns:150px 1fr 130px 1fr auto;gap:12px;align-items:end}
+.field label{display:block;font-size:11px;color:var(--faint);letter-spacing:.08em;margin-bottom:4px}
+.field input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:inherit;font-size:13.5px}
+.field input:focus{outline:none;border-color:var(--ink)}
+.addnote{font-size:11px;color:var(--faint);margin-top:8px;max-width:640px}
+/* ---------- 列表 ---------- */
+.stats{display:flex;gap:20px;font-size:12.5px;color:var(--gray);margin-bottom:8px;font-variant-numeric:tabular-nums}
+.stats b{color:var(--ink)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th{font-size:10.5px;letter-spacing:.14em;color:var(--gray);text-align:left;padding:8px 12px;border-bottom:2px solid var(--ink);background:#F3F2EE;font-family:'Lanxi-普惠体粗';white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr.overdue td{color:var(--red)}
+td.deadline,td.left{font-variant-numeric:tabular-nums;white-space:nowrap}
+td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{display:inline-block;font-size:10.5px;border:1px dashed var(--faint);border-radius:4px;padding:0 4px;color:var(--gray);margin-right:4px;line-height:1.7}
+.badge.test{border-style:solid;border-color:var(--ink);color:var(--ink)}
+.st{font-size:12.5px;white-space:nowrap}
+.st-pub{color:var(--ink);font-family:'Lanxi-普惠体中黑'}
+.st-todo{color:var(--faint)}
+.st-over{color:var(--red);font-family:'Lanxi-普惠体中黑'}
+.rowact{display:flex;gap:8px;white-space:nowrap}
+.link{background:none;border:none;color:var(--gray);font-size:12.5px;cursor:pointer;padding:4px;font-family:inherit;text-decoration:underline;text-underline-offset:3px}
+.link:hover{color:var(--accent)}
+.empty{padding:34px;text-align:center;color:var(--faint);font-size:12.5px}
+/* ---------- 预览 / 日志 ---------- */
+.tabs{display:flex;gap:0;border-bottom:2px solid var(--ink)}
+.tab{font-size:12.5px;letter-spacing:.14em;padding:8px 20px;cursor:pointer;color:var(--faint);border:1px solid transparent;border-bottom:none;font-family:'Lanxi-普惠体中黑'}
+.tab.on{color:var(--ink);border-color:var(--ink);background:var(--card);border-radius:6px 6px 0 0}
+.pane{display:none;background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px;padding:16px;height:210px;overflow:auto;white-space:pre-wrap;font-family:Consolas,'Lanxi-普惠体',monospace;font-size:12.5px;line-height:1.7}
+.pane.on{display:block}
+/* ---------- 弹窗 ---------- */
+.mask{position:fixed;inset:0;background:rgba(31,30,28,.45);display:none;align-items:center;justify-content:center;z-index:50}
+.mask.on{display:flex}
+.modal{background:var(--paper);border:1px solid var(--ink);border-radius:10px;width:min(880px,92vw);max-height:86vh;display:flex;flex-direction:column}
+.modal header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:3px double var(--ink)}
+.modal header h3{font-family:'Lanxi-鱼尾行书',serif;font-size:22px;font-weight:400;letter-spacing:.06em}
+.modal .body{padding:16px 20px;overflow:auto;flex:1}
+.modal footer{display:flex;gap:10px;justify-content:flex-end;padding:12px 20px;border-top:1px solid var(--line)}
+.blgrid{display:grid;grid-template-columns:1fr 300px;gap:14px}
+.bllist{border:1px solid var(--line);border-radius:8px;background:var(--card);max-height:46vh;overflow:auto}
+.blitem{display:flex;gap:8px;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:12.5px}
+.blitem:last-child{border-bottom:none}
+.blitem:hover{background:#F3F2EE}
+.blitem.sel{background:#EDEAE2}
+.blitem .tagc{flex:none;font-size:10.5px;border-left:4px solid var(--gray);padding-left:6px;color:var(--gray);font-family:'Lanxi-普惠体粗'}
+.blitem.cand .tagc{border-color:var(--accent);color:var(--ink)}
+.bldetail{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:12px 14px;font-size:12.5px;white-space:pre-wrap;line-height:1.8;max-height:46vh;overflow:auto}
+.blinfo{font-size:12px;color:var(--gray);margin-bottom:10px;line-height:1.7}
+.editgrid{display:grid;grid-template-columns:1fr;gap:12px}
+/* ---------- 页脚 ---------- */
+.foot{margin-top:24px;text-align:center;font-size:10.5px;letter-spacing:.18em;color:var(--faint)}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:#C9C5B9;border-radius:5px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div>
+    <div class="kicker">BUCT THEOL · WEEKLY WIRE</div>
+    <h1>每周作业提醒</h1>
+  </div>
+  <div class="meta">
+    <div id="today"></div>
+    <div>推送渠道 <b id="channel">…</b> · 本机服务 <b>127.0.0.1:8277</b></div>
+    <div>全量扫描 · 以截止日期为准 · 发全班</div>
+  </div>
+</header>
+
+<!-- 操作栏 -->
+<section class="sec">
+  <div class="sec-label">检 索 与 发 布</div>
+  <div class="panel ops">
+    <button class="btn accent" id="btnFetch">检索北化在线</button>
+    <button class="btn" id="btnPreview">预览</button>
+    <button class="btn" id="btnPublish">提前发布</button>
+    <span class="sep"></span>
+    <span style="font-size:12.5px;color:var(--gray)">未来</span>
+    <input type="number" id="numDays" min="1" max="30" value="7">
+    <span style="font-size:12.5px;color:var(--gray)">天</span>
+    <label class="chk"><input type="checkbox" id="chkAll">含全部平台作业</label>
+    <label class="chk"><input type="checkbox" id="chkTests" checked>抓在线测试</label>
+    <span class="spacer"></span>
+    <button class="btn ghost" id="btnCourses">刷新课程表</button>
+    <button class="btn ghost" id="btnBlCourse">课程黑名单</button>
+    <button class="btn ghost" id="btnBlTest">测试黑名单</button>
+  </div>
+  <div class="taskbar" id="taskbar">
+    <span class="spin"></span><span id="taskLabel">…</span><span class="elapsed" id="taskElapsed"></span>
+  </div>
+</section>
+
+<!-- 手动添加 -->
+<section class="sec">
+  <div class="sec-label">手 动 添 加（平 台 抓 不 到 的 作 业）</div>
+  <div class="panel">
+    <div class="addgrid">
+      <div class="field"><label>科目</label><input id="addC" placeholder="高等数学"></div>
+      <div class="field"><label>内容</label><input id="addT" placeholder="习题 3.1"></div>
+      <div class="field"><label>截止</label><input id="addD" placeholder="9.10 / 9-17 23:59"></div>
+      <div class="field"><label>备注（可留空）</label><input id="addN" placeholder="老师发在企业微信群"></div>
+      <button class="btn" id="btnAdd">添加</button>
+    </div>
+    <div class="addnote">截止写法：9.10 / 9-17 23:59 / 9月10日 / 2026-09-17 23:59（只给日期默认当天 23:59）· <a class="link" id="btnClean">清理过期条目</a></div>
+  </div>
+</section>
+
+<!-- 列表 -->
+<section class="sec">
+  <div class="sec-label">待 办 一 览</div>
+  <div class="stats" id="stats"><span>尚未检索 · 点「检索北化在线」全量扫描（约 1–2 分钟）</span></div>
+  <table>
+    <thead><tr>
+      <th style="width:64px">来源</th><th style="width:130px">科目</th><th>标题</th>
+      <th style="width:150px">截止</th><th style="width:120px">剩余</th>
+      <th style="width:70px">状态</th><th style="width:150px">操作</th>
+    </tr></thead>
+    <tbody id="tbody"><tr><td colspan="7" class="empty">暂无条目</td></tr></tbody>
+  </table>
+</section>
+
+<!-- 预览 / 日志 -->
+<section class="sec">
+  <div class="tabs">
+    <div class="tab on" data-tab="preview">推 送 预 览</div>
+    <div class="tab" data-tab="log">运 行 日 志</div>
+  </div>
+  <div class="pane on" id="pane-preview">（点「预览」生成推送文本；选中平台作业点「内容」在这里看正文）</div>
+  <div class="pane" id="pane-log"></div>
+</section>
+
+<div class="foot">全量扫描 · 不依赖首页待提交池 · 黑名单均需人工二次确认 · <a class="link" id="btnShutdown">停止控制台服务</a></div>
+
+<!-- 黑名单弹窗 -->
+<div class="mask" id="maskBl">
+  <div class="modal">
+    <header><h3 id="blTitle">课程黑名单</h3><button class="btn small ghost" id="blClose">关闭</button></header>
+    <div class="body">
+      <div class="blinfo" id="blInfo">…</div>
+      <div class="blgrid">
+        <div class="bllist" id="blList"></div>
+        <div class="bldetail" id="blDetail">点左侧条目看详情</div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn" id="blApply">加入勾选项（需确认）</button>
+      <button class="btn" id="blRemove">移出勾选项（恢复抓取）</button>
+      <button class="btn ghost" id="blReload">刷新列表</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 编辑弹窗 -->
+<div class="mask" id="maskEdit">
+  <div class="modal" style="width:min(460px,92vw)">
+    <header><h3>编辑作业</h3><button class="btn small ghost" id="editClose">关闭</button></header>
+    <div class="body editgrid">
+      <div class="field"><label>科目</label><input id="edC"></div>
+      <div class="field"><label>内容</label><input id="edT"></div>
+      <div class="field"><label>截止（留空清除）</label><input id="edD"></div>
+      <div class="field"><label>备注</label><input id="edN"></div>
+    </div>
+    <footer><button class="btn" id="editSave">保存</button></footer>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { platformRows: [], manualRows: [], blKind: 'course', blData: null, editId: null };
+
+/* ---------------- 基础 ---------------- */
+async function api(path, opts) {
+  const r = await fetch(path, opts ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(opts) } : undefined);
+  return r.json();
+}
+function log(line) {
+  const t = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+  const p = $('#pane-log');
+  p.textContent += (p.textContent ? '\n' : '') + `[${t}] ${line}`;
+  p.scrollTop = p.scrollHeight;
+}
+function showPreview(text) {
+  $('#pane-preview').textContent = text;
+  switchTab('preview');
+}
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  $('#pane-preview').classList.toggle('on', name === 'preview');
+  $('#pane-log').classList.toggle('on', name === 'log');
+}
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
+
+/* ---------------- 任务轮询 ---------------- */
+let polling = null;
+function runTask(op, params, label, onDone) {
+  api('/api/tasks', { op, ...params }).then(r => {
+    if (!r.ok) { log('任务创建失败：' + (r.error || '')); return; }
+    const id = r.task_id, t0 = Date.now();
+    $('#taskLabel').textContent = label;
+    $('#taskbar').classList.add('on');
+    setButtons(false);
+    clearInterval(polling);
+    polling = setInterval(async () => {
+      $('#taskElapsed').textContent = ((Date.now() - t0) / 1000).toFixed(0) + 's';
+      const t = await api('/api/tasks/' + id);
+      if (t.status === 'running') return;
+      clearInterval(polling);
+      $('#taskbar').classList.remove('on');
+      setButtons(true);
+      if (t.status === 'error') { log('任务异常：' + t.error); return; }
+      onDone(t.result || {});
+    }, 1000);
+  });
+}
+function setButtons(on) {
+  ['btnFetch','btnPreview','btnPublish','btnCourses'].forEach(i => $('#' + i).disabled = !on);
+}
+
+/* ---------------- 列表渲染 ---------------- */
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function render() {
+  const rows = [...state.platformRows, ...state.manualRows];
+  const tb = $('#tbody');
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无条目</td></tr>'; return; }
+  tb.innerHTML = rows.map((r, i) => {
+    const isP = r.source === '平台';
+    const over = (r.left === '已逾期');
+    const badges = (isP ? '' : '<span class="badge">手动</span>') + (r.kind === 'test' ? '<span class="badge test">在线测试</span>' : '');
+    const stCls = r.status === '待发布' ? 'st-pub' : (r.status === '逾期' ? 'st-over' : 'st-todo');
+    const acts = isP
+      ? `${r.hwtid ? `<a class="link" data-act="content" data-i="${i}">内容</a>` : ''}<a class="link" data-act="open" data-i="${i}">打开</a>`
+      : `<a class="link" data-act="edit" data-i="${i}">编辑</a><a class="link" data-act="done" data-i="${i}">完成</a><a class="link" data-act="rm" data-i="${i}">删除</a>`;
+    return `<tr class="${over ? 'overdue' : ''}">
+      <td>${esc(r.source)}</td><td>${esc(r.course)}</td>
+      <td class="title" title="${esc(r.title)}${r.note ? '｜' + esc(r.note) : ''}">${badges}${esc(r.title)}</td>
+      <td class="deadline">${esc(r.deadline)}</td><td class="left">${esc(r.left)}</td>
+      <td class="st ${stCls}">${esc(r.status)}</td><td class="rowact">${acts}</td></tr>`;
+  }).join('');
+  tb.querySelectorAll('a.link').forEach(a => a.onclick = () => rowAction(a.dataset.act, +a.dataset.i));
+}
+function rowByIndex(i) { return [...state.platformRows, ...state.manualRows][i]; }
+function rowAction(act, i) {
+  const r = rowByIndex(i);
+  if (!r) return;
+  if (act === 'content') viewContent(r);
+  else if (act === 'open') openRow(r);
+  else if (act === 'edit') openEdit(r);
+  else if (act === 'done') manualOp({ action: 'done', id: r.manual_id });
+  else if (act === 'rm') { if (confirm(`确定删除「${r.course}｜${r.title}」？`)) manualOp({ action: 'rm', id: r.manual_id }); }
+}
+
+/* ---------------- 数据动作 ---------------- */
+async function refreshManual() {
+  const all = $('#chkAll').checked;
+  const res = await api(`/api/list?days=${+$('#numDays').value}${all ? '&all=1' : ''}`);
+  if (res && res.rows) state.manualRows = res.rows.filter(x => x.source === '手动');
+  render();
+}
+async function manualOp(p) {
+  const res = await api('/api/manual', p);
+  log(res.output || res.error || '（无输出）');
+  if (!res.ok && res.error) alert(res.error);
+  refreshManual();
+}
+function viewContent(r) {
+  if (r._content) { showPreview(`===== 作业内容（hwtid=${r.hwtid}）=====\n${r._content}`); log('作业内容已显示（缓存）。'); return; }
+  log(`正在获取作业内容（hwtid=${r.hwtid}，约 10 秒）…`);
+  runTask('content', { hwtid: r.hwtid }, `获取作业内容 hwtid=${r.hwtid}`, res => {
+    if (!res.ok) { log('获取失败：' + (res.error || '')); alert(res.error || '获取失败'); return; }
+    const txt = res.content_text || '（该作业没有填写正文）';
+    r._content = txt;
+    showPreview(`===== 作业内容（hwtid=${r.hwtid}）=====\n${txt}\n\n网页：${res.url || ''}`);
+    log('作业内容已显示在预览页。');
+  });
+}
+function openRow(r) {
+  const url = r.result_url || r.submit_url || r.content_url;
+  if (!url) { alert('该作业没有可打开的链接。'); return; }
+  api('/api/open', { url });
+  log('已在浏览器打开：' + url);
+}
+
+/* ---------------- 顶部按钮 ---------------- */
+$('#btnFetch').onclick = () => {
+  const days = +$('#numDays').value, all = $('#chkAll').checked, tests = $('#chkTests').checked;
+  log(`正在检索北化在线（全量扫描，约 1–2 分钟${tests ? '' : '，不抓在线测试'}）…`);
+  runTask('fetch', { days, all, tests }, '全量扫描北化在线课程', res => {
+    if (res.error) { log(res.error); alert(res.error); return; }
+    state.platformRows = (res.rows || []).filter(x => x.source === '平台');
+    const scope = all ? '全部，含已过期' : `未来 ${days} 天`;
+    log(`已检索：平台作业 ${state.platformRows.length} 条（${scope}，按截止日期·全量）。`);
+    if (res.sweep && res.sweep.missed_from_pool && res.sweep.missed_from_pool.length)
+      log(`提示：首页视图漏掉 ${res.sweep.missed_from_pool.length} 门有作业的课（全量已兜住）。`);
+    if (res.warnings && res.warnings.failed_courses && res.warnings.failed_courses.length)
+      log('抓取失败课程：' + res.warnings.failed_courses.slice(0, 5).join('、'));
+    if (res.elapsed_human) {
+      const t = res.timing || {};
+      log(t.homework || t.test
+        ? `本次抓取用时 ${res.elapsed_human} —— 登录 ${t.login | 0}s / 作业 ${t.homework | 0}s / 在线测试 ${t.test | 0}s`
+        : `本次抓取用时 ${res.elapsed_human}`);
+    }
+    $('#stats').innerHTML = `<span>平台 <b>${state.platformRows.length}</b> 条</span><span>手动 <b>${state.manualRows.length}</b> 条</span><span>${res.elapsed_human ? '上次抓取 <b>' + res.elapsed_human + '</b>' : ''}</span>`;
+    render();
+  });
+};
+$('#btnPreview').onclick = () => doPublish(true);
+$('#btnPublish').onclick = () => { if (confirm('确认推送到当前渠道？（300 秒内相同内容会自动去重）')) doPublish(false); };
+function doPublish(noSend) {
+  const days = +$('#numDays').value;
+  log(`正在${noSend ? '生成预览' : '发布'}（未来 ${days} 天）…`);
+  runTask(noSend ? 'preview' : 'publish', { days }, noSend ? '生成推送预览' : '抓取并推送', res => {
+    if (res.error) { log(res.error); alert(res.error); return; }
+    if (res.message) showPreview(res.message);
+    if (res.elapsed_human) log(`本次抓取用时 ${res.elapsed_human}`);
+    // 数据来源：复用检索结果时不重新抓取（省 1-2 分钟）
+    if (res.data_source === 'cache') {
+      log(`ⓘ ${res.data_note}（点击「检索北化在线」可强制刷新数据）`);
+    } else if (res.data_source === 'fresh') {
+      log('本次重新抓取了平台数据（超过 5 分钟或缓存覆盖不足）。');
+    }
+    if (noSend) log(`已生成预览（未发送），共 ${res.count} 条。`);
+    else if (res.deduped) { log(res.note); alert(res.note); }
+    else if (res.ok) { log(`已发布(${res.channel})，共 ${res.count} 条。`); alert(`已通过 ${res.channel} 发布，共 ${res.count} 条。`); }
+    else { log('发布失败。'); alert('发布失败，详见日志。'); }
+    refreshManual();
+  });
+}
+$('#btnCourses').onclick = () => {
+  log('正在刷新课程表（约 10–20 秒）…');
+  runTask('refresh-courses', {}, '从「我的课程」拉取课程总表', res => {
+    if (res.error) { log('刷新课程表失败：' + res.error); alert(res.error); return; }
+    log(`课程表已刷新：共 ${res.count} 门。`);
+  });
+};
+
+/* ---------------- 手动添加 ---------------- */
+$('#btnAdd').onclick = () => {
+  const c = $('#addC').value.trim(), t = $('#addT').value.trim(), d = $('#addD').value.trim(), n = $('#addN').value.trim();
+  if (!c || !t || !d) { alert('科目、内容、截止时间 都要填。'); return; }
+  manualOp({ action: 'add', course: c, title: t, deadline: d, note: n });
+  $('#addC').value = $('#addT').value = $('#addD').value = $('#addN').value = '';
+};
+$('#btnClean').onclick = () => manualOp({ action: 'clean' });
+
+/* ---------------- 编辑弹窗 ---------------- */
+function openEdit(r) {
+  state.editId = r.manual_id;
+  $('#edC').value = r.course || ''; $('#edT').value = r.title || '';
+  $('#edD').value = r.deadline || ''; $('#edN').value = r.note || '';
+  $('#maskEdit').classList.add('on');
+}
+$('#editClose').onclick = () => $('#maskEdit').classList.remove('on');
+$('#editSave').onclick = () => {
+  const c = $('#edC').value.trim(), t = $('#edT').value.trim();
+  if (!c || !t) { alert('科目、内容 都要填。'); return; }
+  manualOp({ action: 'edit', id: state.editId, course: c, title: t, deadline: $('#edD').value.trim(), note: $('#edN').value.trim() });
+  $('#maskEdit').classList.remove('on');
+};
+
+/* ---------------- 黑名单弹窗 ---------------- */
+async function loadBlacklist() {
+  const res = await api('/api/blacklist?kind=' + state.blKind);
+  state.blData = res;
+  renderBlacklist();
+}
+function renderBlacklist() {
+  const res = state.blData, kind = state.blKind;
+  if (!res) return;
+  const list = $('#blList');
+  let items = [];
+  if (kind === 'course') {
+    const cands = res.candidates || [], cur = res.blacklist || [];
+    $('#blInfo').innerHTML = `学期起点 <b>${esc(res.semester_start || '?')}</b> · 课程 ${res.total_courses} 门 · 已拉黑 ${cur.length} 门 · 待确认候选 ${cands.length} 门<br>程序不会自动拉黑：勾选候选 →「加入勾选项」→ 再确认一次才生效。`;
+    items = [
+      ...cands.map(c => ({ key: String(c.lid), cand: true, tag: c.reason === 'stale' ? '陈旧' : '无入口', name: c.course,
+        detail: `课程：${c.course}\n编号：${c.lid}\n状态：待确认候选\n理由：${c.detail || ''}\n最近作业：${c.last_homework || '（从未抓到）'}\n扫描失败次数：${c.fail_streak ?? 0}` })),
+      ...cur.map(b => ({ key: String(b.lid), cand: false, tag: '已拉黑', name: b.name,
+        detail: `课程：${b.name}\n编号：${b.lid}\n状态：已拉黑（不抓取）\n理由：${b.reason || ''}\n说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` })),
+    ];
+  } else {
+    const cur = res.blacklist || [];
+    $('#blInfo').innerHTML = `已屏蔽在线测试的课 ${cur.length} 门 —— 这些课的<b>作业仍然照常抓取</b>。<br>加入方式：点「加入勾选项」后在弹窗里填课程编号（如 24206，多个用空格分隔）。`;
+    items = cur.map(b => ({ key: String(b.lid), cand: false, tag: '已屏蔽测试', name: b.name,
+      detail: `课程：${b.name}\n编号：${b.lid}\n状态：已屏蔽「在线测试」（作业照抓）\n说明：${b.note || ''}\n确认时间：${b.confirmed_at || ''}` }));
+  }
+  list.innerHTML = items.length ? items.map((it, i) =>
+    `<label class="blitem ${it.cand ? 'cand' : ''}" data-i="${i}"><input type="checkbox" data-key="${it.key}" data-cand="${it.cand}"><span class="tagc">${it.tag}</span><span>${esc(it.name)}</span><span style="color:var(--faint);margin-left:auto">${it.key}</span></label>`
+  ).join('') : '<div class="empty">（空）</div>';
+  state.blItems = items;
+  list.querySelectorAll('.blitem').forEach(el => el.onclick = e => {
+    if (e.target.tagName !== 'INPUT') { const cb = el.querySelector('input'); cb.checked = !cb.checked; }
+    list.querySelectorAll('.blitem').forEach(x => x.classList.remove('sel'));
+    el.classList.add('sel');
+    $('#blDetail').textContent = items[+el.dataset.i].detail;
+  });
+}
+function openBlacklist(kind) {
+  state.blKind = kind;
+  $('#blTitle').textContent = kind === 'course' ? '课程黑名单（整门课都不抓）' : '测试黑名单（只跳在线测试）';
+  $('#blDetail').textContent = '点左侧条目看详情';
+  $('#maskBl').classList.add('on');
+  loadBlacklist();
+}
+$('#btnBlCourse').onclick = () => openBlacklist('course');
+$('#btnBlTest').onclick = () => openBlacklist('test');
+$('#blClose').onclick = () => { $('#maskBl').classList.remove('on'); refreshManual(); };
+$('#blReload').onclick = loadBlacklist;
+function checkedKeys(cand) {
+  return [...document.querySelectorAll('#blList input:checked')].filter(c => (c.dataset.cand === 'true') === cand).map(c => c.dataset.key);
+}
+$('#blApply').onclick = async () => {
+  let lids;
+  if (state.blKind === 'course') {
+    lids = checkedKeys(true);
+    if (!lids.length) { alert('没有勾选任何「待确认候选」。\n已拉黑的条目不能重复加入；要恢复请勾选后点「移出勾选项」。'); return; }
+  } else {
+    const input = prompt('填要屏蔽在线测试的课程编号（多个用空格分隔）：');
+    if (!input) return;
+    lids = input.split(/\s+/).filter(Boolean);
+  }
+  if (!confirm(`确认把这些加入黑名单？\n\n${lids.join('、')}\n\n加入后不再抓取，可用「移出勾选项」恢复。`)) return;
+  const res = await api('/api/blacklist', { kind: state.blKind, action: 'apply', lids });
+  if (res.error) { alert(res.error); return; }
+  log(`已加入黑名单 ${lids.length} 门：${lids.join(', ')}`);
+  loadBlacklist();
+};
+$('#blRemove').onclick = async () => {
+  const lids = checkedKeys(false);
+  if (!lids.length) { alert('没有勾选任何「已拉黑 / 已屏蔽」条目。'); return; }
+  if (!confirm(`确认把 ${lids.length} 门移出黑名单（恢复抓取）？`)) return;
+  const res = await api('/api/blacklist', { kind: state.blKind, action: 'remove', lids });
+  if (res.error) { alert(res.error); return; }
+  log(`已移出黑名单 ${lids.length} 门：${lids.join(', ')}`);
+  loadBlacklist();
+};
+
+$('#btnShutdown').onclick = async () => {
+  if (!confirm('停止本机控制台服务？\n网页会保留在屏幕上但所有按钮都会失效；下次双击 console.bat 会重新启动。')) return;
+  await api('/api/shutdown').catch(() => {});
+  log('控制台服务已停止。本页可以关掉了。');
+  $('#taskLabel').textContent = '服务已停止';
+};
+
+/* ---------------- 启动 ---------------- */
+(async function init() {
+  $('#today').textContent = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+  const cfg = await api('/api/config');
+  $('#channel').textContent = cfg.channel || '未知';
+  log('控制台就绪（Web 版）。「检索北化在线」一律按【截止日期】全量扫描（约 1–2 分钟）。');
+  log('这份提醒是发给全班的：你交没交，不影响这门课该不该提醒全班。');
+  log('平台行：「内容」读题目要求 /「打开」进平台页面（已交=查看结果，未交=提交作业）。');
+  refreshManual();
+})();
+</script>
+</body>
+</html>

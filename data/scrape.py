@@ -28,6 +28,7 @@
 import argparse
 import html
 import json
+import os
 import re
 import sys
 import time
@@ -64,6 +65,68 @@ def need_browser():
         )
         return False
     return True
+
+# ---------------------------------------------------------------- 抓取互斥锁
+# 两个抓取进程并发会共用会话上下文并互相搞乱页面，导致「全部课程都抓不到」的假故障。
+# 实测（2026-10-13）：并发时 18 门课全报「课程页未出现课程作业入口」，耗时 22 分钟、结果 0 条。
+LOCK_FILE = None      # 在 STATE_FILE 定义之后赋值（见下）
+LOCK_STALE_SEC = 600  # 超过这个时间的锁视为陈旧（上次崩溃遗留），自动清理
+LOCK_WAIT_SEC = 120   # 拿不到锁时最多等这么久
+
+
+class FetchLock:
+    """极简文件锁：O_EXCL 创建，跨进程互斥。
+
+    with FetchLock():
+        ...抓取...
+    拿不到锁会等，超时则打印警告继续（宁可慢/乱，也不要让用户点了没反应）。
+    """
+
+    def __init__(self, path: Path, wait_sec: int = LOCK_WAIT_SEC):
+        self.path = Path(path)
+        self.wait_sec = wait_sec
+        self.acquired = False
+
+    def __enter__(self):
+        deadline = time.time() + self.wait_sec
+        warned = False
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                              .encode("utf-8"))
+                os.close(fd)
+                self.acquired = True
+                return self
+            except FileExistsError:
+                # 陈旧锁？清掉重试
+                try:
+                    age = time.time() - self.path.stat().st_mtime
+                    if age > LOCK_STALE_SEC:
+                        print(f"WARN: 发现陈旧抓取锁（{age:.0f} 秒前），已清理",
+                              file=sys.stderr)
+                        self.path.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    print("WARN: 已有另一个抓取在运行（定时任务或另一个窗口？），"
+                          "本次可能与其互相干扰，结果或许不准。", file=sys.stderr)
+                    return self
+                if not warned:
+                    warned = True
+                    print("注意：已有另一个抓取在运行，正在等它结束（最多 "
+                          f"{self.wait_sec} 秒）...", file=sys.stderr)
+                time.sleep(2)
+
+    def __exit__(self, *exc):
+        if self.acquired:
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+
 
 BASE = "https://course.buct.edu.cn"
 SSO_LOGIN = BASE + "/meol/homepage/common/sso_login.jsp"
@@ -995,6 +1058,12 @@ def main():
     if not need_browser():
         return 1
 
+    # 整个抓取过程持锁：避免与定时任务/另一个窗口并发搞乱会话
+    with FetchLock(STATE_FILE.with_name("scrape.lock")):
+        return _run_scan(args)
+
+
+def _run_scan(args):
     T_START = time.time()
     T = {"login": 0.0, "pool": 0.0, "homework": 0.0, "test": 0.0, "content": 0.0, "save": 0.0}
 
