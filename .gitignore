@@ -27,3 +27,12 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ── 本次新增的本地状态（账号相关，不进仓库）────────
+# 课程索引：含你账号下的课程编号与名称，各人不同；用「刷新课程表」自行生成
+data/courses.json
+# 黑名单：你的个人取舍，不该强加给 clone 的人
+data/course_blacklist.json
+data/test_blacklist.json
+# 推送台账：含消息首行的本地记录
+data/push_log.jsonl

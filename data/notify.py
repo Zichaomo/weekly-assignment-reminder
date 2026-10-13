@@ -16,9 +16,12 @@
 """
 import argparse
 import ctypes
+import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -42,9 +45,103 @@ DEFAULT_CONFIG = {
     "wecom_webhook": "",
     "wechat_target": "文件传输助手",
     "notify_title": "北化在线作业提醒",
+    # 去重窗口（秒）：窗口内若已成功推送过「完全相同」的内容，则跳过并标记 duplicate。
+    # 用于防止手滑连点两次「提前发布」造成重复打扰；设为 0 即关闭。
+    "dedup_window_sec": 300,
 }
 
+PUSH_LOG = ROOT / "push_log.jsonl"
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) buct-homework-bot/1.0"
+
+
+# ---------------------------------------------------------------- 推送台账 / 去重
+def _msg_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _tail_log(minutes: int = 30) -> list:
+    """读最近 N 分钟的推送台账（jsonl 每行一条）。"""
+    if not PUSH_LOG.exists():
+        return []
+    cutoff = time.time() - minutes * 60
+    out = []
+    try:
+        for line in PUSH_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if float(rec.get("ts", 0)) >= cutoff:
+                out.append(rec)
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
+def dedup_target(channel: str, cfg: dict) -> str:
+    """去重作用域：只有「同一个目标」上的重复才跳过。
+
+    否则会出现这种误伤：往测试群发过一次，班级群同内容就被判成重复而不发。
+    """
+    ch = (channel or "").lower()
+    if ch == "wecom":
+        return _msg_hash(str(cfg.get("wecom_webhook", "")))
+    if ch == "pushplus":
+        return _msg_hash(str(cfg.get("pushplus_token", "")))
+    if ch == "wechat":
+        return "wechat:" + str(cfg.get("wechat_target", ""))
+    return ch or "default"
+
+
+def log_push(source: str, channel: str, text: str, ok: bool,
+             note: str = "", target: str = "") -> None:
+    """往 push_log.jsonl 追一条记录。
+
+    目的：以后再出现「莫名多一条提醒」，能一眼看出是谁、什么时候、发到哪、发了什么。
+    """
+    rec = {
+        "ts": time.time(),
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source or "unknown",     # weekly / hub / notify-cli / test
+        "channel": channel,
+        "target": target or dedup_target(channel, {}),
+        "ok": bool(ok),
+        "note": note,
+        "msg_hash": _msg_hash(text),
+        "bytes": len(text.encode("utf-8")),
+        "items": text.count("\n• ") + (1 if text.lstrip().startswith("• ") else 0),
+        "first_line": text.splitlines()[0][:60] if text.strip() else "",
+        "pid": os.getpid(),
+    }
+    try:
+        with PUSH_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: 写推送台账失败 {e}", file=sys.stderr)
+
+
+def recent_duplicate(text: str, window_sec: int, target: str = ""):
+    """窗口内、同一目标上，是否有「内容完全相同且成功」的推送；有则返回那条记录。"""
+    if window_sec <= 0:
+        return None
+    h = _msg_hash(text)
+    cutoff = time.time() - window_sec
+    for rec in reversed(_tail_log(minutes=max(1, window_sec // 60 + 2))):
+        if rec.get("msg_hash") != h or not rec.get("ok"):
+            continue
+        if target and rec.get("target") and rec.get("target") != target:
+            continue                      # 发到别的群不算「已经发过」
+        if float(rec.get("ts", 0)) < cutoff:
+            continue
+        if str(rec.get("note", "")).startswith("duplicate"):
+            continue                      # 被去重跳过的记录不算「发过了」
+        return rec
+    return None
+
 
 
 def load_config() -> dict:
@@ -272,6 +369,10 @@ def main() -> int:
     ap.add_argument("--message", help="直接给文本")
     ap.add_argument("--channel", help="覆盖 config.json 的 channel")
     ap.add_argument("--self-test", action="store_true", help="检查渠道配置")
+    ap.add_argument("--source", default="notify-cli",
+                    help="标记谁在推（weekly / hub / notify-cli），写进推送台账")
+    ap.add_argument("--no-dedup", action="store_true",
+                    help="跳过去重检查，强制发送（确实需要重复发同一条时用）")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -288,8 +389,25 @@ def main() -> int:
         return 1
 
     channel = args.channel or cfg.get("channel", "clipboard")
+    target = dedup_target(channel, cfg)
+
+    # 去重：同一目标上、窗口内推过完全相同的内容就跳过（防止连点两次造成重复打扰）
+    if not args.no_dedup:
+        window = int(cfg.get("dedup_window_sec", 300) or 0)
+        dup = recent_duplicate(text, window, target)
+        if dup:
+            print(f"检测到 {window} 秒内已向同一目标推送过完全相同的内容"
+                  f"（{dup.get('time')} by {dup.get('source')}），本次跳过。", file=sys.stderr)
+            log_push(args.source, channel, text, True,
+                     note="duplicate-skipped", target=target)
+            print(f"推送渠道: {channel}（已去重跳过）")
+            return 0
+
     print(f"推送渠道: {channel}")
-    return 0 if dispatch(text, channel, cfg) else 1
+    ok = dispatch(text, channel, cfg)
+    log_push(args.source, channel, text, ok,
+             note="" if ok else "send-failed", target=target)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

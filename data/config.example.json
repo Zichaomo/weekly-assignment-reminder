@@ -9,8 +9,14 @@
   "_wecom": "企业微信群 -> 添加群机器人 -> 复制 Webhook 地址填这里；channel 改成 wecom",
   "wecom_webhook": "",
 
+  "_wecom_prod": "可选：把正式群（如班级群）的 webhook 也放这里，测试时用 wecom_webhook、发正式消息前再换过去",
+  "wecom_webhook_prod": "",
+
   "_wechat": "PC 微信 UI 自动化，微信 4.x 常失效，不推荐作为默认",
   "wechat_target": "文件传输助手",
 
-  "notify_title": "北化在线作业提醒"
+  "notify_title": "北化在线作业提醒",
+
+  "_dedup": "去重窗口（秒）：窗口内已向同一目标推过完全相同的内容则跳过，防止连点两次重复打扰。设 0 关闭",
+  "dedup_window_sec": 300
 }

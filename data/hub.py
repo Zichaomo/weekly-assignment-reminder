@@ -76,8 +76,10 @@ def build_rows(platform_hw: list, manual_items: list, days: int) -> list:
         dt = weekly.parse_deadline(hw.get("deadline", ""))
         if dt is None or not (now <= dt <= end):
             continue
+        kind = hw.get("kind") or "homework"
         rows.append({
             "source": "平台",
+            "kind": kind,
             "course": hw.get("course", ""),
             "title": hw.get("title", ""),
             "deadline": hw.get("deadline", ""),
@@ -86,6 +88,8 @@ def build_rows(platform_hw: list, manual_items: list, days: int) -> list:
             "status": "待发布",
             "manual_id": None,
             "hwtid": hw.get("hwtid"),
+            "test_id": hw.get("test_id"),
+            "submit_state": hw.get("submit_state"),
             "content_url": hw.get("content_url"),
             "submit_url": hw.get("submit_url"),
             "result_url": hw.get("result_url"),
@@ -124,13 +128,35 @@ def build_rows(platform_hw: list, manual_items: list, days: int) -> list:
     return rows
 
 
-def run_list(days: int, fetch: bool, with_content: bool = False):
+def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = False,
+             pool: bool = False):
     platform_hw = []
     error = None
+    warnings = {}
+    sweep_meta = None
+    elapsed = None
+    timing = {}
     if fetch:
         try:
-            data = weekly.fetch(["--with-content"] if with_content else None)
-            platform_hw = data.get("homeworks", [])
+            extra = []
+            if with_content:
+                extra.append("--with-content")
+            if pool:
+                # 旧行为：只用首页待提交池
+                if sweep:
+                    extra.append("--sweep")
+            else:
+                # 默认按截止日期取数（发给全班，不看提交状态），必须全量扫描
+                extra.append("--deadline-only")
+            data = weekly.fetch(extra or None)
+            platform_hw = list(data.get("homeworks", []))
+            for t in (data.get("tests") or []):      # 在线测试同一套规则
+                t.setdefault("kind", "test")
+                platform_hw.append(t)
+            warnings = data.get("warnings", {}) or {}
+            sweep_meta = data.get("sweep")
+            elapsed = data.get("_elapsed_sec")
+            timing = data.get("timing") or {}
         except Exception as e:  # noqa: BLE001
             error = f"北化在线抓取失败（会话可能过期，请运行 login.py）：{e}"
     manual_items = load_manual_raw()
@@ -141,14 +167,58 @@ def run_list(days: int, fetch: bool, with_content: bool = False):
         "rows": rows,
         "platform_count": len(platform_hw),
         "manual_count": len(manual_items),
+        "warnings": warnings,
+        "sweep": sweep_meta,
+        "elapsed_sec": elapsed,
+        "elapsed_human": (f"{elapsed / 60:.1f} 分钟" if elapsed and elapsed >= 60
+                          else (f"{elapsed:.0f} 秒" if elapsed else None)),
+        "timing": timing,
     }
     print(json.dumps(out, ensure_ascii=False))
 
 
-def run_publish(days: int, no_send: bool, channel: str):
+def run_refresh_courses():
+    """刷新本地课程索引（我的课程总表 -> courses.json）。"""
+    import scrape
+    with scrape.sync_playwright() as p:
+        ctx = scrape.make_context(p, headless=True)
+        page = ctx.pages[0] if getattr(ctx, "pages", None) else ctx.new_page()
+        page.goto(scrape.SSO_LOGIN, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(4)
+        if not scrape.logged_in(page, ctx):
+            return {"ok": False, "error": "未登录或会话已过期，请运行 login.py"}
+        try:
+            index = scrape.collect_all_courses(page)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"拉取课程总表失败：{e}"}
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if not index:
+        return {"ok": False, "error": "课程总表解析为空（平台结构可能变了）"}
+    scrape.COURSES_FILE.write_text(
+        json.dumps({
+            "refreshed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": scrape.ALL_COURSES_URL,
+            "courses": index,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {"ok": True, "count": len(index), "file": str(scrape.COURSES_FILE)}
+
+
+def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
+                pool: bool = False):
     try:
-        data = weekly.fetch()
-        platform_hw = data.get("homeworks", [])
+        if pool:
+            data = weekly.fetch(["--sweep"] if sweep else None)
+        else:
+            data = weekly.fetch(["--deadline-only"])
+        platform_hw = list(data.get("homeworks", []))
+        for t in (data.get("tests") or []):          # 在线测试同一套规则
+            t.setdefault("kind", "test")
+            platform_hw.append(t)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"抓取失败：{e}"}
 
@@ -165,14 +235,145 @@ def run_publish(days: int, no_send: bool, channel: str):
 
     cfg = notify.load_config()
     ch = (channel or cfg.get("channel", "clipboard")).lower()
+
+    # 去重：同一目标上、窗口内推过完全一样的内容就跳过
+    # （防止手滑连点两次「提前发布」重复打扰；按目标区分，测试群发过不影响班级群）
+    window = int(cfg.get("dedup_window_sec", 300) or 0)
+    target = notify.dedup_target(ch, cfg)
+    dup = notify.recent_duplicate(msg, window, target)
+    if dup:
+        note = (f"{window} 秒内已向同一目标推送过完全相同的内容"
+                f"（{dup.get('time')}，来源 {dup.get('source')}），本次已跳过，未重复发送。")
+        notify.log_push("hub", ch, msg, True, note="duplicate-skipped", target=target)
+        return {
+            "ok": True, "sent": False, "deduped": True, "note": note,
+            "message": msg, "count": len(picked), "channel": ch,
+        }
+
     try:
         sent = notify.dispatch(msg, ch, cfg)
     except Exception as e:  # noqa: BLE001
+        notify.log_push("hub", ch, msg, False,
+                        note=f"exception:{type(e).__name__}", target=target)
         return {"ok": False, "error": f"推送异常：{e}", "message": msg}
+    notify.log_push("hub", ch, msg, sent,
+                    note="" if sent else "send-failed", target=target)
     return {
         "ok": sent, "sent": sent, "message": msg,
         "count": len(picked), "channel": ch,
     }
+
+
+def run_blacklist_list():
+    """列出黑名单与建议候选（只读）。"""
+    import scrape
+    info = scrape.build_blacklist_candidates()
+    return {
+        "ok": True,
+        "semester_start": info["semester_start"],
+        "total_courses": info["total_courses"],
+        "candidates": info["candidates"],
+        "blacklist": [
+            {"lid": lid, "name": v.get("name"), "reason": v.get("reason"),
+             "detail": v.get("detail"), "confirmed_at": v.get("confirmed_at")}
+            for lid, v in (info["blacklist"] or {}).items()
+        ],
+    }
+
+
+def run_blacklist_apply(lids, reason="manual"):
+    """把指定课程写入黑名单（由人工在界面上确认后调用）。"""
+    import scrape
+    index = scrape.load_course_index()
+    data = scrape.load_blacklist()
+    added, unknown = [], []
+    for lid in lids:
+        lid = str(lid)
+        if lid not in index:
+            unknown.append(lid)
+            continue
+        if lid in data["courses"]:
+            continue
+        cand = next((c for c in scrape.build_blacklist_candidates()["candidates"]
+                     if c["lid"] == lid), None)
+        data["courses"][lid] = {
+            "name": index[lid],
+            "reason": (cand or {}).get("reason", reason),
+            "detail": (cand or {}).get("detail", "人工确认拉黑"),
+            "last_homework": (cand or {}).get("last_homework"),
+            "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "confirmed_by": "human",
+        }
+        added.append({"lid": lid, "name": index[lid]})
+    scrape.save_blacklist(data)
+    return {"ok": True, "added": added, "unknown": unknown,
+            "total": len(data["courses"])}
+
+
+def run_blacklist_remove(lids):
+    import scrape
+    data = scrape.load_blacklist()
+    removed = []
+    for lid in lids:
+        lid = str(lid)
+        if lid in data["courses"]:
+            removed.append({"lid": lid, "name": data["courses"][lid].get("name")})
+            data["courses"].pop(lid)
+    scrape.save_blacklist(data)
+    return {"ok": True, "removed": removed, "total": len(data["courses"])}
+
+
+# ---------------------------------------------------------------- 测试黑名单
+def run_test_blacklist_list():
+    """列出「只屏蔽在线测试」的课（作业照常抓）。"""
+    import scrape
+    index = scrape.load_course_index()
+    data = scrape.load_test_blacklist().get("courses", {})
+    return {
+        "ok": True,
+        "total": len(data),
+        "blacklist": [
+            {"lid": lid, "name": v.get("name", index.get(lid, "?")),
+             "note": v.get("note", ""), "confirmed_at": v.get("confirmed_at")}
+            for lid, v in data.items()
+        ],
+    }
+
+
+def run_test_blacklist_apply(lids):
+    import scrape
+    index = scrape.load_course_index()
+    data = scrape.load_test_blacklist()
+    added, unknown = [], []
+    for lid in lids:
+        lid = str(lid)
+        if lid not in index:
+            unknown.append(lid)
+            continue
+        if lid in data["courses"]:
+            continue
+        data["courses"][lid] = {
+            "name": index[lid],
+            "note": "只屏蔽在线测试，作业照常搜",
+            "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "confirmed_by": "human",
+        }
+        added.append({"lid": lid, "name": index[lid]})
+    scrape.save_test_blacklist(data)
+    return {"ok": True, "added": added, "unknown": unknown, "total": len(data["courses"])}
+
+
+def run_test_blacklist_remove(lids):
+    import scrape
+    data = scrape.load_test_blacklist()
+    removed = []
+    for lid in lids:
+        lid = str(lid)
+        if lid in data["courses"]:
+            removed.append({"lid": lid, "name": data["courses"][lid].get("name")})
+            data["courses"].pop(lid)
+    scrape.save_test_blacklist(data)
+    return {"ok": True, "removed": removed, "total": len(data["courses"])}
 
 
 def run_content(hwtid: str):
@@ -203,23 +404,58 @@ def main():
     p_list.add_argument("--fetch", action="store_true", help="同时抓取北化在线平台作业")
     p_list.add_argument("--with-content", action="store_true",
                         help="检索时连作业正文一起抓（每条多约 2-3 秒）")
+    p_list.add_argument("--pool", action="store_true",
+                        help="旧行为：只用首页「待提交作业」视图（快，但会漏掉我已交、同学还没交的课）")
+    p_list.add_argument("--sweep", action="store_true",
+                        help="配合 --pool 使用：在全量里再算一遍首页漏报的课")
 
     p_pub = sub.add_parser("publish", help="抓取+合并+排版+(推送)")
     p_pub.add_argument("--days", type=int, default=7)
     p_pub.add_argument("--no-send", action="store_true", help="只生成预览，不推送")
     p_pub.add_argument("--channel", help="覆盖 config.json 的 channel")
+    p_pub.add_argument("--pool", action="store_true", help="旧行为：只用首页待提交池")
+    p_pub.add_argument("--sweep", action="store_true", help="配合 --pool：额外做全量扫描")
+
+    p_ref = sub.add_parser("refresh-courses", help="刷新本地课程索引 courses.json")
+
+    p_bl = sub.add_parser("blacklist-list", help="列出课程黑名单与建议候选（只读）")
+    p_bla = sub.add_parser("blacklist-apply", help="把课程写入黑名单（人工确认后调用）")
+    p_bla.add_argument("--lids", nargs="+", required=True)
+    p_blr = sub.add_parser("blacklist-remove", help="把课程移出黑名单")
+    p_blr.add_argument("--lids", nargs="+", required=True)
+
+    sub.add_parser("test-blacklist-list", help="列出「只屏蔽在线测试」的课（作业照抓）")
+    p_tbl = sub.add_parser("test-blacklist-apply", help="把课程加入测试黑名单（人工确认后调用）")
+    p_tbl.add_argument("--lids", nargs="+", required=True)
+    p_tblr = sub.add_parser("test-blacklist-remove", help="把课程移出测试黑名单")
+    p_tblr.add_argument("--lids", nargs="+", required=True)
 
     p_ct = sub.add_parser("content", help="抓取某条平台作业的详情正文")
     p_ct.add_argument("--hwtid", required=True, help="作业 id（列表里 platform 行的 hwtid）")
 
     args = ap.parse_args()
     if args.cmd == "list":
-        run_list(9999 if args.all else args.days, args.fetch, args.with_content)
+        run_list(9999 if args.all else args.days, args.fetch, args.with_content,
+                 args.sweep, args.pool)
     elif args.cmd == "publish":
         print(json.dumps(
-            run_publish(args.days, args.no_send, args.channel),
+            run_publish(args.days, args.no_send, args.channel, args.sweep, args.pool),
             ensure_ascii=False,
         ))
+    elif args.cmd == "refresh-courses":
+        print(json.dumps(run_refresh_courses(), ensure_ascii=False))
+    elif args.cmd == "blacklist-list":
+        print(json.dumps(run_blacklist_list(), ensure_ascii=False))
+    elif args.cmd == "blacklist-apply":
+        print(json.dumps(run_blacklist_apply(args.lids), ensure_ascii=False))
+    elif args.cmd == "blacklist-remove":
+        print(json.dumps(run_blacklist_remove(args.lids), ensure_ascii=False))
+    elif args.cmd == "test-blacklist-list":
+        print(json.dumps(run_test_blacklist_list(), ensure_ascii=False))
+    elif args.cmd == "test-blacklist-apply":
+        print(json.dumps(run_test_blacklist_apply(args.lids), ensure_ascii=False))
+    elif args.cmd == "test-blacklist-remove":
+        print(json.dumps(run_test_blacklist_remove(args.lids), ensure_ascii=False))
     elif args.cmd == "content":
         print(json.dumps(run_content(args.hwtid), ensure_ascii=False))
 

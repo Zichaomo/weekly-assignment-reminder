@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,8 +33,10 @@ def fetch(extra_args: list = None) -> dict:
     """调用 scrape.py 抓取，返回结构化 dict。
 
     extra_args: 追加给 scrape.py 的命令行参数，例如 ["--with-content"] 表示连作业正文一起抓。
+    抓取耗时写进返回值的 _elapsed_sec，方便上层显示「本次抓取用时」。
     """
     cmd = [PY, str(ROOT / "scrape.py")] + list(extra_args or [])
+    t0 = time.time()
     out = subprocess.run(
         cmd,
         capture_output=True,
@@ -43,11 +46,14 @@ def fetch(extra_args: list = None) -> dict:
         env=UTF8_ENV,
         cwd=str(ROOT),
     )
+    elapsed = time.time() - t0
     if out.returncode != 0:
-        raise RuntimeError(f"抓取失败:\n{out.stdout}\n{out.stderr}")
+        raise RuntimeError(f"抓取失败（耗时 {elapsed:.0f} 秒）:\n{out.stdout}\n{out.stderr}")
     if not out.stdout:
-        raise RuntimeError(f"抓取无输出:\n{out.stderr}")
-    return json.loads(out.stdout)
+        raise RuntimeError(f"抓取无输出（耗时 {elapsed:.0f} 秒）:\n{out.stderr}")
+    data = json.loads(out.stdout)
+    data["_elapsed_sec"] = round(elapsed, 1)
+    return data
 
 
 def load_manual() -> list:
@@ -112,10 +118,14 @@ def parse_deadline(s: str):
 
 
 def merge_and_filter(data: dict, manual: list, days: int):
-    """合并平台抓取与手动录入，标出截止时间，返回时间窗口内的条目。"""
+    """合并平台抓取（作业 + 在线测试）与手动录入，返回截止时间窗口内的条目。"""
     all_hw = list(data.get("homeworks", []))
+    for t in data.get("tests", []) or []:      # 在线测试与作业同一套截止规则
+        t.setdefault("kind", "test")
+        all_hw.append(t)
     for m in manual:
         m.setdefault("source", "manual")
+        m.setdefault("kind", "manual")
         all_hw.append(m)
 
     now = datetime.now()
@@ -158,7 +168,12 @@ def format_message(items: list, days: int) -> str:
             h = delta.seconds // 3600
             left = f"（还剩 {d} 天 {h} 小时）" if d >= 0 else "（已逾期）"
         src = it.get("source") or "platform"
-        mark = " 📌手动" if src == "manual" else ""
+        kind = it.get("kind") or ("manual" if src == "manual" else "homework")
+        mark = ""
+        if src == "manual":
+            mark = " 📌手动"
+        elif kind == "test":
+            mark = " 📝在线测试"
         lines.append(f"• {it.get('course', '未命名课程')}{mark}")
         lines.append(f"   {it.get('title', '作业')}")
         lines.append(f"   ⏰ 截止 {dl} {left}".rstrip())
@@ -217,9 +232,16 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=7, help="统计未来 N 天（默认 7）")
     ap.add_argument("--no-send", action="store_true", help="不推送，只打印")
     ap.add_argument("--channel", help="覆盖 config.json 的推送渠道")
+    ap.add_argument("--pool", action="store_true",
+                    help="旧行为：只用首页「待提交作业」视图的课程（快，但谁交了哪门课，"
+                         "全班就收不到那门课的提醒）。默认关闭")
     args = ap.parse_args()
 
-    print("抓取中...")
+    # 默认按「截止日期」取作业（全量扫描所有课程，不看是否已提交）——
+    # 这份提醒是发给全班同学的，谁交没交不该决定某门课要不要提醒。
+    extra = [] if args.pool else ["--deadline-only"]
+
+    print("抓取中..." + ("（全量扫描所有课程，约 3-6 分钟）" if not args.pool else ""))
     if not ensure_login():
         alert = ("⚠️ 北化在线作业提醒：平台登录态已失效，且自动登录未成功"
                  "（可能平台要求验证码，或 Edge 里存的密码已过期）。"
@@ -232,9 +254,21 @@ def main() -> int:
             print("告警发送异常:", e, file=sys.stderr)
         return 1
 
-    data = fetch()
+    data = fetch(extra or None)
+    elapsed = data.get("_elapsed_sec")
     platform = data.get("homeworks", [])
-    print(f"平台抓到 {len(platform)} 条作业记录")
+    tests_n = len(data.get("tests", []) or [])
+    print(f"平台抓到 {len(platform)} 条作业记录"
+          + (f" + {tests_n} 条在线测试" if tests_n else "")
+          + ("（按截止日期，含我已提交的）" if not args.pool else "（首页待提交池）"))
+    if elapsed is not None:
+        mins = elapsed / 60
+        print(f"⏱ 本次抓取用时 {mins:.1f} 分钟（{elapsed:.0f} 秒）"
+              f"（其中含在线测试扫描）")
+    warn = data.get("warnings") or {}
+    if warn.get("failed_courses"):
+        print(f"⚠️ {len(warn['failed_courses'])} 门课抓取失败，覆盖不完整："
+              f"{', '.join(warn['failed_courses'][:5])}", file=sys.stderr)
 
     manual = load_manual()
     if manual:
@@ -256,7 +290,7 @@ def main() -> int:
         print("演练模式：未发送。")
         return 0
 
-    cmd = [PY, str(ROOT / "notify.py"), "--file", str(msg_file)]
+    cmd = [PY, str(ROOT / "notify.py"), "--file", str(msg_file), "--source", "weekly"]
     if args.channel:
         cmd += ["--channel", args.channel]
     r = subprocess.run(

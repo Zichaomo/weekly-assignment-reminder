@@ -144,20 +144,27 @@ def _logged_in_via_state() -> bool:
 
     必须与 scrape.py 同路径（launch + new_context(storage_state=...)），
     不能查持久 profile —— 那是另一份登录态，会误报 NEED_LOGIN。
+
+    ⚠️ 这里绝不能写 `page.goto(HOME_URL)`（/meol）做二次判定：
+    那个地址是**未登录首页**，一旦被重定向过去，就算会话完全有效也会被判成 NEED_LOGIN
+    ——每周日的定时任务会因此误报「登录态失效」并发出告警。只认 SSO 入口 + 平台内页特征。
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, channel="msedge", args=["--no-sandbox"])
         ctx = browser.new_context(storage_state=str(STATE_FILE))
         page = ctx.new_page()
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(3500)
         ok = is_logged_in(page)
         if not ok:
-            # storage_state 里没带 TGC 时，判定只能靠平台内页文本
+            # 兜底：SSO 入口若停在门户壳上，直接看平台内页的个人信息字样
             try:
-                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(2500)
-                txt = page.inner_text("body", timeout=5000) or ""
+                txt = ""
+                for fr in page.frames:
+                    try:
+                        txt += (fr.inner_text("body", timeout=2500) or "")
+                    except Exception:  # noqa: BLE001
+                        pass
                 ok = ("在线总时长" in txt) or ("登录时间" in txt)
             except Exception:  # noqa: BLE001
                 pass
