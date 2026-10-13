@@ -98,6 +98,9 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
 .blitem.sel{background:#EDEAE2}
 .blitem .tagc{flex:none;font-size:10.5px;border-left:4px solid var(--gray);padding-left:6px;color:var(--gray);font-family:'Lanxi-普惠体粗'}
 .blitem.cand .tagc{border-color:var(--accent);color:var(--ink)}
+/* 仅供参考的条目（空课）压暗，避免和建议拉黑的条目抢焦点 */
+.blitem.muted .tagc{background:#E6E3DA;color:var(--faint)}
+.blitem.muted>span:nth-child(3){color:var(--gray)}
 .bldetail{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:12px 14px;font-size:12.5px;white-space:pre-wrap;line-height:1.8;max-height:46vh;overflow:auto}
 .blinfo{font-size:12px;color:var(--gray);margin-bottom:10px;line-height:1.7}
 .editgrid{display:grid;grid-template-columns:1fr;gap:12px}
@@ -425,10 +428,20 @@ function renderBlacklist() {
   let items = [];
   if (kind === 'course') {
     const cands = res.candidates || [], cur = res.blacklist || [];
-    $('#blInfo').innerHTML = `学期起点 <b>${esc(res.semester_start || '?')}</b> · 课程 ${res.total_courses} 门 · 已拉黑 ${cur.length} 门 · 待确认候选 ${cands.length} 门<br>程序不会自动拉黑：勾选候选 →「加入勾选项」→ 再确认一次才生效。`;
+    const suggested = cands.filter(c => !c.advisory), emptyOnes = cands.filter(c => c.advisory);
+    $('#blInfo').innerHTML = `学期起点 <b>${esc(res.semester_start || '?')}</b> · 课程 ${res.total_courses} 门 · 已拉黑 ${cur.length} 门<br>`
+      + `程序不会自动拉黑：勾选候选 →「加入勾选项」→ 再确认一次才生效。<br>`
+      + `本页候选 <b>${suggested.length}</b> 门建议拉黑（陈旧 / 无入口）；另有 <b>${emptyOnes.length}</b> 门「暂无作业」的课，仅供你参考。`;
+    const tagOf = c => c.reason === 'stale' ? '陈旧' : (c.reason === 'no-homework-entry' ? '无入口' : '暂无作业');
     items = [
-      ...cands.map(c => ({ key: String(c.lid), cand: true, tag: c.reason === 'stale' ? '陈旧' : '无入口', name: c.course,
-        detail: `课程：${c.course}\n编号：${c.lid}\n状态：待确认候选\n理由：${c.detail || ''}\n最近作业：${c.last_homework || '（从未抓到）'}\n扫描失败次数：${c.fail_streak ?? 0}` })),
+      ...cands.map(c => ({ key: String(c.lid), cand: true, advisory: !!c.advisory, tag: tagOf(c), name: c.course,
+        detail: `课程：${c.course}\n编号：${c.lid}\n`
+          + `状态：${c.advisory ? '仅供参考（程序不建议拉黑）' : '待确认候选（建议拉黑）'}\n`
+          + `理由：${c.detail || ''}\n`
+          + `最近作业：${c.last_homework || '（从未抓到）'}\n`
+          + `扫描失败次数：${c.fail_streak ?? 0}\n`
+          + `连续空课轮数：${c.empty_streak ?? 0}`
+          + (c.advisory ? '\n\n⚠ 若这门课本学期还有课（有些课只在期末布置一次作业），请勿拉黑。' : '') })),
       ...cur.map(b => ({ key: String(b.lid), cand: false, tag: '已拉黑', name: b.name,
         detail: `课程：${b.name}\n编号：${b.lid}\n状态：已拉黑（不抓取）\n理由：${b.reason || ''}\n说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` })),
     ];
@@ -439,7 +452,7 @@ function renderBlacklist() {
       detail: `课程：${b.name}\n编号：${b.lid}\n状态：已屏蔽「在线测试」（作业照抓）\n说明：${b.note || ''}\n确认时间：${b.confirmed_at || ''}` }));
   }
   list.innerHTML = items.length ? items.map((it, i) =>
-    `<label class="blitem ${it.cand ? 'cand' : ''}" data-i="${i}"><input type="checkbox" data-key="${it.key}" data-cand="${it.cand}"><span class="tagc">${it.tag}</span><span>${esc(it.name)}</span><span style="color:var(--faint);margin-left:auto">${it.key}</span></label>`
+    `<label class="blitem ${it.cand ? 'cand' : ''}${it.advisory ? ' muted' : ''}" data-i="${i}"><input type="checkbox" data-key="${it.key}" data-cand="${it.cand}"><span class="tagc">${it.tag}</span><span>${esc(it.name)}</span><span style="color:var(--faint);margin-left:auto">${it.key}</span></label>`
   ).join('') : '<div class="empty">（空）</div>';
   state.blItems = items;
   list.querySelectorAll('.blitem').forEach(el => el.onclick = e => {

@@ -146,40 +146,66 @@ def merge_and_filter(data: dict, manual: list, days: int):
 
 
 def format_message(items: list, days: int) -> str:
+    """推送文案（B 方案：紧迫感分级）。
+
+    - 头部一行：覆盖窗口，不带「生成时间」（对同学是噪音）
+    - 按「近两天 / 本周稍后」分组，组为空则整组消失
+    - 倒计时精度：今天/明天直接说「今天/明天 HH:mm 截止」；
+      2 天内带小时，超过 2 天只报天数（没有「0 小时」「5 天 10 小时」这类精度表演）
+    """
     now = datetime.now()
     end = now + timedelta(days=days)
-    lines = [
-        f"📚 作业提醒（{now:%Y-%m-%d} 生成）",
-        f"覆盖未来 {days} 天，至 {end:%m-%d}",
-        "",
-    ]
+    lines = [f"📚 作业提醒 · 未来 {days} 天（至 {end:%m-%d}）", ""]
     if not items:
         lines.append("✅ 这段时间没有待交作业，安心休息。")
         return "\n".join(lines)
 
-    items = sorted(items, key=lambda x: (x.get("_deadline_dt") or datetime.max))
-    for it in items:
-        dl = it.get("deadline") or "未标注"
-        left = ""
-        dt = it.get("_deadline_dt")
-        if dt:
-            delta = dt - now
-            d = delta.days
-            h = delta.seconds // 3600
-            left = f"（还剩 {d} 天 {h} 小时）" if d >= 0 else "（已逾期）"
+    def mark_of(it) -> str:
         src = it.get("source") or "platform"
         kind = it.get("kind") or ("manual" if src == "manual" else "homework")
-        mark = ""
         if src == "manual":
-            mark = " 📌手动"
-        elif kind == "test":
-            mark = " 📝在线测试"
-        lines.append(f"• {it.get('course', '未命名课程')}{mark}")
-        lines.append(f"   {it.get('title', '作业')}")
-        lines.append(f"   ⏰ 截止 {dl} {left}".rstrip())
+            return " 📌手动"
+        return " 📝在线测试" if kind == "test" else ""
+
+    def deadline_line(it) -> str:
+        dt = it.get("_deadline_dt")
+        if not dt:
+            return f"   ⏰ 截止 {it.get('deadline') or '未标注'}"
+        delta = dt - now
+        if delta.total_seconds() < 0:
+            return f"   ⏰ {dt:%m-%d %H:%M} 截止（已逾期）"
+        if dt.date() == now.date():
+            return f"   ⏰ 今天 {dt:%H:%M} 截止"
+        if dt.date() == (now + timedelta(days=1)).date():
+            return f"   ⏰ 明天 {dt:%H:%M} 截止"
+        d, h = delta.days, delta.seconds // 3600
+        left = f"还剩 {d} 天" if (d > 2 or h == 0) else f"还剩 {d} 天 {h} 小时"
+        return f"   ⏰ {dt:%m-%d %H:%M} 截止（{left}）"
+
+    def block(it) -> list:
+        blk = [f"• {it.get('course', '未命名课程')}{mark_of(it)}｜{it.get('title', '作业')}",
+               deadline_line(it)]
         if it.get("note"):
-            lines.append(f"   备注：{it['note']}")
+            blk.append(f"   备注：{it['note']}")
+        return blk
+
+    picked = sorted(items, key=lambda x: (x.get("_deadline_dt") or datetime.max))
+    near, later = [], []
+    for it in picked:
+        dt = it.get("_deadline_dt")
+        (near if (dt is not None and (dt - now).days <= 2) else later).append(it)
+
+    if near:
+        lines.append("⚠️ 近两天截止")
+        for it in near:
+            lines.extend(block(it))
         lines.append("")
+    if later:
+        lines.append("🗓 本周稍后")
+        for it in later:
+            lines.extend(block(it))
+        lines.append("")
+    lines.append(f"—— 共 {len(picked)} 项，详情以「北化在线」为准")
     return "\n".join(lines).rstrip()
 
 
@@ -241,7 +267,7 @@ def main() -> int:
     # 这份提醒是发给全班同学的，谁交没交不该决定某门课要不要提醒。
     extra = [] if args.pool else ["--deadline-only"]
 
-    print("抓取中..." + ("（全量扫描所有课程，约 3-6 分钟）" if not args.pool else ""))
+    print("抓取中..." + ("（全量扫描所有课程，约 1-3 分钟）" if not args.pool else ""))
     if not ensure_login():
         alert = ("⚠️ 北化在线作业提醒：平台登录态已失效，且自动登录未成功"
                  "（可能平台要求验证码，或 Edge 里存的密码已过期）。"

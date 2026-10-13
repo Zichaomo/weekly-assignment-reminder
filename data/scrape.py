@@ -374,6 +374,7 @@ BLACKLIST_FILE = ROOT / "course_blacklist.json"
 TEST_BLACKLIST_FILE = ROOT / "test_blacklist.json"
 SEMESTER_MONTH = 8      # 学期边界：8/1 起算本学期；2/1 起算上学期
 STALE_FAIL_STREAK = 2   # 连续 N 次扫描都没能进「课程作业」才建议拉黑（避免一次网络抖动就误杀）
+EMPTY_CANDIDATE_STREAK = 2   # 连续 N 轮扫描都是 0 条作业 -> 列入候选（仅供用户参考）
 
 
 def load_test_blacklist() -> dict:
@@ -477,6 +478,13 @@ def update_index_meta(per_course: list, now=None) -> dict:
             latest = max(rows)
             if not m.get("last_homework") or latest > m["last_homework"]:
                 m["last_homework"] = latest
+        # 记录「连续多少轮扫描都是 0 条作业」（能进课程页但确实没作业）
+        # 用于把「空课」也列进黑名单候选，交给用户判断 —— 不自动降频，
+        # 因为有些课本学期就期末布置一次作业。
+        if not pc.get("error") and pc.get("total", 0) == 0:
+            m["empty_streak"] = int(m.get("empty_streak", 0)) + 1
+        elif not pc.get("error"):
+            m["empty_streak"] = 0
         m["last_scan"] = now.strftime("%Y-%m-%d %H:%M")
         m["last_error"] = pc.get("error")
         meta[lid] = m
@@ -496,18 +504,33 @@ def update_index_meta(per_course: list, now=None) -> dict:
                 lh_dt = None
         stale = lh_dt is not None and lh_dt < sem_start
         never = lh_dt is None and int(m.get("fail_streak", 0)) >= STALE_FAIL_STREAK
-        if stale or never:
+        empty = (lh_dt is None
+                 and int(m.get("empty_streak", 0)) >= EMPTY_CANDIDATE_STREAK)
+        if stale or never or empty:
+            if stale:
+                reason, advisory = "stale", False
+                detail = f"最近一次作业 {lh}（早于本学期 {sem_start:%Y-%m-%d}）"
+            elif never:
+                reason, advisory = "no-homework-entry", False
+                detail = f"连续 {m.get('fail_streak')} 次扫描都没能进入「课程作业」"
+            else:
+                reason, advisory = "no-homework-yet", True
+                detail = (f"能正常进入课程页，但连续 {m.get('empty_streak')} 轮扫描都是 0 条作业"
+                          f"（可能本学期还没布置，也可能已结课）"
+                          f"；若这门课本学期还有课，请勿拉黑")
             candidates.append({
                 "lid": lid,
                 "course": m.get("course", "?"),
-                "reason": "stale" if stale else "no-homework-entry",
-                "detail": (f"最近一次作业 {lh}（早于本学期 {sem_start:%Y-%m-%d}）"
-                           if stale else
-                           f"连续 {m.get('fail_streak')} 次扫描都没能进入「课程作业」"),
+                "reason": reason,
+                "advisory": advisory,      # True = 仅供你参考，程序不建议拉黑
+                "detail": detail,
                 "last_homework": lh,
                 "fail_streak": m.get("fail_streak", 0),
+                "empty_streak": int(m.get("empty_streak", 0)),
                 "scanned": lid in seen_lids,
             })
+    # 建议拉黑的（advisory=False）排前面，仅供参考的空课排后面，界面读起来更清楚
+    candidates.sort(key=lambda c: (bool(c.get("advisory")), c.get("last_homework") or ""))
     save_index_meta(meta)
     return {"meta": meta, "candidates": candidates, "semester_start": sem_start.strftime("%Y-%m-%d")}
 
@@ -811,9 +834,14 @@ def get_hw_content(ctx, hwtid: str, debug: bool = False) -> dict:
 def build_blacklist_candidates(now=None) -> dict:
     """只读地算出当前的建议拉黑候选（不改任何文件）。
 
-    规则（两选一即候选）：
-      stale            —— 该课最近一次作业截止时间早于本学期起点（8/1 或 2/1）
-      no-homework-entry—— 连续 >=2 次扫描都没能进入「课程作业」，且从未见过作业
+    规则（三选一即候选）：
+      stale             —— 该课最近一次作业截止时间早于本学期起点（8/1 或 2/1）→ 建议拉黑
+      no-homework-entry —— 连续 >=2 次扫描都没能进入「课程作业」，且从未见过作业 → 建议拉黑
+      no-homework-yet   —— 能正常进入、但连续 >=2 轮都是 0 条作业 → 仅供参考（advisory）
+                            有些课本学期就期末布置一次作业，是否拉黑由用户决定
+
+    ⚠️ 这里的三条规则必须与 update_index_meta() 里的保持一致 ——
+       那个在扫描时算、这个在 CLI/界面读取时算，两处不一致就会出现「种了数据却看不到」。
     """
     now = now or datetime.now()
     sem_start = _semester_start(now)
@@ -836,20 +864,30 @@ def build_blacklist_candidates(now=None) -> dict:
             "blacklisted": lid in bl,
             "last_homework": lh,
             "fail_streak": int(m.get("fail_streak", 0)),
+            "empty_streak": int(m.get("empty_streak", 0)),
             "last_error": m.get("last_error"),
         }
         if lid in bl:
             continue
         if lh_dt is not None and lh_dt < sem_start:
             entry["reason"] = "stale"
+            entry["advisory"] = False
             entry["detail"] = f"最近一次作业 {lh}，早于本学期 {sem_start:%Y-%m-%d}"
             candidates.append(entry)
         elif lh_dt is None and entry["fail_streak"] >= STALE_FAIL_STREAK:
             entry["reason"] = "no-homework-entry"
+            entry["advisory"] = False
             entry["detail"] = f"连续 {entry['fail_streak']} 次扫描都没进入「课程作业」"
+            candidates.append(entry)
+        elif lh_dt is None and entry["empty_streak"] >= EMPTY_CANDIDATE_STREAK:
+            entry["reason"] = "no-homework-yet"
+            entry["advisory"] = True
+            entry["detail"] = (f"能正常进入课程页，但连续 {entry['empty_streak']} 轮扫描都是 0 条作业"
+                               f"（可能本学期还没布置，也可能已结课）；若这门课本学期还有课，请勿拉黑")
             candidates.append(entry)
         else:
             kept.append(entry)
+    candidates.sort(key=lambda c: (bool(c.get("advisory")), c.get("last_homework") or ""))
     return {
         "semester_start": sem_start.strftime("%Y-%m-%d"),
         "candidates": candidates,
@@ -929,13 +967,26 @@ def _blacklist_cli(args) -> int:
 
     if args.blacklist_list:
         bl = info["blacklist"]
+        cands = info["candidates"]
+        suggested = [c for c in cands if not c.get("advisory")]
+        advisory = [c for c in cands if c.get("advisory")]
         print(f"学期起点 = {info['semester_start']} | 课程总数 = {info['total_courses']} "
-              f"| 已拉黑 = {len(bl)} | 待确认候选 = {len(info['candidates'])}")
+              f"| 已拉黑 = {len(bl)} | 建议拉黑 {len(suggested)} 门 "
+              f"| 仅供参考（暂无作业）{len(advisory)} 门")
         print()
-        print("【建议拉黑候选】确认后才会生效：")
-        for c in info["candidates"]:
-            tag = "陈旧" if c["reason"] == "stale" else "无作业入口"
+        print("【建议拉黑】确认后才会生效（往学期的课 / 进不去作业栏目）：")
+        for c in suggested:
+            tag = "陈旧" if c["reason"] == "stale" else "无入口"
             print(f"  [{c['lid']}] {c['course']:32s} {tag:8s} {c['detail']}")
+        if not suggested:
+            print("  （无）")
+        print()
+        print("【仅供参考 · 暂无作业】能正常进课程页但连续多轮 0 条 —— 是否拉黑由你决定：")
+        print("  提醒：有些课本学期就期末布置一次作业，拉黑后会漏掉它。")
+        for c in advisory:
+            print(f"  [{c['lid']}] {c['course']:32s} 连续 {c['empty_streak']} 轮 0 条")
+        if not advisory:
+            print("  （无）")
         print()
         print("【已拉黑】扫描时跳过：")
         for lid, v in bl.items():
@@ -950,6 +1001,11 @@ def _blacklist_cli(args) -> int:
         data = load_blacklist()
         targets = []
         if "all-candidates" in args.blacklist_confirm:
+            # 只确认「建议拉黑」那类。绝不把「仅供参考·暂无作业」的课一起拉黑 ——
+            # 那些可能只是本学期还没布置作业（有的课就期末布置一次），拉黑会漏课。
+            targets = [c["lid"] for c in info["candidates"] if not c.get("advisory")]
+        elif "all-including-advisory" in args.blacklist_confirm:
+            # 明确要求时才连参考类一起确认
             targets = [c["lid"] for c in info["candidates"]]
         else:
             targets = [t for t in args.blacklist_confirm]
@@ -1019,7 +1075,9 @@ def main():
     ap.add_argument("--blacklist-list", action="store_true",
                     help="列出课程黑名单与「建议拉黑」候选（只读，不改动）")
     ap.add_argument("--blacklist-confirm", nargs="+", metavar="LID",
-                    help="人工确认把指定课程加入黑名单（可多个 lid，或用 all-candidates）")
+                    help="人工确认把指定课程加入黑名单（可多个 lid）。"
+                         "all-candidates = 只确认「建议拉黑」那类；"
+                         "all-including-advisory = 连「仅供参考·暂无作业」的也一起确认")
     ap.add_argument("--blacklist-remove", nargs="+", metavar="LID",
                     help="把指定课程移出黑名单（可多个 lid，或用 all）")
     ap.add_argument("--test-blacklist-list", action="store_true",
