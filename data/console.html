@@ -139,7 +139,7 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     <label class="chk"><input type="checkbox" id="chkAll">含全部平台作业</label>
     <label class="chk"><input type="checkbox" id="chkTests" checked>抓在线测试</label>
     <span class="spacer"></span>
-    <button class="btn ghost" id="btnCourses">刷新课程表</button>
+    <!-- 「刷新课程表」已移到课程黑名单对话框内（方案 C）：那里才有上下文 -->
     <button class="btn ghost" id="btnBlCourse">课程黑名单</button>
     <button class="btn ghost" id="btnBlTest">测试黑名单</button>
   </div>
@@ -203,7 +203,7 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     <footer>
       <button class="btn" id="blApply">加入勾选项（需确认）</button>
       <button class="btn" id="blRemove">移出勾选项（恢复抓取）</button>
-      <button class="btn ghost" id="blReload">刷新列表</button>
+      <button class="btn ghost" id="blReload">刷新课程表</button>
     </footer>
   </div>
 </div>
@@ -271,7 +271,11 @@ function runTask(op, params, label, onDone) {
   });
 }
 function setButtons(on) {
-  ['btnFetch','btnPreview','btnPublish','btnCourses'].forEach(i => $('#' + i).disabled = !on);
+  // btnCourses 已移除（刷新课程表移到黑名单对话框内），这里用存在性判断避免报错
+  ['btnFetch','btnPreview','btnPublish','blReload'].forEach(i => {
+    const el = $('#' + i);
+    if (el) el.disabled = !on;
+  });
 }
 
 /* ---------------- 列表渲染 ---------------- */
@@ -383,13 +387,6 @@ function doPublish(noSend) {
     refreshManual();
   });
 }
-$('#btnCourses').onclick = () => {
-  log('正在刷新课程表（约 10–20 秒）…');
-  runTask('refresh-courses', {}, '从「我的课程」拉取课程总表', res => {
-    if (res.error) { log('刷新课程表失败：' + res.error); alert(res.error); return; }
-    log(`课程表已刷新：共 ${res.count} 门。`);
-  });
-};
 
 /* ---------------- 手动添加 ---------------- */
 $('#btnAdd').onclick = () => {
@@ -490,7 +487,32 @@ function openBlacklist(kind) {
 $('#btnBlCourse').onclick = () => openBlacklist('course');
 $('#btnBlTest').onclick = () => openBlacklist('test');
 $('#blClose').onclick = () => { $('#maskBl').classList.remove('on'); refreshManual(); };
-$('#blReload').onclick = loadBlacklist;
+$('#blReload').onclick = () => {
+  // 方案 C：这里真正去平台重扫课程总表（约 10-20 秒），完成后重读候选。
+  // 注意：只重读本地数据是"秒回"的，用户会以为按钮没反应 —— 所以必须真扫。
+  const btn = $('#blReload');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const label0 = btn.textContent;
+  btn.textContent = '刷新中…';
+  log('正在刷新课程表（从「我的课程」拉取课程总表，约 10–20 秒）…');
+  runTask('refresh-courses', {}, '从「我的课程」拉取课程总表', async res => {
+    if (res.error) {
+      log('刷新课程表失败：' + res.error);
+      alert(res.error);
+    } else {
+      log(`课程表已刷新：共 ${res.count} 门。`);
+    }
+    btn.textContent = label0;
+    btn.disabled = false;
+    // 重读候选与黑名单，让对话框立刻反映最新状态
+    await loadBlacklist();
+    if (!res.error) {
+      $('#blInfo').insertAdjacentHTML('beforeend',
+        `<br><span style="color:var(--green)">✓ 课程表已刷新（共 ${res.count} 门），候选已重新读取。</span>`);
+    }
+  });
+};
 function checkedKeys(cand) {
   return [...document.querySelectorAll('#blList input:checked')].filter(c => (c.dataset.cand === 'true') === cand).map(c => c.dataset.key);
 }
