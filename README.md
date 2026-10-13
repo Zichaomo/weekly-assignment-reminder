@@ -1,69 +1,165 @@
 # 每周作业提醒（北化在线）
 
-自动抓取北京化工大学「北化在线」THEOL 平台的待提交作业截止时间，
-每周日汇总未来 7 天的作业并推送。
+自动抓取北京化工大学「北化在线」（THEOL 平台）**所有课程**的作业与在线测试截止时间，
+每周日汇总未来 N 天要交的内容，推送到你配置的渠道（默认企业微信群机器人）。
+
+**核心原则：这份提醒是发给全班同学的，所以「我交没交」不参与筛选 —— 一律以截止日期为准。**
+
+> ⚠️ 这条原则不是洁癖，而是踩过坑的结论：平台首页的「待提交作业」是它自己的**动态视图**，
+> 一旦你交了某门课，那门课就**整门从视图里消失**。实测同一时刻首页只列 3 门课，
+> 而逐门课扫一遍发现 **22 门课有作业、其中 19 门根本没进首页视图**。
+> 按旧逻辑，你每交一门作业，全班同学就少收一门课的提醒（复变函数、大学物理实验都这样丢过）。
+> 所以本工具**默认全量扫描**，且没有关掉它的入口。
 
 ## 快速开始
 
 ```powershell
 # 1) 首次使用 / 登录态过期时：双击 login.bat —— 自动填充账号密码 + 自动点「登录」，无需你动手
 #    （若平台弹滑块，窗口会留着让你拖一下；脚本检测到登录成功就自动保存会话并退出）
-# 2) 日常操作（检索 / 添加 / 管理 / 提前发布）：双击 console.bat
+# 2) 日常操作（检索 / 添加 / 管理 / 黑名单 / 提前发布）：双击 console.bat
 # 3) 每周日 09:00 自动跑抓取 + 汇总 + 推送，一般无需手动
 ```
 
-### 首次部署（换机器 / 刚 clone 下来必做）
+## 首次部署（换机器 / 刚 clone 下来必做）
 
 1. 装依赖：`pip install playwright`（**不要** `playwright install`，本项目复用系统 Edge，不下载 Chromium）
 2. 建配置：`copy data\config.example.json data\config.json`，再按里面注释填你的推送渠道
    （`data/config.json` 已被 .gitignore 忽略 —— webhook 的 `key=` 就是群发口令，不能进仓库）
-3. 登录：`login.bat` 会打开你的 Edge 并自动填充账号密码；
+3. 登录：双击 `login.bat`。它会打开你的 Edge 并自动填充账号密码；
    **前提是 Edge 里已保存北化在线的账号密码**（用哪个 Edge 用户无所谓，登录页能自动填充即可）
-4. 路径：脚本用 `%USERPROFILE%` / `Path.home()` 定位，不写死用户名，换机器直接跑。
+4. **刷新课程表**：双击 `console.bat` → 点「刷新课程表」，生成 `data/courses.json`
+   （课程索引含你账号下的课程编号与名称，属个人数据、不入库，所以 clone 后是空的）
+5. 路径：脚本用 `%USERPROFILE%` / `Path.home()` 定位，不写死用户名，换机器直接跑。
    若你的 Python 不在 `%USERPROFILE%\.workbuddy\binaries\python\envs\default\`，改 `data\console.ps1` 第 4 行即可。
 
-> 所有脚本必须用 WorkBuddy 管理的 Python：
+> 所有抓取脚本必须用装了 playwright 的解释器：
 > `%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe`
-> 系统 python 没装 playwright。
-> **双击 `console.bat` 即可打开统一控制台**（检索 → 添加/管理 → 提前发布）；定时任务每周日 09:00 自动跑完整流程。
+> 系统 python 没装 playwright。**但黑名单相关命令不需要 playwright，用哪个 python 都行。**
 
 ## 统一控制台（推荐，一个界面搞定全部）
 
-`console.bat` 双击打开一个 Windows 窗体，把四件事合到一个界面里：
-
-1. **检索北化在线作业** —— 点「检索北化在线」实时抓取平台待交作业（复用已有登录态）。
-2. **手动添加作业** —— 窗体上方填 科目 / 内容 / 截止 / 备注，点「添加」。
-3. **管理作业** —— 列表里选中「手动」行，可 标记完成 / 编辑 / 删除 / 清理过期，双击行也能编辑。
-4. **提前发布** —— 点「提前发布」立即把「未来 N 天」（默认 7，可改）的作业汇总推送到 `config.json` 配的渠道；
-   想先看内容再发，先点「预览」。
-5. **查看作业内容** —— 列表里选中「平台」行，点「查看作业内容」把作业正文（题目/要求）抓下来显示在下方文本框；
-   点「浏览器打开」进平台页面：**已提交 → 「查看结果」页，未提交 → 「提交作业」页**。
-
-> 列表里「平台」行来自北化在线、只读（可查看内容）；「手动」行来自 `manual.json`、可管理。
-> 抓取需要有效登录态；过期时点「检索北化在线」报错，双击 `login.bat` 再试。
-> 默认只显示「未来 N 天」的作业。**想翻已过期的旧作业（比如回看已经交了的）**：
-> 勾选顶部「含全部平台作业」再点「检索北化在线」，列表会列出该学期全部作业。
-
-## 目录结构
+双击 `console.bat` 打开一个 Windows 窗体。窗口标题会显示**脚本构建时间**：
 
 ```
-每周作业提醒/
-├── README.md           # 本文件
-├── console.bat         # 双击 → 统一控制台（推荐入口）
-├── login.bat           # 双击 → 自动登录（Edge 自动填充 + 自动点登录，卡住转人工）
-└── data/               # 全部脚本与数据
-    ├── *.py            # 所有 Python 脚本
-    ├── *.ps1           # 全部 PowerShell 窗体
-    ├── config.json     # 推送渠道配置
-    ├── manual.json     # 手动录入的作业
-    ├── hw.json         # 最近一次抓取的原始数据
-    ├── storage_state.json   # 登录会话（Cookie + LocalStorage）
-    ├── last_message.txt     # 最近一次生成的推送文本
-    └── debug/          # 探查脚本与调试截图，正常运行不需要
+作业提醒控制台  [脚本构建 10-13 10:22]
 ```
 
-> 所有 Python 脚本用 `__file__` 定位 ROOT，所以可以从任意目录调，绝对路径也 OK：
-> `python data\weekly.py --days 7`（从项目根目录跑）
+> 这个时间很有用：PowerShell 启动时把整个脚本读进内存，之后改文件它**不会重新加载**。
+> 如果你发现自己的改动没生效，先看标题栏时间 —— 若早于最后一次修改，就是**旧进程**，关窗重开即可。
+
+界面分区：
+
+| 位置 | 功能 |
+| --- | --- |
+| 顶部 | **检索北化在线**（全量扫描，约 1-2 分钟）· 含全部平台作业 · 抓在线测试 · 未来 N 天 · 推送渠道显示 · 预览 · 提前发布 |
+| 中部 | **手动添加作业**：科目 / 内容 / 截止 / 备注 → 添加 |
+| 列表 | 来源（平台/手动）· 科目 · 标题 · 截止 · 剩余 · 状态 |
+| 列表下方 | 标记完成 · 编辑 · 删除 · 清理过期 · 刷新 · 查看作业内容 · 浏览器打开 · 刷新视图 |
+| 再下一行 | 刷新课程表 · **课程黑名单** · **测试黑名单** |
+| 底部 | 日志 / 预览框（含本次抓取用时） |
+
+要点：
+
+- 「检索北化在线」**一律全量扫描**（默认按截止日期扫全部课程）。想翻已过期的旧作业，勾「含全部平台作业」。
+- 选中「平台」行 → 「查看作业内容」读作业正文；「浏览器打开」按状态跳转（已交=查看结果，未交=提交作业）。
+- 列表里「平台」行来自北化在线、只读；「手动」行来自 `manual.json`、可管理（双击行即编辑）。
+- 抓取完成后日志会打印**本次抓取用时**，含分阶段明细（登录 / 扫描课程）。
+
+## 在线测试（与作业同一套规则）
+
+平台把「在线测试」放在另一个栏目，本工具会**一起抓**，并在提醒里用 📝 标注：
+
+```
+• 马克思主义基本原理 📝在线测试
+   专题九 社会主义的发展与共产主义的最终实现
+   ⏰ 截止 2026-12-13 23:59 （还剩 62 天 2 小时）
+```
+
+- 判定：测试列表页「开始测试」列有链接 = 还能做；「查看结果」列有链接 = 有答题记录。
+- 截止时间用**测试表自己的格式**（`2026-12-13 23:59:00`，ISO 风格），与作业表的中文格式
+  （`2026年12月13日 23:59:00`）不同，代码里两套都认。
+- **想跳过某门课的测试**（典型场景：实验课的在线测试是多班共用、且要求课前 10 分钟做，没必要进待办）：
+  用「测试黑名单」只屏蔽测试，该课**作业照常抓**。
+
+## 两级黑名单（都必须人工确认）
+
+脚本**永远不会自己往黑名单里写东西** —— 它只会「建议」，加入必须由你确认。
+
+| 名单 | 作用 | 加入方式 |
+| --- | --- | --- |
+| **课程黑名单** | 整门课都不抓（作业 + 在线测试） | 控制台「课程黑名单」勾选候选 →「加入勾选项(需确认)」→ 二次确认；或 `scrape.py --blacklist-confirm <lid>` |
+| **测试黑名单** | 只跳过「在线测试」，作业照抓 | 控制台「测试黑名单」→ 输入 lid；或 `scrape.py --test-blacklist-add <lid>` |
+
+### 候选是怎么算出来的
+
+**学期边界**：`>= 8 月` 算本学期起点为当年 8/1；否则为当年 2/1。
+
+两种情况会被列为候选：
+
+- `stale`（**陈旧**）—— 该课最近一次作业截止时间**早于本学期起点**（说明这课本学期没作业了）
+- `no-homework-entry`（**无入口**）—— **连续 ≥2 次**扫描都没能进入「课程作业」栏目，且从未见过作业
+  （门槛设 2 次是为了避免一次网络抖动就把正常课程误杀）
+
+「能进课程页但暂时 0 条作业」的课**不会**成为候选（它只是暂时没作业，下轮可能就有）。
+
+### 控制台里的黑名单对话框
+
+- 左侧列表：编号 + `[陈旧]/[无入口]` 或 `[已拉黑]` + 课程名 + lid
+- 右侧详情栏：显示选中项的完整信息（理由、最近作业时间、失败次数、确认时间）
+- **加入**：勾选「待确认候选」→「加入勾选项（需确认）」→ 再弹一次确认框 → 才写入
+- **移出**：勾选「已拉黑 / 已屏蔽」→「移出勾选项（恢复抓取）」→ 二次确认
+
+### 命令行等价
+
+```powershell
+$PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+
+& $PY data\scrape.py --blacklist-list                  # 查看课程黑名单 + 候选（只读）
+& $PY data\scrape.py --blacklist-confirm 19865 33867   # 确认加入（要显式给 lid）
+& $PY data\scrape.py --blacklist-confirm all-candidates # 当前全部候选一次确认
+& $PY data\scrape.py --blacklist-remove 19865          # 移出单个
+& $PY data\scrape.py --blacklist-remove all            # 清空
+
+& $PY data\scrape.py --test-blacklist-list             # 查看测试黑名单
+& $PY data\scrape.py --test-blacklist-add 24206        # 只屏蔽某课的在线测试
+& $PY data\scrape.py --test-blacklist-remove 24206
+```
+
+> 另外，「连续找不到在线测试栏目」的课会被**自动记住并跳过**（不再为它白等超时）。
+> 这只影响「要不要去找测试栏目」，**不会漏掉任何作业**。
+
+## 手动补录（老师发在微信群 / 企业微信群的作业）
+
+平台抓不到的作业，手动补一条即可，汇总时会自动合并、带上 📌 标记和备注。
+
+```powershell
+# 方式一（推荐）：双击 console.bat → 在「手动添加作业」区填 科目名 / 作业内容 / 截止时间 / 备注，点「添加」
+# 方式二：命令行（适合脚本/批量）
+& $PY data\manual.py add --course "高等数学" --title "习题 3.1" --deadline "2026-09-17 23:59" --note "老师发在企业微信群"
+```
+
+管理命令（老师取消作业、改截止时间、交了标记完成，都走这里）：
+
+```powershell
+& $PY data\manual.py list      # 查看全部
+& $PY data\manual.py done 3    # 标记 id=3 已完成（不再提醒）
+& $PY data\manual.py rm 3      # 删除 id=3
+& $PY data\manual.py edit 3 --deadline "2026-09-20 23:59" --title "改后的标题"
+& $PY data\manual.py clean     # 清掉 7 天前已过期的条目
+```
+
+> 过期作业会自动掉出汇总：手动条目和平台作业一样，只保留「现在 ~ 未来 N 天」窗口内的。
+> 只有「截止时间填得不规范、解析不出来」的手动条目才会永久保留（标「未标注」），避免漏掉口头布置的活。
+
+截止时间写法（支持多种格式，只给日期默认当天 23:59）：
+
+| 输入 | 解析为 |
+| --- | --- |
+| `2026-09-17 23:59` | 2026-09-17 23:59 |
+| `2026-09-17` | 2026-09-17 23:59 |
+| `2026/9/17 23:59` | 2026-09-17 23:59 |
+| `9-17 23:59` / `9/17 23:59` / `9.10 23:59` / `9月10日 23:59` | 当年 9-17 23:59（跨年算明年） |
+| `9-17` / `9/17` / `9.10` / `9月10日` | 当年 9-17 23:59 |
 
 ## 自动登录（login.bat）
 
@@ -76,85 +172,113 @@
 4. 登录成功 → 自动保存会话 + 截图 `data/login_result.png` + 关窗口，退出码 0。
 
 **唯一需要你动手的情况**：平台弹验证码（登录页确实加载了腾讯验证码 SDK `turing.captcha.gtimg.com`）。
-这时脚本**不关窗口**，会打印提示并继续轮询 300 秒 —— 你在那个窗口里拖一下滑块就行，
-一登录成功它立刻保存会话并退出。登录时若门户弹「是否添加常用设备？」，脚本会自动选「是」，
-把本机记为常用设备，之后再登录一般就不弹验证码了。
+这时脚本**不关窗口**，会打印提示并继续轮询 300 秒 —— 你在那个窗口里拖一下滑块就行。
+登录时若门户弹「是否添加常用设备？」，脚本会自动选「是」，之后再登录一般就不弹验证码了。
 
 ```powershell
-# 等价命令行（解释器路径见上）
-python data\login.py             # 自动登录优先，卡住转人工（login.bat 用的就是它）
-python data\login.py --manual    # 跳过自动填充，直接人工登录（老行为）
-python data\login.py --no-wait   # 自动提交后只等 45 秒，不转人工（给定时任务用）
-python data\login.py --check     # 只检查 storage_state.json 是否仍有效
+& $PY data\login.py             # 自动登录优先，卡住转人工（login.bat 用的就是它）
+& $PY data\login.py --manual    # 跳过自动填充，直接人工登录
+& $PY data\login.py --no-wait   # 自动提交后只等 45 秒，不转人工（定时任务用）
+& $PY data\login.py --check     # 只检查 storage_state.json 是否仍有效
 ```
 
 > 密码不落盘：脚本只保存登录后的 cookie / storage_state，账号密码仍由 Edge 密码管理器保管。
-> **改过北化密码后**：Edge 里存的是旧密码，自动登录会失败 —— 此时按提示手动登录一次，
+> **改过北化密码后**：Edge 里存的是旧密码，自动登录会失败 —— 此时手动登录一次，
 > 浏览器问「是否保存密码」选「保存」，之后就恢复全自动。
+
+## 推送渠道
+
+改 `data/config.json` 的 `channel` 字段，可选：
+
+| channel | 说明 | 需要配置 |
+| --- | --- | --- |
+| `clipboard`（模板默认） | 复制到剪贴板 + 弹 Windows 通知，你 Ctrl+V 到任意微信会话。零配置、零风险 | 无需 |
+| `pushplus` | 微信里收到公众号消息。pushplus.plus 扫码关注拿 token | 填 `pushplus_token` |
+| `wecom` | 企业微信群机器人 | 填 `wecom_webhook` |
+| `wechat` | PC 微信客户端 UI 自动化（**不稳定，不推荐**） | 填 `wechat_target` |
+| `none` | 只落盘，不推送（演练用） | 无需 |
+
+自检配置是否就绪：
+
+```powershell
+& $PY data\notify.py --self-test
+```
+
+### 推送台账与去重
+
+- **台账**：每次真发出/被跳过都会往 `data/push_log.jsonl` 追一条记录
+  （时间 / 来源 `weekly`|`hub` / 渠道 / **目标群** / 是否成功 / 内容哈希 / 字节数 / 首行）。
+  以后再出现「莫名多一条提醒」，一眼就能看出是谁、什么时候、发到哪、发了什么。
+- **去重**：`config.json` 的 `dedup_window_sec`（默认 300 秒）内，若已向**同一目标**推送过
+  **完全相同**的内容，则跳过并记为 `duplicate-skipped`。目的是防止手滑连点两次「提前发布」。
+  - 去重键是「内容 + 目标群」，所以「测试群发过」不会影响「班级群正常发」。
+  - 想强制重发同一条：`notify.py ... --no-dedup`。
+
+> 测试群 / 正式群可以分开配：`wecom_webhook` 放当前要用的，`wecom_webhook_prod` 留一个备份。
+> 测试时用测试群，发正式消息前把 prod 那条复制到 `wecom_webhook` 即可。
 
 ## 在终端里跑
 
 ```powershell
-cd "<项目目录>\data"
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" notify.py --self-test
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" weekly.py --days 7
+$PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+
+& $PY data\weekly.py --days 7                # 抓取 + 汇总 + 推送
+& $PY data\weekly.py --days 7 --channel none # 演练：只落盘不推送
+& $PY data\weekly.py --pool                  # 旧行为：只用首页待提交池（快，但会漏课，不建议）
+
+& $PY data\scrape.py --refresh-courses       # 刷新课程索引 courses.json
+& $PY data\scrape.py --deadline-only --days 7 # 只抓取，输出 JSON
+& $PY data\scrape.py --no-tests              # 不抓在线测试（省一半时间）
+& $PY data\hub.py list --days 7 --fetch      # 控制台后端用的那条（含 rows/platform_count/timing）
 ```
+
+## 目录结构
+
+```
+每周作业提醒/
+├── README.md              # 本文件
+├── console.bat            # 双击 → 统一控制台（推荐入口）
+├── login.bat              # 双击 → 自动登录
+├── .gitignore             # 凭据与本地状态不入库
+└── data/                  # 全部脚本与数据
+    ├── *.py               # 所有 Python 脚本
+    ├── console.ps1        # 控制台窗体
+    ├── config.example.json  # 配置模板（入库）
+    ├── config.json        # 你的配置（不入库）
+    ├── manual.json        # 手动录入的作业（不入库）
+    ├── courses.json       # 课程索引 + 每课元数据（不入库）
+    ├── course_blacklist.json / test_blacklist.json  # 黑名单（不入库）
+    ├── push_log.jsonl     # 推送台账（不入库）
+    ├── storage_state.json # 登录会话（不入库）
+    ├── last_message.txt   # 最近一次生成的推送文本（不入库）
+    └── debug/             # 探查脚本与调试截图，正常运行不需要（不入库）
+```
+
+> 所有 Python 脚本用 `__file__` 定位 ROOT，所以可以从任意目录调，绝对路径也 OK。
 
 ## 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
-| `data/login.py` | 自动登录：打开持久 Edge profile（存过密码的那份）→ 自动填充 → 自动点「登录」→ 保存 `storage_state.json`；卡住则同窗口转人工 |
-| `data/scrape.py` | 登录后抓课程作业列表（每条带 `hwtid` 与 内容/提交/结果 三个链接）；加 `--content <hwtid>` 抓单条作业正文 |
-| `data/weekly.py` | 端到端入口：抓取 → 按截止时间筛选 → 生成汇总文本 → 调 `notify.py` 推送 |
-| `data/notify.py` | 推送层，多渠道可插拔（见下） |
-| `data/config.json` | 推送渠道配置 |
+| `data/login.py` | 自动登录：打开持久 Edge profile → 自动填充 → 自动点「登录」→ 保存 `storage_state.json`；卡住则同窗口转人工 |
+| `data/scrape.py` | 抓取核心。全量扫描所有课程（每门课一次进课程页，同时取「课程作业 + 在线测试」）；含黑名单、课程索引、时间归一化 |
+| `data/weekly.py` | 端到端入口：抓取 → 合并手动条目 → 按截止时间筛选 → 生成汇总文本 → 调 `notify.py` 推送 |
+| `data/notify.py` | 推送层，多渠道可插拔；含推送台账与去重 |
+| `data/manual.py` | 手动补录作业的增删改查 |
+| `data/hub.py` | 控制台后端：`list` / `publish` / `content` / `refresh-courses` / `blacklist-*` / `test-blacklist-*`，只输出 JSON |
+| `data/console.ps1` | 控制台窗体（无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
-| `data/hw.json` / `data/last_message.txt` | 最近一次抓取的原始数据 / 生成的汇总文本 |
-| `data/manual.py` | 手动补录作业（老师发在微信群/其他企业微信群、平台抓不到的） |
-| `data/manual.json` | 手动录入的作业清单，汇总时与平台抓取结果合并 |
-| `data/hub.py` | 统一控制台后端：给 `console.ps1` 提供「列表 / 发布 / 作业正文」数据，复用 `weekly.py` 与 `notify.py` 逻辑 |
-| `data/console.ps1` | `console.bat` 调用的 Windows Forms 单窗口界面（无需修改） |
+| `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
 | `data/debug/` | 探查脚本与调试截图，正常运行不需要 |
 
-## 手动补录（老师发在微信群 / 企业微信群的作业）
+## 定时
 
-平台抓不到的作业，手动补一条即可，汇总时会自动合并、带上 📌 标记和备注。
+已配置自动化任务「北化在线作业周报」：**每周日 09:00** 自动跑 `data/weekly.py --days 7`。
+登录态失效时 `weekly.py` 会先**自动尝试登录一次**（最多 45 秒，不转人工），成功就继续抓取；
+仍失败才向推送渠道发告警。改时间或暂停，在 WorkBuddy 的自动化面板里操作。
 
-```powershell
-# 方式一（推荐）：双击 console.bat → 在「手动添加作业」区填 科目名 / 作业内容 / 截止时间 / 备注，点「添加」
-# 方式二：命令行（适合脚本/批量）
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py add `
-    --course "高等数学" --title "习题 3.1" --deadline "2026-09-17 23:59" --note "老师发在企业微信群"
-```
-
-> 说明：手动录入的图形表单已整合进 `console.bat` 的统一控制台，双击后直接填即可，无需单独入口。
-
-管理命令（老师取消作业、改截止时间、交了标记完成，都走这里）：
-
-```powershell
-# 推荐：双击 console.bat → 列表选中「手动」行 → 标记完成 / 删除 / 编辑 / 清理过期
-# 命令行等价：
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py list      # 查看全部
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py done 3     # 标记 id=3 已完成（不再提醒）
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py rm 3       # 删除 id=3
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py edit 3 --deadline "2026-09-20 23:59" --title "改后的标题"  # 改某条
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\manual.py clean     # 清掉 7 天前已过期的条目
-```
-
-> **过期作业会自动掉出汇总**：手动条目和平台作业一样，只保留「现在 ~ 未来 N 天」窗口内的。
-> 截止时间过了就不在周报里出现；要彻底移除用 `done`/`rm`/`clean`。
-> 只有「截止时间填得不规范、解析不出来」的手动条目才会永久保留（标「未标注」），避免漏掉老师口头布置的活。
-
-截止时间写法（支持多种格式，只给日期默认当天 23:59）：
-
-| 输入 | 解析为 |
-| --- | --- |
-| `2026-09-17 23:59` | 2026-09-17 23:59 |
-| `2026-09-17` | 2026-09-17 23:59 |
-| `2026/9/17 23:59` | 2026-09-17 23:59 |
-| `9-17 23:59` / `9/17 23:59` / `9.10 23:59` / `9月10日 23:59` | 当年 9-17 23:59（跨年算明年） |
-| `9-17` / `9/17` / `9.10` / `9月10日` | 当年 9-17 23:59 |
+> **前提**：周日照 09:00 那一刻电脑必须是已登录且桌面未锁屏的状态 —— 自动登录需要真的创建一个
+> 可见的 Edge 窗口（这样万一弹滑块你还能补救）。
 
 ## 查看作业内容（平台作业正文）
 
@@ -163,11 +287,8 @@ cd "<项目目录>\data"
 | 位置 | 链接 | 什么时候有 |
 | --- | --- | --- |
 | 标题 | `hwtask.view.jsp?hwtid=XXX` | 恒有 —— **作业内容页**（题目/要求/附件） |
-| 提交作业列 | `write.jsp?hwtid=XXX` | 未提交时才有 |
-| 查看结果列 | `taskanswer.jsp?hwtid=XXX` | 已提交时才有 |
-
-所以「查作业内容」不需要管已交还是没交，拿 `hwtid` 直接开 `hwtask.view.jsp` 就行；
-而「浏览器打开」会按状态跳到对应的那一列（已交 = 查看结果，未交 = 提交作业）。
+| 提交作业列 | `write.jsp?hwtid=XXX` | 未提交（或已交但允许重交）时才有 |
+| 查看结果列 | `taskanswer.jsp?hwtid=XXX` | 有答题记录时才有 |
 
 正文不是渲染在 iframe 里的，而是同步放在页面一个隐藏域：
 
@@ -175,61 +296,67 @@ cd "<项目目录>\data"
 <input type="hidden" name="107_content" id="107_content" value="&lt;ol&gt;…实体编码的作业正文…&lt;/ol&gt;">
 ```
 
-所以直接正则取 `name="\d+_content"` 的 `value` 再 HTML 解码即可，不必进 ueditor iframe 抓。
+直接正则取 `name="\d+_content"` 的 `value` 再 HTML 解码即可，不必进 ueditor iframe。
 
 ```powershell
-# 命令行也能单独取某条作业的正文（hwtid 从列表的 Tag 里来）
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\hub.py content --hwtid 81878
+& $PY data\hub.py content --hwtid 83321
 ```
 
-> 「浏览器打开」走的是系统默认浏览器，它用的是**浏览器自己的登录态**，
-> 和 `storage_state.json`（给自动化脚本用的）是两套。如果浏览器里没登录北化在线，
-> 会先跳统一认证页，登录一次即可。
+> 「浏览器打开」走的是系统默认浏览器，用的是**浏览器自己的登录态**，
+> 和 `storage_state.json`（给自动化脚本用的）是两套。没登录会先跳统一认证页。
 
-## 推送渠道
+## 已知坑（都是实测踩出来的）
 
-改 `data/config.json` 的 `channel` 字段，可选：
+### 平台侧
 
-| channel | 说明 | 需要配置 |
-| --- | --- | --- |
-| `clipboard`（默认） | 复制到剪贴板 + 弹 Windows 通知，你 Ctrl+V 到任意微信会话。零配置、零风险 | 无需 |
-| `pushplus` | 微信里收到公众号消息。pushplus.plus 扫码关注拿 token | 填 `pushplus_token` |
-| `wecom` | 企业微信群机器人 | 填 `wecom_webhook` |
-| `wechat` | PC 微信客户端 UI 自动化 | 填 `wechat_target` |
-| `none` | 只落盘，不推送 | 无需 |
+- **首页「待提交作业」视图不可信**：交过的课会整门消失。别改回依赖它取课程列表。
+- **`hwtask.jsp?lid=<lid>` 直连不可用**：服务器忽略 URL 里的 lid，按会话里的「当前课程」渲染，
+  6 个不同 lid 会全部返回同一门课的作业。必须先 `enter_course.jsp?lid=<lid>&t=hw` 进课程页切换当前课程。
+  好在**复用同一个页面直接 goto 即可**，不必为每门课开新窗口（旧写法慢 5 倍，且依赖主页面停在 SSO 首页）。
+- **平台有两套时间格式**：作业表是 `2026年11月26日21:13:00`，测试表是 `2026-12-13 23:59:00`；
+  还见过残缺秒 `9:04:0`。`norm_deadline()` 三种都处理，改动时别退回单一格式。
+- **偶发空作业表**：页面跳过去了但表格没渲染，会解析出 0 条。而 0 条本身是合法结果
+  （有的课确实没作业），所以**必须重试**，否则静默丢数据。现在会自动重试 2 次。
+- **在线测试入口层级特殊**：`course_column_preview_transfer.jsp` 的真实路径在 `/meol/jpk/course/`，
+  手拼 `/meol/course_column_preview_transfer.jsp` 会 404。菜单文字的 `textContent` 带换行和缩进
+  （实测是 `'\n在线测试\n'`），匹配前必须去掉空白。
+- **入口必须是 SSO**：`https://course.buct.edu.cn/meol` 是未登录首页，正确入口是
+  `/meol/homepage/common/sso_login.jsp`。**`login.py --check` 也不能访问 `/meol` 做判定**，
+  否则会话有效也会误报 NEED_LOGIN。
+- **课程作业链接每课不同**（`…?columnId=xxxxxx`），必须从课程页菜单动态取。
 
-自检配置是否就绪：
+### 登录侧
 
-```powershell
-& "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python.exe" data\notify.py --self-test
-```
+- **登录态会过期**：CAS 的 `CASTGC` / 门户的 `TGC` 是长效票据但不保证长期有效。
+- **登录表单在跨域 iframe 里**：`portal.buct.edu.cn/normal/login-normal.html`，
+  字段 `input[name=username]` / `input[name=password]`，脚本必须进 frame 操作。
+- **Edge 自动填充不会立刻灌进 DOM**：必须先用 Playwright 点一下用户名框触发，实测 1~3 秒才有值。
+- **别改回「有死代码的 main」**：login.py 曾有一段永远执行不到的分支
+  （`if args.check:` 后直接 `return`，紧跟的 `if args.auto:` 成了死代码），
+  表现为「自动填充成功但从来没点过登录按钮」。改完必须实跑验证。
+- **登录页加载了腾讯验证码 SDK**（`turing.captcha.gtimg.com`）与阿里无痕风控（`g.alicdn.com/AWSC/et/*`）。
+  实测本机 IP + 常用设备下点登录不弹；万一弹了，脚本保留窗口并轮询，人工拖滑块即可，不要试图自动过。
 
-## 定时
+### Windows / PowerShell
 
-已配置自动化任务「北化在线作业周报」：**每周日 09:00** 自动跑 `data/weekly.py --days 7`。
-改时间或暂停，在 WorkBuddy 的自动化面板里操作。
+- **改完 console.ps1 要关窗重开**：PowerShell 不会热重载脚本。窗口标题栏的构建时间就是判断依据。
+- **`console.ps1` 必须是 UTF-8 with BOM**：PowerShell 5.1 读无 BOM 的 .ps1 会按 GBK 解析中文，
+  首行 `Add-Type` 直接失效、整个窗体起不来。用编辑器改完记得确认 BOM 还在。
+- **变量作用域要当心**：`$full` 曾只在 `Fetch-Platform` 里定义，`Publish` 引用它得到 `$null`，
+  `-not $null` 恒为 true → 发布路径永远走 `--pool` 漏课。函数内要用就在函数内自己算。
+- **双击 .bat 中文乱码**：所有 .bat 第一行 `chcp 65001` 已设，Python 子进程强制 UTF-8 输出。
+- **PC 微信 4.x 是 Qt 渲染**，uiautomation 取不到控件树，UI 自动化实测走不通，别再投入时间。
 
-## 已知坑
+## 性能参考
 
-- **登录态会过期。** CAS 的 `CASTGC` / 门户的 `TGC` 是长效票据但不保证长期有效。过期表现是
-  `scrape.py` 报「未登录」，双击 `login.bat` 自动登录即可，密码不落盘。
-- **登录表单在跨域 iframe 里。** `portal.buct.edu.cn/` 首页只是壳，真正的账号密码表单在
-  `portal.buct.edu.cn/normal/login-normal.html`（字段 `input[name=username]` / `input[name=password]`，
-  按钮文案「登录」），脚本必须进 frame 操作。
-- **Edge 自动填充不会立刻灌进 DOM。** 必须先用 Playwright 点一下用户名框触发，实测 1~3 秒才出现值；
-  刚 `goto` 完就读 `input_value` 必然是空的。这也是当初误判「自动登录不可行」的原因之一。
-- **别改回「有死代码的 main」**：登录逻辑曾有一段永远执行不到的分支（`if args.check:` 后面直接
-  `return`，紧跟其后的 `if args.auto:` 成了死代码），导致「自动填充成功但从来没点过登录按钮」。
-  改动 login.py 后必须实跑验证，不能只看返回 Success。
-- **登录页加载了腾讯验证码 SDK**（`turing.captcha.gtimg.com/1/tcaptcha-frame.*.js`）和阿里无痕风控
-  （`g.alicdn.com/AWSC/et/*`）。实测本机 IP + 常用设备下点登录**不弹**验证码；万一弹了，
-  脚本会保留窗口并轮询，人工拖一下滑块即可，不要试图自动过滑块。
-- **入口必须是 SSO，不是首页。** `https://course.buct.edu.cn/meol` 是未登录首页；
-  正确入口是 `https://course.buct.edu.cn/meol/homepage/common/sso_login.jsp`，
-  它会拿 CAS 票据换平台会话，免密直达 `personal.do`。
-- **课程作业的链接每课不同**（`course_column_preview_transfer.jsp?columnId=xxxxxx`），
-  必须先展开课程页左侧「课程活动」菜单再取链接，不能写死。
-- **PC 微信 4.x 是 Qt 渲染**，uiautomation 取不到控件树，Ctrl+F 搜索也常被吞，
-  UI 自动化这条路实测走不通，别再往里投入时间。
-- **双击 .bat 时控制台中文会乱码**。所有 .bat 第一行 `chcp 65001` 已设，且 Python 子进程
-  强制 UTF-8 输出。如果你自己在终端里跑脚本也遇到乱码，先执行 `chcp 65001` 再 `set PYTHONIOENCODING=utf-8`。
+18 门课（27 门已拉黑）的实测数据：
+
+| 阶段 | 耗时 |
+| --- | --- |
+| 登录 / 建会话 | 约 4 秒 |
+| 扫描 18 门课（每门课同时取作业 + 在线测试） | 约 60-125 秒 |
+| **合计** | **约 1-2 分钟** |
+
+优化历程：154 秒 → 119 秒（合并两个栏目、一次进页面）→ 65 秒（复用页面、去掉多余跳转、
+无测试栏目快速放弃）。剩下的开销是平台强制的（每门课必须真的进一次课程页）。
+**再想提速只有一个方向：减少扫描课程数 —— 也就是用黑名单。**
