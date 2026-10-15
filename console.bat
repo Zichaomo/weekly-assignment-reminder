@@ -1,31 +1,32 @@
 @echo off
 rem ============================================================================
-rem  作业提醒控制台 —— 单窗口入口
+rem  Homework reminder console - single-window launcher
 rem
-rem  双击后只看到一个 Edge 应用窗口（本窗口会在启动后自动关闭）。
-rem  关闭那个浏览器窗口，服务自动退出并释放端口。
+rem  Behavior:
+rem    - If the service is already listening on 8277, just open the UI and exit.
+rem    - Otherwise: start an Edge app window, capture its PID, then start
+rem      server.py hidden (run_hidden.vbs) and let it watch that process.
+rem    - Closing the browser window stops the service and frees the port.
 rem
-rem  要点：
-rem    1) 若服务已在跑，直接复用并打开界面，绝不起第二个进程
-rem    2) PowerShell 以 --app 起 Edge 并取得 PID
-rem    3) VBScript 无窗口启动 server.py，并让它守护上面那个 PID
-rem
-rem  注：本文件必须使用 CRLF 换行；括号块内只放 ASCII 提示，
-rem      中文提示一律放在括号块之外（cmd 解析块内中文易出错）。
+rem  IMPORTANT: this file is ASCII-only ON PURPOSE.
+rem    cmd parses batch files with the console OEM code page (GBK on zh-CN),
+rem    so UTF-8 Chinese text inside a .bat can be mis-read as commands and
+rem    print errors like:
+rem        '...' is not recognized as an internal or external command
+rem    Chinese user-facing messages are printed by Python (launcher_msg.py) instead,
+rem    which handles UTF-8 correctly. Do not add Chinese text to this file.
 rem ============================================================================
-setlocal enabledelayedexpansion
-chcp 65001 >nul
-set PYTHONIOENCODING=utf-8
-cd /d "%~dp0data"
+setlocal
 set "PY=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 set "SRV=%~dp0data\server.py"
 set "VBS=%~dp0data\run_hidden.vbs"
+set "MSG=%~dp0data\launcher_msg.py"
 set "URL=http://127.0.0.1:8277"
 
 if not exist "%PY%" goto no_python
 if not exist "%VBS%" goto no_vbs
 
-rem ---- 1) service already listening? reuse it (never start a 2nd instance)
+rem ---- 1) reuse an already running service (never start a 2nd instance)
 set "PORTBUSY="
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$c = New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1', 8277); '1' } catch { '0' } finally { $c.Close() }" 2^>nul`) do set "PORTBUSY=%%i"
 if "%PORTBUSY%"=="1" goto reuse
@@ -42,18 +43,15 @@ if not defined EDGE goto no_edge
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$p = Start-Process -FilePath '%EDGE%' -ArgumentList '--app=%URL%','--no-first-run','--no-default-browser-check' -PassThru; $p.Id" 2^>nul`) do set "EDGEPID=%%i"
 if "%EDGEPID%"=="" goto no_pid
 
-rem ---- 4) start hidden service, watching the browser process
+rem ---- 4) start the hidden service, watching the browser process
 cscript //nologo "%VBS%" "%PY%" "%EDGEPID%" "%SRV%"
-echo.
-echo   控制台已启动：%URL%
-echo   关闭浏览器窗口后服务会自动停止，本窗口即将自动关闭。
+"%PY%" "%MSG%" ok
 ping -n 3 127.0.0.1 >nul
 endlocal
 exit /b 0
 
 :reuse
-echo.
-echo   控制台服务已在运行，直接打开界面：%URL%
+"%PY%" "%MSG%" reuse
 start "" "%URL%"
 ping -n 2 127.0.0.1 >nul
 endlocal
@@ -61,9 +59,7 @@ exit /b 0
 
 :no_edge
 cscript //nologo "%VBS%" "%PY%" "" "%SRV%"
-echo.
-echo   未找到 Edge，已用默认浏览器打开：%URL%
-echo   服务将常驻运行；可点页面底部「停止控制台服务」停止。
+"%PY%" "%MSG%" no_edge
 start "" "%URL%"
 ping -n 3 127.0.0.1 >nul
 endlocal
@@ -71,23 +67,21 @@ exit /b 0
 
 :no_pid
 cscript //nologo "%VBS%" "%PY%" "" "%SRV%"
-echo.
-echo   未能取得浏览器进程号，服务将常驻运行：%URL%
-echo   可点页面底部「停止控制台服务」停止。
+"%PY%" "%MSG%" no_pid
 ping -n 3 127.0.0.1 >nul
 endlocal
 exit /b 0
 
 :no_python
 echo.
-echo   [错误] 找不到 Python 解释器：
-echo          %PY%
-echo   请修改 console.bat 顶部的 PY 变量。
+echo   [ERROR] Python interpreter not found:
+echo           %PY%
+echo   Edit the PY variable at the top of console.bat
 pause
 exit /b 1
 
 :no_vbs
 echo.
-echo   [错误] 缺少启动器：%VBS%
+echo   [ERROR] Missing launcher: %VBS%
 pause
 exit /b 1
