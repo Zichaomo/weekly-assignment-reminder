@@ -17,8 +17,10 @@
 # 1) 首次使用 / 登录态过期时：双击 login.bat —— 自动填充账号密码 + 自动点「登录」，无需你动手
 #    （若平台弹滑块，窗口会留着让你拖一下；脚本检测到登录成功就自动保存会话并退出）
 # 2) 日常操作（检索 / 添加 / 管理 / 黑名单 / 提前发布）：双击 console.bat（Web 控制台）
+#    双击时若服务已在运行，会把已有窗口置于前台，不会开出第二个窗口
 #    旧版 WinForms 窗体保留在 console-legacy.bat，作为降级备用
-# 3) 每周日 09:00 自动跑抓取 + 汇总 + 推送，一般无需手动
+# 3) 定时自动推送：⚠️ 尚未生效，方案待定 —— 见「定时」一节
+#    在它做好之前，每周手动点一次「检索北化在线」+「提前发布」即可
 ```
 
 ## 首次部署（换机器 / 刚 clone 下来必做）
@@ -40,27 +42,43 @@
 
 ## 统一控制台（推荐，一个界面搞定全部）
 
-双击 `console.bat`：**只出现一个 Edge 应用窗口**（无地址栏，观感等同桌面程序）。
-服务在后台**无窗口**运行，双击时那个控制台窗口会在几秒内自动关闭。
-跟这个窗口的关系很简单：
+双击 `console.bat`，**只会有一个 Edge 应用窗口**（无地址栏，观感等同桌面程序），
+启动用的那个控制台窗口会在几秒内自动关闭。
 
-> **关掉浏览器窗口 = 停止服务**，端口与内存立即释放，不留残余进程。
+| 双击次数 | 行为 |
+| --- | --- |
+| **第 1 次** | 开一个 Edge 应用窗口 + 在后台无窗口启动服务 |
+| **第 2 次及以后** | 服务已在运行 → **把已有窗口置于前台**，打印提示，**不新建窗口** |
 
-实现方式：`console.bat` 先取得 Edge 应用窗口的进程号，再用 `data/run_hidden.vbs`
-把 `server.py` 无窗口启动并附上 `--watch-pid <该进程号>`；服务每 3 秒检查一次，
-该进程消失就自我退出。（实测：Edge 的 `--app` 实例关闭后，其 14 个子进程会全部消失，
-所以判进程比判页面心跳更可靠，也不受浏览器后台节流影响。）
+> **关掉浏览器窗口 = 停止服务**，端口与内存随即释放。
 
-其他停止方式（都不需要时可以直接忽略）：
+### 停止服务的判定方式（进程 + 页面心跳，双条件）
+
+服务端 `--watch-pid <Edge进程号>` 会每 3 秒检查一次，但**只看进程并不可靠**：
+当 Edge 已有实例在运行时，`--app` 参数会被交给那个实例处理，
+我们启动的进程随即退出 —— 只看进程号会导致服务刚启动就自杀（实测踩过）。
+
+所以退出条件是**两个都成立**：
+
+1. 被守护的 Edge 进程已消失；
+2. 页面心跳也停了（`console.html` 每 5 秒 POST 一次 `/api/heartbeat`，超过 30 秒没有心跳）。
+
+页面从未连上过的启动瞬间给 180 秒宽限期，避免误判。
+
+其他停止方式（都可以忽略，除非有异常）：
 
 - 页面底部「**停止控制台服务**」按钮；
 - 万一没取到 Edge 进程号（服务退化为常驻），关掉 `python.exe` 进程即可。
+
+### 日志与降级
 
 服务日志在 `data/server_console.log`（无窗口运行，出问题时看这个）；
 `data/server_error.log` 记录 HTTP 层异常。两个文件都在 `.gitignore` 里。
 
 > 旧版 WinForms 窗体保留在 `console-legacy.bat`（`data/console.ps1`），功能一致、随时可降级。
 > 旧窗体标题栏的「脚本构建时间」只对旧版有意义：Web 版每次打开都是新代码，不存在热重载问题。
+
+> **`console.bat` 只输出 ASCII 英文，这是刻意的。** 详见「已知坑 · Windows / PowerShell」一节。
 
 界面分区（Web 版）：
 
@@ -390,23 +408,26 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 ```
 每周作业提醒/
 ├── README.md              # 本文件
-├── console.bat            # 双击 → Web 控制台（推荐入口）
+├── console.bat            # 双击 → Web 控制台（推荐入口；纯 ASCII，只用英文提示）
 ├── console-legacy.bat     # 双击 → 旧版 WinForms 控制台（降级备用）
 ├── login.bat              # 双击 → 自动登录
 ├── .gitignore             # 凭据与本地状态不入库
 └── data/                  # 全部脚本与数据
     ├── *.py               # 所有 Python 脚本（server.py 是 Web 控制台后端）
     ├── console.html       # Web 控制台界面（单页，零依赖）
-    ├── run_hidden.vbs     # 无窗口启动服务（console.bat 调用；服务守护浏览器进程）
+    ├── run_hidden.vbs     # 无窗口启动服务（console.bat 调用）
     ├── console.ps1        # 旧版 WinForms 控制台窗体（降级备用）
     ├── config.example.json  # 配置模板（入库）
     ├── config.json        # 你的配置（不入库）
     ├── manual.json        # 手动录入的作业（不入库）
     ├── courses.json       # 课程索引 + 每课元数据（不入库）
+    ├── courses.scan.json  # 扫描证据快照（候选推导用，不入库）
     ├── course_blacklist.json / test_blacklist.json  # 黑名单（不入库）
     ├── push_log.jsonl     # 推送台账（不入库）
+    ├── fetch_log.jsonl    # 检索台账（不入库）
     ├── storage_state.json # 登录会话（不入库）
     ├── last_message.txt   # 最近一次生成的推送文本（不入库）
+    ├── server_console.log / server_error.log  # 服务日志（不入库）
     └── debug/             # 探查脚本与调试截图，正常运行不需要（不入库）
 ```
 
@@ -417,14 +438,16 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | 文件 | 作用 |
 | --- | --- |
 | `data/login.py` | 自动登录：打开持久 Edge profile → 自动填充 → 自动点「登录」→ 保存 `storage_state.json`；卡住则同窗口转人工 |
-| `data/scrape.py` | 抓取核心。全量扫描所有课程（每门课一次进课程页，同时取「课程作业 + 在线测试」）；含黑名单、课程索引、时间归一化 |
+| `data/scrape.py` | 抓取核心。全量扫描所有课程（每门课一次进课程页，同时取「课程作业 + 在线测试」）；含黑名单、课程索引、时间归一化、并发锁 |
 | `data/weekly.py` | 端到端入口：抓取 → 合并手动条目 → 按截止时间筛选 → 生成汇总文本 → 调 `notify.py` 推送 |
 | `data/notify.py` | 推送层，多渠道可插拔；含推送台账与去重 |
 | `data/manual.py` | 手动补录作业的增删改查 |
 | `data/hub.py` | 控制台后端：`list` / `publish` / `content` / `refresh-courses` / `blacklist-*` / `test-blacklist-*`，只输出 JSON |
-| `data/server.py` | Web 控制台 HTTP 服务（薄封装 hub.py / manual.py，长任务后台线程化，不碰业务逻辑）；`--watch-pid` 让它在浏览器窗口关闭时自我退出 |
-| `data/run_hidden.vbs` | 以无窗口方式启动服务（`console.bat` 调用），并把输出写入 `server_console.log` |
+| `data/server.py` | Web 控制台 HTTP 服务（薄封装 hub.py / manual.py，长任务后台线程化）；`--watch-pid` + 页面心跳决定何时自我退出 |
 | `data/console.html` | Web 控制台界面（单页零依赖；字体走 server.py 的 /fonts/ 路由，找不到自动回退系统字体） |
+| `data/run_hidden.vbs` | 以无窗口方式启动服务（`console.bat` 调用），输出写入 `server_console.log` |
+| `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
+| `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
 | `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
@@ -432,12 +455,39 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 ## 定时
 
-已配置自动化任务「北化在线作业周报」：**每周日 09:00** 自动跑 `data/weekly.py --days 7`。
-登录态失效时 `weekly.py` 会先**自动尝试登录一次**（最多 45 秒，不转人工），成功就继续抓取；
-仍失败才向推送渠道发告警。改时间或暂停，在 WorkBuddy 的自动化面板里操作。
+> ⚠️ **当前状态：自动定时尚未生效（待决定方案）。**
+> 需要一个每周固定时间自动跑 `data/weekly.py --days 7` 的机制，但原方案不可用，详见下。
 
-> **前提**：周日照 09:00 那一刻电脑必须是已登录且桌面未锁屏的状态 —— 自动登录需要真的创建一个
-> 可见的 Edge 窗口（这样万一弹滑块你还能补救）。
+### 原方案（WorkBuddy 自动化）已失效
+
+曾在 WorkBuddy 自动化面板里配过一个任务「北化在线作业周报」
+（`rrule = FREQ=WEEKLY;BYDAY=SU;BYHOUR=9;BYMINUTE=0`，即每周日 09:00）。
+但事件记录显示它**从创建当天（9 月 9 日）起就没有再触发过**，
+表里的 `next_run_at` / `last_run_at` 均为空，运行记录只有创建那一次。
+
+更要紧的是：**推送台账里从来没有一条 `source=weekly + channel=wecom`** ——
+群里收到的每条提醒都是手动点「提前发布」发出的。也就是说这条路从未真正打通过。
+
+### 待选方案（尚未实施）
+
+| 方案 | 做法 | 优点 | 代价 |
+| --- | --- | --- | --- |
+| **A. Windows 计划任务** | 注册每周日的计划任务跑 `weekly.py`；勾「错过尽快启动」、失败重试 | 系统级、开机即生效、错过的能补跑 | 执行时电脑需已登录且未锁屏 |
+| **B. 登录时补跑** | 登录时检查「本周是否已成功推送」，没有就补发一次 | 兜住「周日没开机/锁屏」 | 补发时间会稍晚 |
+| **C. 常驻守护进程** | 隐藏进程常驻，到点触发并负责重登/重试 | 可内置重试与自动重登 | 多一个常驻进程 |
+| **D. 半自动** | 每周手动点一次「检索 + 提前发布」 | 零配置、不会静默失败 | 依赖你记得 |
+
+**建议：A + B 组合**，并优先补上「失败告警」（见下）。
+
+### 无论选哪个都要注意的前提
+
+1. **登录态只有约 3 天寿命**（`TGC` / `JSESSIONID` 都是会话级 cookie），
+   而定时是每周一次 —— 执行时登录态几乎必然已失效。
+   `weekly.py` 的 `ensure_login()` 会先自动尝试登录一次（最多 45 秒，不转人工），
+   实测能自愈成功；但它需要**真的创建一个可见的 Edge 窗口**，
+   所以执行那一刻电脑必须是已登录、未锁屏的状态。
+2. **抓取/推送失败目前是静默的** —— 群里没消息与「这周真的没作业」看起来一样。
+   排查时先看 `data/fetch_log.jsonl` 与 `data/push_log.jsonl` 两份台账。
 
 ## 查看作业内容（平台作业正文）
 
@@ -501,9 +551,10 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 - **不要在抓取进行中再点检索**：会与正在跑的抓取互相干扰（已加文件锁自动排队，
   但排队超时后仍会继续，结果可能不准）。定时任务跑的时候同理。
 - **缓存只存健康结果**：平台 0 条或大面积失败的结果不缓存，避免把失败伪装成成功。
-- **服务停止方式**：**关掉浏览器窗口即可**（服务守护着它，会自动退出并释放端口）；
-  也可点页面底部「停止控制台服务」。端口固定 `127.0.0.1:8277`（只监听本机，局域网访问不到）；
-  重复双击 `console.bat` 不会起第二个实例。
+- **服务停止方式**：**关掉浏览器窗口即可** —— 服务按「浏览器进程消失 **且** 页面心跳停止」
+  两个条件判定（约 30 秒内退出），释放端口；也可点页面底部「停止控制台服务」。
+  端口固定 `127.0.0.1:8277`（只监听本机，局域网访问不到）；
+  **重复双击 `console.bat` 不会起第二个实例**，只会把已有窗口置于前台。
 - **服务是无窗口运行的**：看不到控制台窗口是正常的。它的输出在 `data/server_console.log`
   （`run_hidden.vbs` 用 `python -u` 启动，否则块缓冲会让日志迟迟不落盘），
   HTTP 层异常在 `data/server_error.log`。
@@ -517,7 +568,20 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
   首行 `Add-Type` 直接失效、整个窗体起不来。用编辑器改完记得确认 BOM 还在。
 - **变量作用域要当心**：`$full` 曾只在 `Fetch-Platform` 里定义，`Publish` 引用它得到 `$null`，
   `-not $null` 恒为 true → 发布路径永远走 `--pool` 漏课。函数内要用就在函数内自己算。
-- **双击 .bat 中文乱码**：所有 .bat 第一行 `chcp 65001` 已设，Python 子进程强制 UTF-8 输出。
+- **批处理文件只用 ASCII，中文由别的通道输出**（这一条踩了三遍，务必照做）：
+  - cmd 按**系统 OEM 代码页**（中文系统 GBK）解析 `.bat` 本身。
+    往 `.bat` 里写 UTF-8 中文，会被当成非法命令并打印
+    「'...' 不是内部或外部命令」；写在文件里的 `chcp 65001` 来不及救
+    —— 解析发生在它生效之前。
+  - 让 Python 打印中文同样不稳：`GetConsoleOutputCP()` 与 `chcp` 可能**不一致**
+    （本机实测：`chcp` 说 936，Python 读到 65001），于是按 65001 写 UTF-8、
+    控制台按 936 渲染 → 乱码。全局的 `PYTHONUTF8` / `PYTHONIOENCODING`
+    也会干扰子进程的输出编码。
+  - 结论：**启动器（`console.bat`）只输出 ASCII 英文**，`chcp 936` 仅用于让环境一致。
+    ASCII 不会被任何代码页弄坏。网页界面照旧全中文，不受影响。
+  - 验证这类问题时**不要用管道**（`cmd /c xxx > file`）：Python 检测到输出被重定向
+    会改用 UTF-8，把真实控制台里的问题掩盖掉。要用真实的控制台窗口测
+    （`Start-Process cmd`），并检查**原始字节**是否与代码页匹配。
 - **PC 微信 4.x 是 Qt 渲染**，uiautomation 取不到控件树，UI 自动化实测走不通，别再投入时间。
 
 ## 性能参考
