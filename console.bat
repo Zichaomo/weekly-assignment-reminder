@@ -18,6 +18,12 @@ rem    Chinese user-facing messages are printed by Python (launcher_msg.py)
 rem    instead, which handles UTF-8 correctly. Do not add Chinese to this file.
 rem ============================================================================
 setlocal
+rem Force the console code page to the system ANSI code page (936 on zh-CN).
+rem Why: GetConsoleOutputCP() can report 65001 even though the console actually
+rem renders 936 (observed on this machine), which made launcher_msg.py write
+rem UTF-8 bytes that the console showed as mojibake. Pinning it here keeps the
+rem code page the console uses and the one Python reads in agreement.
+chcp 936 >nul 2>&1
 set "PY=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 set "SRV=%~dp0data\server.py"
 set "VBS=%~dp0data\run_hidden.vbs"
