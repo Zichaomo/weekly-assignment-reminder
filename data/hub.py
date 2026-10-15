@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 统一控制台后端：给 PowerShell 图形界面（console.ps1）提供数据（列表）与动作（发布）。
 
@@ -42,6 +42,7 @@ for _s in (sys.stdout, sys.stderr):
 
 import weekly
 import notify
+import fetch_log
 
 MANUAL_FILE = ROOT / "manual.json"
 
@@ -180,6 +181,15 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
         "_payload": data if fetch and error is None else None,
         "data_fetched_at": time.strftime("%Y-%m-%d %H:%M:%S") if fetch and error is None else None,
     }
+    # 检索台账：记下「这次抓了什么」——多少条、多久、失败几门、是否复用缓存。
+    # 只有真的抓了才记（fetch=False 是纯读本地列表，无需记账）。
+    if fetch:
+        fw = (warnings or {}).get("failed_courses") or []
+        fetch_log.log_fetch("hub-list", days, mode=("pool" if pool else "deadline-only"),
+                  rows=len(rows), rows_total=len(platform_hw), platform=len(platform_hw),
+                  tests=sum(1 for x in platform_hw if x.get("kind") == "test"),
+                  manual=len(manual_items), elapsed=elapsed, ok=error is None,
+                  error=error or "", failed_courses=fw)
     return out
 
 
@@ -260,6 +270,19 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     picked = weekly.merge_and_filter(data, manual, days)
     msg = weekly.format_message(picked, days)
     (ROOT / "last_message.txt").write_text(msg, encoding="utf-8")
+
+    # 检索台账：预览/发布走的是同一段抓取，也要记账（区分是预览还是发布）
+    _src = ("hub-preview" if no_send else "hub-publish")
+    _fw = (data.get("warnings") or {}).get("failed_courses") or []
+    _el = data.get("_elapsed_sec")
+    _cached = (data_source == "cache")
+    fetch_log.log_fetch(_src, days, mode=("pool" if pool else "deadline-only"),
+              rows=len(picked), rows_total=len(platform_hw), platform=len(platform_hw),
+              tests=sum(1 for x in platform_hw if x.get("kind") == "test"),
+              manual=len(manual), elapsed=_el, cached=_cached,
+              data_age=(prefetched_age_sec if _cached else None),
+              failed_courses=_fw,
+              notes=("复用缓存" if _cached else "重新抓取"))
 
     if no_send:
         out = {

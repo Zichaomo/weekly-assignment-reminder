@@ -312,6 +312,20 @@ def main() -> int:
     msg_file.write_text(msg, encoding="utf-8")
     print("已落盘:", msg_file)
 
+    # 检索台账：定时任务（本脚本）也要记账，与控制台的 hub-list/publish 口径一致。
+    # 这样「这周的推送到底是抓到了什么、有没有失败课程、复用了哪份数据」都有据可查。
+    try:
+        import fetch_log
+        fetch_log.log_fetch(
+            "weekly", args.days, mode=("pool" if args.pool else "deadline-only"),
+            rows=len(picked), rows_total=len(platform),
+            platform=len(platform), tests=tests_n, manual=len(manual),
+            elapsed=elapsed, failed_courses=warn.get("failed_courses") or [],
+            notes=("演练模式（未发送）" if args.no_send else ""),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: 写检索台账失败 {e}", file=sys.stderr)
+
     if args.no_send:
         print("演练模式：未发送。")
         return 0

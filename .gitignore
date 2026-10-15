@@ -53,3 +53,6 @@ data/server_error.log
 # 服务日志（无窗口运行时的输出）
 data/server_console.log
 data/server_error.log
+
+# 检索台账（本地记录：抓了什么、多久、失败几门）
+data/fetch_log.jsonl

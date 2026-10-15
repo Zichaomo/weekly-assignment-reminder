@@ -341,6 +341,35 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 > 测试群 / 正式群可以分开配：`wecom_webhook` 放当前要用的，`wecom_webhook_prod` 留一个备份。
 > 测试时用测试群，发正式消息前把 prod 那条复制到 `wecom_webhook` 即可。
 
+### 检索台账（抓了什么）
+
+推送台账记的是「**发了什么**」，检索台账记的是「**抓到了什么**」——
+两者分开，因为「没收到提醒」可能是抓取失败，也可能确实没作业，得能区分。
+
+每次抓取（控制台「检索」/「预览」/「提前发布」，以及定时任务）都往
+`data/fetch_log.jsonl` 追一条：
+
+| 字段 | 含义 |
+| --- | --- |
+| `source` | `hub-list`（检索按钮）/ `hub-preview` / `hub-publish` / `weekly`（定时） |
+| `days` / `mode` | 窗口天数（9999 = 全部）与取数口径（`deadline-only` / `pool`） |
+| `platform` / `tests` / `manual` | 抓到平台作业多少条、其中在线测试多少、手动补录多少 |
+| `rows` | 进入最终窗口的条数 |
+| `elapsed_sec` | 本次抓取耗时 |
+| `cached` / `data_age_sec` | 是否复用了缓存、缓存是多久前的 |
+| `failed_count` / `failed_courses` | 有几门课抓取失败（覆盖不完整时能立刻发现） |
+| `ok` / `error` | 成功与否及错误原因 |
+
+查看方式：
+
+```powershell
+& $PY data\fetch_log_show.py      # 最近 10 条
+& $PY data\fetch_log_show.py 30   # 最近 30 条
+```
+
+> 它解决过的问题：曾出现「黑名单候选突然消失」，当时分不清是抓取失败还是数据被覆盖；
+> 也出现过「推送说平台 0 条」，看不出是登录态失效还是真没作业 —— 有了这份账就能一眼判断。
+
 ## 在终端里跑
 
 ```powershell
