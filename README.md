@@ -47,10 +47,27 @@
 
 | 双击次数 | 行为 |
 | --- | --- |
-| **第 1 次** | 开一个 Edge 应用窗口 + 在后台无窗口启动服务 |
+| **第 1 次** | 后台无窗口启动服务 → **等它真的能回答 HTTP** → 再开 Edge 应用窗口 |
 | **第 2 次及以后** | 服务已在运行 → **把已有窗口置于前台**，打印提示，**不新建窗口** |
+| 服务在跑、但**没有可用窗口** | 直接**新开一个窗口**（见下），绝不让你面对「请自行打开」 |
 
 > **关掉浏览器窗口 = 停止服务**，端口与内存随即释放。
+
+> **为什么第 1 次要先起服务、再开浏览器？**
+> 踩过的坑：反过来的顺序（先开浏览器）会让 Edge 在服务还没监听时就请求
+> `127.0.0.1:8277`，页面直接是 `ERR_CONNECTION_REFUSED`「拒绝访问」，
+> 得手动按刷新。现在启动器会调 `data/wait_ready.py` 等真能回答 HTTP（最多 20 秒）
+> 才开窗；20 秒仍未就绪就**什么都不开**并提示你看 `data/server_console.log` ——
+> 开一个通向死端口的窗口没有任何意义。
+> （探测逻辑刻意不写在 `.bat` 里：批处理的嵌套引号 + 重定向太脆，实测会报
+> 「此时不应有 1>」；而且还要避开 TIME_WAIT 残连接造成的误判，见下。）
+
+> **「服务在跑、窗口却不在」这个中间态是怎么来的？**
+> 关掉浏览器窗口后，服务靠「心跳停了」才退出，最多有 30 秒延迟（见下一节）。
+> 这期间端口仍被占用，但窗口已经没了 —— 窗口标题会退回成 `127.0.0.1` 这类地址串，
+> 于是「按标题找窗口并置前」必然失败。旧版在这里只打印一句
+> `Console service is already running, but its window was not found`，
+> 等于把你丢在一个打不开的控制台前。现在这种情况会**自动新开一个窗口**给你。
 
 ### 停止服务的判定方式（进程 + 页面心跳，双条件）
 
@@ -62,6 +79,10 @@
 
 1. 被守护的 Edge 进程已消失；
 2. 页面心跳也停了（`console.html` 每 5 秒 POST 一次 `/api/heartbeat`，超过 30 秒没有心跳）。
+
+所以**关窗后服务最多还会活 30 秒**（等心跳超时）。这 30 秒里端口仍被占用：
+此时再双击 `console.bat`，启动器会先失败一次「置前旧窗口」，然后**自动新开一个窗口**，
+不会让你卡在「服务在跑但打不开」的状态里（见上一节的说明）。
 
 页面从未连上过的启动瞬间给 180 秒宽限期，避免误判。
 
@@ -416,6 +437,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
     ├── *.py               # 所有 Python 脚本（server.py 是 Web 控制台后端）
     ├── console.html       # Web 控制台界面（单页，零依赖）
     ├── run_hidden.vbs     # 无窗口启动服务（console.bat 调用）
+    ├── wait_ready.py      # 就绪探测：已有实例？服务能回答 HTTP？（启动器用）
     ├── console.ps1        # 旧版 WinForms 控制台窗体（降级备用）
     ├── config.example.json  # 配置模板（入库）
     ├── config.json        # 你的配置（不入库）
@@ -446,6 +468,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/server.py` | Web 控制台 HTTP 服务（薄封装 hub.py / manual.py，长任务后台线程化）；`--watch-pid` + 页面心跳决定何时自我退出 |
 | `data/console.html` | Web 控制台界面（单页零依赖；字体走 server.py 的 /fonts/ 路由，找不到自动回退系统字体） |
 | `data/run_hidden.vbs` | 以无窗口方式启动服务（`console.bat` 调用），输出写入 `server_console.log` |
+| `data/wait_ready.py` | 启动器用的就绪探测：判断「已有实例在监听」与「服务真能回答 HTTP」，全程短超时不挂住 |
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
@@ -560,6 +583,20 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
   HTTP 层异常在 `data/server_error.log`。
 - **改完 `server.py` 必须重启服务**：它是常驻进程，改动不会热加载。
   关掉浏览器窗口再双击 `console.bat` 即可（旧的 `console.ps1` 同理）。
+- **启动器必须「先起服务、再开浏览器」**（2026-10-15 修，实跑验证）：
+  反过来的顺序会让 Edge 请求到一个还没监听的端口，页面直接
+  `ERR_CONNECTION_REFUSED`「拒绝访问」，用户得手按刷新。
+  现在启动器调 `data/wait_ready.py --timeout 20` 等到真能回答 HTTP；仍未就绪就报错并
+  指向 `server_console.log`，**不开窗** —— 通向死端口的窗口只会给一个错误页。
+- **判「服务在不在」要看 LISTEN，不能看「能不能连上」**：主动关闭方留下的
+  `TIME_WAIT` 残连接同样能 `connect_ex` 成功，于是**已经退出的服务被误判成还在跑**，
+  启动器就走进复用分支、再也开不出窗口。`wait_ready.py` 因此只用
+  `connect_ex` 的结果配合「是否真的在 LISTEN」来判断，并用 `settimeout` 保证
+  快速返回（曾经在死端口上每次等满 TCP 超时，号称 20 秒实际让用户等了 78 秒）。
+- **「服务在跑、窗口不在」时要自动开新窗口**：关窗后服务还有最多 30 秒才退出，
+  这期间端口被占用、窗口已消失（窗口标题会从 `作业提醒控制台` 退回成 `127.0.0.1`），
+  「按标题置前」必然失败。旧版只打印 `its window was not found` 让用户自己开；
+  现在这种情况直接新开一个窗口。**窗口标题是置前功能的唯一依据，别只测「页面能开」。**
 
 ### Windows / PowerShell
 
