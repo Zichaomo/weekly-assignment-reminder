@@ -49,3 +49,7 @@ data/courses.scan.json
 
 # 服务端异常日志（排查用）
 data/server_error.log
+
+# 服务日志（无窗口运行时的输出）
+data/server_console.log
+data/server_error.log

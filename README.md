@@ -40,10 +40,24 @@
 
 ## 统一控制台（推荐，一个界面搞定全部）
 
-双击 `console.bat`：启动本地 Web 控制台服务（`data/server.py`，127.0.0.1:8277），
-并用 **Edge 应用窗口**打开界面（无地址栏，观感等同桌面程序）。
-服务已在跑时双击不会重复占端口。想停止服务：点页面底部的「**停止控制台服务**」即可
-（或关掉任务栏里名为 HomeworkConsole 的最小化窗口）。
+双击 `console.bat`：**只出现一个 Edge 应用窗口**（无地址栏，观感等同桌面程序）。
+服务在后台**无窗口**运行，双击时那个控制台窗口会在几秒内自动关闭。
+跟这个窗口的关系很简单：
+
+> **关掉浏览器窗口 = 停止服务**，端口与内存立即释放，不留残余进程。
+
+实现方式：`console.bat` 先取得 Edge 应用窗口的进程号，再用 `data/run_hidden.vbs`
+把 `server.py` 无窗口启动并附上 `--watch-pid <该进程号>`；服务每 3 秒检查一次，
+该进程消失就自我退出。（实测：Edge 的 `--app` 实例关闭后，其 14 个子进程会全部消失，
+所以判进程比判页面心跳更可靠，也不受浏览器后台节流影响。）
+
+其他停止方式（都不需要时可以直接忽略）：
+
+- 页面底部「**停止控制台服务**」按钮；
+- 万一没取到 Edge 进程号（服务退化为常驻），关掉 `python.exe` 进程即可。
+
+服务日志在 `data/server_console.log`（无窗口运行，出问题时看这个）；
+`data/server_error.log` 记录 HTTP 层异常。两个文件都在 `.gitignore` 里。
 
 > 旧版 WinForms 窗体保留在 `console-legacy.bat`（`data/console.ps1`），功能一致、随时可降级。
 > 旧窗体标题栏的「脚本构建时间」只对旧版有意义：Web 版每次打开都是新代码，不存在热重载问题。
@@ -354,6 +368,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 └── data/                  # 全部脚本与数据
     ├── *.py               # 所有 Python 脚本（server.py 是 Web 控制台后端）
     ├── console.html       # Web 控制台界面（单页，零依赖）
+    ├── run_hidden.vbs     # 无窗口启动服务（console.bat 调用；服务守护浏览器进程）
     ├── console.ps1        # 旧版 WinForms 控制台窗体（降级备用）
     ├── config.example.json  # 配置模板（入库）
     ├── config.json        # 你的配置（不入库）
@@ -378,7 +393,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/notify.py` | 推送层，多渠道可插拔；含推送台账与去重 |
 | `data/manual.py` | 手动补录作业的增删改查 |
 | `data/hub.py` | 控制台后端：`list` / `publish` / `content` / `refresh-courses` / `blacklist-*` / `test-blacklist-*`，只输出 JSON |
-| `data/server.py` | Web 控制台 HTTP 服务（薄封装 hub.py / manual.py，长任务后台线程化，不碰业务逻辑） |
+| `data/server.py` | Web 控制台 HTTP 服务（薄封装 hub.py / manual.py，长任务后台线程化，不碰业务逻辑）；`--watch-pid` 让它在浏览器窗口关闭时自我退出 |
+| `data/run_hidden.vbs` | 以无窗口方式启动服务（`console.bat` 调用），并把输出写入 `server_console.log` |
 | `data/console.html` | Web 控制台界面（单页零依赖；字体走 server.py 的 /fonts/ 路由，找不到自动回退系统字体） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
@@ -456,9 +472,14 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 - **不要在抓取进行中再点检索**：会与正在跑的抓取互相干扰（已加文件锁自动排队，
   但排队超时后仍会继续，结果可能不准）。定时任务跑的时候同理。
 - **缓存只存健康结果**：平台 0 条或大面积失败的结果不缓存，避免把失败伪装成成功。
-- **服务停止方式**：页面底部「停止控制台服务」按钮，或关掉任务栏里名为
-  `HomeworkConsole` 的最小化窗口。端口固定 `127.0.0.1:8277`（只监听本机，局域网访问不到）；
+- **服务停止方式**：**关掉浏览器窗口即可**（服务守护着它，会自动退出并释放端口）；
+  也可点页面底部「停止控制台服务」。端口固定 `127.0.0.1:8277`（只监听本机，局域网访问不到）；
   重复双击 `console.bat` 不会起第二个实例。
+- **服务是无窗口运行的**：看不到控制台窗口是正常的。它的输出在 `data/server_console.log`
+  （`run_hidden.vbs` 用 `python -u` 启动，否则块缓冲会让日志迟迟不落盘），
+  HTTP 层异常在 `data/server_error.log`。
+- **改完 `server.py` 必须重启服务**：它是常驻进程，改动不会热加载。
+  关掉浏览器窗口再双击 `console.bat` 即可（旧的 `console.ps1` 同理）。
 
 ### Windows / PowerShell
 

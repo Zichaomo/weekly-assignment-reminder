@@ -13,10 +13,12 @@
 用法：双击 console.bat（或手动 `python server.py`），浏览器打开 http://127.0.0.1:8277
 端口被占用时直接退出（视为已有实例在跑，console.bat 会继续打开浏览器）。
 """
+import argparse
 import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -498,15 +500,61 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"ok": False, "error": "not found"})
 
 
+def _pid_alive(pid: int) -> bool:
+    """进程是否仍存在（Windows 用 tasklist，跨平台兜底 os.kill）。"""
+    if not pid:
+        return True
+    if os.name == "nt":
+        try:
+            r = subprocess.run(["tasklist", "/fi", f"PID eq {pid}", "/nh"],
+                               capture_output=True, text=True, timeout=10)
+            return str(pid) in (r.stdout or "")
+        except Exception:  # noqa: BLE001
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _watch_browser(pid: int, interval: float = 3.0):
+    """守护浏览器进程：它一消失就自我退出（释放端口与内存）。
+
+    为什么用进程而不是心跳：Edge 的 --app 窗口关闭后，整个进程树都会消失
+    （已实测：14 个子进程 -> 0）。所以判进程比判页面心跳更可靠，
+    也不会被浏览器的后台节流影响。
+    """
+    print(f"守候浏览器进程 PID={pid}：窗口关闭后本服务会自动退出。")
+    while True:
+        time.sleep(interval)
+        if not _pid_alive(pid):
+            print("浏览器窗口已关闭，控制台服务退出。")
+            os._exit(0)
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--watch-pid", type=int, default=0,
+                    help="守护该进程：它退出时本服务自动退出（传 Edge 的 PID）")
+    args = ap.parse_args()
+
     # 端口已被占用 = 已有实例在跑，安静退出（console.bat 会继续打开浏览器）
     with socket.socket() as s:
         if s.connect_ex(("127.0.0.1", PORT)) == 0:
             print(f"已有控制台服务在 http://127.0.0.1:{PORT} ，本实例退出。")
             return
+
+    if args.watch_pid:
+        threading.Thread(target=_watch_browser, args=(args.watch_pid,),
+                         daemon=True).start()
+
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"作业提醒 Web 控制台已启动： http://127.0.0.1:{PORT}")
-    print("（这个窗口可以最小化；关掉它控制台服务就停止）")
+    if args.watch_pid:
+        print("（无独立窗口；关闭浏览器窗口即停止服务）")
+    else:
+        print("（这个窗口可以最小化；关掉它控制台服务就停止）")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
