@@ -3,9 +3,10 @@ rem ============================================================================
 rem  Homework reminder console - single-window launcher
 rem
 rem  Behavior:
-rem    - If the service is already listening on 8277, just open the UI and exit.
-rem    - Otherwise: start an Edge app window, capture its PID, then start
-rem      server.py hidden (run_hidden.vbs) and let it watch that process.
+rem    - ALWAYS open the UI as an Edge app window (no address bar).
+rem      If the service is already listening, reuse it; otherwise start it hidden.
+rem    - Only when Edge cannot be found at all does it fall back to the
+rem      default browser, and it says so explicitly.
 rem    - Closing the browser window stops the service and frees the port.
 rem
 rem  IMPORTANT: this file is ASCII-only ON PURPOSE.
@@ -13,8 +14,8 @@ rem    cmd parses batch files with the console OEM code page (GBK on zh-CN),
 rem    so UTF-8 Chinese text inside a .bat can be mis-read as commands and
 rem    print errors like:
 rem        '...' is not recognized as an internal or external command
-rem    Chinese user-facing messages are printed by Python (launcher_msg.py) instead,
-rem    which handles UTF-8 correctly. Do not add Chinese text to this file.
+rem    Chinese user-facing messages are printed by Python (launcher_msg.py)
+rem    instead, which handles UTF-8 correctly. Do not add Chinese to this file.
 rem ============================================================================
 setlocal
 set "PY=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
@@ -26,24 +27,26 @@ set "URL=http://127.0.0.1:8277"
 if not exist "%PY%" goto no_python
 if not exist "%VBS%" goto no_vbs
 
-rem ---- 1) reuse an already running service (never start a 2nd instance)
+rem ---- 1) is a service already listening?
 set "PORTBUSY="
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$c = New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1', 8277); '1' } catch { '0' } finally { $c.Close() }" 2^>nul`) do set "PORTBUSY=%%i"
-if "%PORTBUSY%"=="1" goto reuse
 
-rem ---- 2) locate Edge
+rem ---- 2) locate Edge (preferred: every launch must look the same)
 set "EDGE="
 if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
 if not defined EDGE if exist "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" set "EDGE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
 if not defined EDGE if exist "%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe" set "EDGE=%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"
-
-rem ---- 3) start Edge app window and capture its PID
-set "EDGEPID="
 if not defined EDGE goto no_edge
+
+rem ---- 3) open the Edge app window and capture its PID
+set "EDGEPID="
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$p = Start-Process -FilePath '%EDGE%' -ArgumentList '--app=%URL%','--no-first-run','--no-default-browser-check' -PassThru; $p.Id" 2^>nul`) do set "EDGEPID=%%i"
+
+rem ---- 4) service already running? then just show it (no 2nd instance)
+if "%PORTBUSY%"=="1" goto reuse
 if "%EDGEPID%"=="" goto no_pid
 
-rem ---- 4) start the hidden service, watching the browser process
+rem ---- 5) start the hidden service, watching the browser process
 cscript //nologo "%VBS%" "%PY%" "%EDGEPID%" "%SRV%"
 "%PY%" "%MSG%" ok
 ping -n 3 127.0.0.1 >nul
@@ -52,12 +55,13 @@ exit /b 0
 
 :reuse
 "%PY%" "%MSG%" reuse
-start "" "%URL%"
 ping -n 2 127.0.0.1 >nul
 endlocal
 exit /b 0
 
+rem  Edge not found: the only case where the default browser is used.
 :no_edge
+if "%PORTBUSY%"=="1" goto reuse_no_edge
 cscript //nologo "%VBS%" "%PY%" "" "%SRV%"
 "%PY%" "%MSG%" no_edge
 start "" "%URL%"
@@ -65,7 +69,16 @@ ping -n 3 127.0.0.1 >nul
 endlocal
 exit /b 0
 
+:reuse_no_edge
+"%PY%" "%MSG%" reuse_no_edge
+start "" "%URL%"
+ping -n 2 127.0.0.1 >nul
+endlocal
+exit /b 0
+
+rem  Edge exists but we could not get its PID: do NOT open a second browser.
 :no_pid
+if "%PORTBUSY%"=="1" goto reuse
 cscript //nologo "%VBS%" "%PY%" "" "%SRV%"
 "%PY%" "%MSG%" no_pid
 ping -n 3 127.0.0.1 >nul
