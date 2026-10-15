@@ -49,6 +49,9 @@ PAGE_FILE = ROOT / "console.html"
 EXEC = ThreadPoolExecutor(max_workers=1)
 TASKS = {}          # id -> {status, op, started, finished, result, error}
 _CACHE_SIDE = {}    # id -> 该任务的原始抓取数据（内部用，不出网）
+_LAST_HEARTBEAT = [0.0]   # 页面最后一次心跳时间（列表以便闭包内修改）
+HEARTBEAT_GAP = 30.0      # 超过这么久没有心跳 = 页面已关
+STARTUP_GRACE = 180.0     # 页面从未连上时的宽限期（避免刚启动就误判）
 TASKS_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------- 字体
@@ -422,6 +425,10 @@ class Handler(BaseHTTPRequestHandler):
             mime = FONT_MIME.get(fp.suffix.lower(), "application/octet-stream")
             return self._send(200, None, mime, raw=fp.read_bytes())
 
+        if path == "/api/heartbeat":
+            _LAST_HEARTBEAT[0] = time.time()
+            return self._send(200, {"ok": True})
+
         if path == "/api/cache":
             return self._send(200, {"ok": True, **cache_state()})
 
@@ -483,6 +490,10 @@ class Handler(BaseHTTPRequestHandler):
                 fn = hub.run_test_blacklist_apply if action == "apply" else hub.run_test_blacklist_remove
             return self._send(200, fn(lids))
 
+        if u.path == "/api/heartbeat":
+            _LAST_HEARTBEAT[0] = time.time()
+            return self._send(200, {"ok": True})
+
         if u.path == "/api/open":
             url = str(p.get("url", ""))
             if not url.startswith("http"):
@@ -519,17 +530,30 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _watch_browser(pid: int, interval: float = 3.0):
-    """守护浏览器进程：它一消失就自我退出（释放端口与内存）。
+    """守护控制台：浏览器进程消失 **且** 页面心跳也停了，才退出。
 
-    为什么用进程而不是心跳：Edge 的 --app 窗口关闭后，整个进程树都会消失
-    （已实测：14 个子进程 -> 0）。所以判进程比判页面心跳更可靠，
-    也不会被浏览器的后台节流影响。
+    为什么需要两个条件（实测踩过）：
+      当 Edge 已有实例在运行时，`--app` 会被交给那个实例处理，
+      我们启动的进程随即退出 —— 只看进程号会导致服务刚起就自杀，
+      页面打开就是「拒绝连接」。所以必须再确认"页面确实没人用了"。
+
+    心跳由 console.html 每 5 秒上报一次（POST /api/heartbeat）。
     """
-    print(f"守候浏览器进程 PID={pid}：窗口关闭后本服务会自动退出。")
+    started = time.time()
+    print(f"守护控制台：浏览器进程 PID={pid}，并等待页面心跳。")
     while True:
         time.sleep(interval)
-        if not _pid_alive(pid):
-            print("浏览器窗口已关闭，控制台服务退出。")
+        alive = _pid_alive(pid)
+        hb = _LAST_HEARTBEAT[0]
+        if hb == 0.0:
+            # 页面还没连上过：给宽限期。期间即使进程号没了也不退出
+            # （因为进程号可能被转交给了已有 Edge 实例）
+            if not alive and (time.time() - started) > STARTUP_GRACE:
+                print("浏览器进程消失且页面始终未连上，控制台服务退出。")
+                os._exit(0)
+            continue
+        if not alive and (time.time() - hb) > HEARTBEAT_GAP:
+            print("浏览器窗口已关闭（且页面心跳停止），控制台服务退出。")
             os._exit(0)
 
 
