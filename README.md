@@ -596,6 +596,63 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | **① 每周日的定时推送** | 每周日固定时间抓取 + 推送（默认测试群） | ✅ 已实现并实测通过 |
 | **② 周日开机后的补推检测** | 检查本周日是否已推送，没推则补推 | ✅ 已实现并实测通过 |
 
+### 第一部分：每周日的定时推送
+
+一条命令注册好（默认**发测试群**）：
+
+```powershell
+& $PY data\task_register.py --time 09:00            # 每周日 09:00，发测试群
+& $PY data\task_register.py --time 09:00 --dry-run  # 只看会注册什么，不真注册
+& $PY data\task_register.py --query                 # 查看任务状态与下次运行时间
+& $PY data\task_register.py --run-now               # 立刻触发一次（验证用）
+& $PY data\task_register.py --unregister            # 删掉任务
+```
+
+改时间＝用新 `--time` 再跑一次（`/F` 覆盖同名任务，不会注册出两个各发一次）。
+
+任务名固定 `BUCT-Homework-Weekly`，实际执行的是
+`python data\task_run.py --wecom test --days 7`：
+
+| 环节 | 谁做 | 说明 |
+| --- | --- | --- |
+| 选目标群 | `task_run.py` | **默认测试群**，要发班级群必须显式 `--wecom prod` |
+| 抓取/汇总/排版/推送 | `weekly.py` | 业务逻辑一行都不重复实现 |
+| 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（约 45 秒，实测能自愈） |
+| 失败告警 | `alert.py` | 抓取 0 条 / 过半失败 / 推送失败都会出声 |
+| 记账 | `data/task_log.jsonl` | 几点跑的、多久、退出码、抓到多少条、**发到哪个群** |
+
+**错过了会补跑**：任务设了 `StartWhenAvailable`，周日那一刻没开机/休眠，开机后系统会补跑一次。
+（这与第二部分是两件事：这里是系统级补跑，第二部分是业务级「这周到底发出去没有」。）
+
+#### 测试群 / 正式班级群，到底在发哪一个
+
+`config.json` 里有三个企业微信 key，**认尾号就不会错**：
+
+| config 字段 | key 尾号 | 是哪个群 | 谁在用 |
+| --- | --- | --- | --- |
+| `wecom_webhook` | `…896a828b` | **测试群** | 控制台「提前发布」等按 config 走的地方 |
+| `wecom_webhook_test` | `…896a828b` | **测试群**（同一条） | **定时任务**（`--wecom test`）与告警定向 |
+| `wecom_webhook_prod` | `…e73e` | **正式班级群** | 只有显式 `--wecom prod` 才用 |
+
+- **要发正式群**：把 `wecom_webhook_prod` 的值整条复制到 `wecom_webhook`。
+- **要退回来**：把 `wecom_webhook_test` 的值复制到 `wecom_webhook`。
+- **定时任务不受这个切换影响**：它读的是 `wecom_webhook_test`，
+  所以你在测试时改 `wecom_webhook`，**不会让周日那次误发到班级群**。
+
+> 这个设计是刻意的：定时推送是无人看管的，一旦发错群就是全班同学收到。
+> 所以「定时发哪个群」必须是一个**显式的参数**，而不是继承某个可能被改过的字段。
+> 想确认某次实际发到哪：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段。
+
+#### 两个实测踩过的坑
+
+1. **计划任务里不能写 shell 重定向**。最初把命令写成
+   `python task_run.py … >> log 2>&1`，结果 `>>` 被当成 python 的参数，
+   argparse 报错退出 2 —— 表现是「任务显示跑过了，但日志文件根本没被创建」。
+   现在日志由 `task_run.py` 自己写 `data/task_run.log`，不依赖 shell。
+2. **必须用装了 playwright 的那个解释器**。`task_register.py` 会自动探测
+   `%USERPROFILE%\.workbuddy\...\envs\default\Scripts\python.exe`，找不到就报错，
+   不会静默注册一个跑不起来任务。
+
 ### 第二部分：周日开机后的补推检测
 
 第一部分只在**那一刻电脑开着**时才跑得成。周日上午没开机、或者开机了但锁屏导致
@@ -605,7 +662,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 一条命令注册好：
 
 ```powershell
-& $PY data\task_register.py --catchup                    # 登录时触发，等待 15 分钟
+& $PY data\task_register.py --catchup                    # 仅周日触发 + 错过补跑（默认等 15 分钟）
 & $PY data\task_register.py --catchup --delay-min 15 --target-time 09:00 --wecom test
 & $PY data\task_register.py --query --name BUCT-Homework-Catchup
 & $PY data\task_register.py --unregister --name BUCT-Homework-Catchup
@@ -697,63 +754,6 @@ Catchup 的触发器会显示成「每周」（实际只在周日），Weekly �
   `push_log.jsonl` 记的是 `ok=true` + `note=duplicate-skipped`，
   而 `task_run.log` 会写「已发」——想确认"到底有没有真送达"，看 `note` 字段。
 
-### 第一部分：每周日的定时推送
-
-一条命令注册好（默认**发测试群**）：
-
-```powershell
-& $PY data\task_register.py --time 09:00            # 每周日 09:00，发测试群
-& $PY data\task_register.py --time 09:00 --dry-run  # 只看会注册什么，不真注册
-& $PY data\task_register.py --query                 # 查看任务状态与下次运行时间
-& $PY data\task_register.py --run-now               # 立刻触发一次（验证用）
-& $PY data\task_register.py --unregister            # 删掉任务
-```
-
-改时间＝用新 `--time` 再跑一次（`/F` 覆盖同名任务，不会注册出两个各发一次）。
-
-任务名固定 `BUCT-Homework-Weekly`，实际执行的是
-`python data\task_run.py --wecom test --days 7`：
-
-| 环节 | 谁做 | 说明 |
-| --- | --- | --- |
-| 选目标群 | `task_run.py` | **默认测试群**，要发班级群必须显式 `--wecom prod` |
-| 抓取/汇总/排版/推送 | `weekly.py` | 业务逻辑一行都不重复实现 |
-| 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（约 45 秒，实测能自愈） |
-| 失败告警 | `alert.py` | 抓取 0 条 / 过半失败 / 推送失败都会出声 |
-| 记账 | `data/task_log.jsonl` | 几点跑的、多久、退出码、抓到多少条、**发到哪个群** |
-
-**错过了会补跑**：任务设了 `StartWhenAvailable`，周日那一刻没开机/休眠，开机后系统会补跑一次。
-（这与第二部分是两件事：这里是系统级补跑，第二部分是业务级「这周到底发出去没有」。）
-
-#### 测试群 / 正式班级群，到底在发哪一个
-
-`config.json` 里有三个企业微信 key，**认尾号就不会错**：
-
-| config 字段 | key 尾号 | 是哪个群 | 谁在用 |
-| --- | --- | --- | --- |
-| `wecom_webhook` | `…896a828b` | **测试群** | 控制台「提前发布」等按 config 走的地方 |
-| `wecom_webhook_test` | `…896a828b` | **测试群**（同一条） | **定时任务**（`--wecom test`）与告警定向 |
-| `wecom_webhook_prod` | `…e73e` | **正式班级群** | 只有显式 `--wecom prod` 才用 |
-
-- **要发正式群**：把 `wecom_webhook_prod` 的值整条复制到 `wecom_webhook`。
-- **要退回来**：把 `wecom_webhook_test` 的值复制到 `wecom_webhook`。
-- **定时任务不受这个切换影响**：它读的是 `wecom_webhook_test`，
-  所以你在测试时改 `wecom_webhook`，**不会让周日那次误发到班级群**。
-
-> 这个设计是刻意的：定时推送是无人看管的，一旦发错群就是全班同学收到。
-> 所以「定时发哪个群」必须是一个**显式的参数**，而不是继承某个可能被改过的字段。
-> 想确认某次实际发到哪：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段。
-
-#### 两个实测踩过的坑
-
-1. **计划任务里不能写 shell 重定向**。最初把命令写成
-   `python task_run.py … >> log 2>&1`，结果 `>>` 被当成 python 的参数，
-   argparse 报错退出 2 —— 表现是「任务显示跑过了，但日志文件根本没被创建」。
-   现在日志由 `task_run.py` 自己写 `data/task_run.log`，不依赖 shell。
-2. **必须用装了 playwright 的那个解释器**。`task_register.py` 会自动探测
-   `%USERPROFILE%\.workbuddy\...\envs\default\Scripts\python.exe`，找不到就报错，
-   不会静默注册一个跑不起来任务。
-
 ### 原方案（WorkBuddy 自动化）已失效
 
 曾在 WorkBuddy 自动化面板里配过一个任务「北化在线作业周报」
@@ -764,30 +764,38 @@ Catchup 的触发器会显示成「每周」（实际只在周日），Weekly �
 更要紧的是：**推送台账里从来没有一条 `source=weekly + channel=wecom`** ——
 群里收到的每条提醒都是手动点「提前发布」发出的。也就是说这条路从未真正打通过。
 
-### 待选方案（尚未实施）
+### 当初的候选方案（已定案：A + B）
 
-| 方案 | 做法 | 优点 | 代价 |
-| --- | --- | --- | --- |
-| **A. Windows 计划任务** | 注册每周日的计划任务跑 `weekly.py`；勾「错过尽快启动」、失败重试 | 系统级、开机即生效、错过的能补跑 | 执行时电脑需已登录且未锁屏 |
-| **B. 登录时补跑** | 登录时检查「本周是否已成功推送」，没有就补发一次 | 兜住「周日没开机/锁屏」 | 补发时间会稍晚 |
-| **C. 常驻守护进程** | 隐藏进程常驻，到点触发并负责重登/重试 | 可内置重试与自动重登 | 多一个常驻进程 |
-| **D. 半自动** | 每周手动点一次「检索 + 提前发布」 | 零配置、不会静默失败 | 依赖你记得 |
+原来列了四个候选，现在**已按 A + B 落地**，记在这里是为了说明为什么这么选：
 
-**建议：A + B 组合**，并优先补上「失败告警」（见下）。
+| 方案 | 做法 | 结果 |
+| --- | --- | --- |
+| **A. Windows 计划任务** | 注册每周日的计划任务；勾「错过尽快启动」 | ✅ **已采用** —— 就是「第一部分」 |
+| **B. 登录时补跑** | 检查「本周是否已成功推送」，没有就补发 | ✅ **已采用**（等价形式）—— 就是「第二部分」 |
+| **C. 常驻守护进程** | 隐藏进程常驻，到点触发并负责重登/重试 | ❌ 未采用：为一个每周一次的任务多养一个常驻进程不划算 |
+| **D. 半自动** | 每周手动点一次「检索 + 提前发布」 | ❌ 未采用：依赖人记得，而漏发的代价是全班收不到 |
 
-### 无论选哪个都要注意的前提
+B 项的落地形式与当初设想略有不同：不是「登录时补跑」这个触发器
+（Windows 没有「仅周日登录」这种触发器），而是
+**Weekly(Sunday) + StartWhenAvailable** —— 周日那一刻没开机就下次可用时补跑，
+效果等价且触发点本身就只在周日。详见「第二部分」。
+
+### 三个无论如何都要注意的前提
 
 1. **登录态只有约 3 天寿命**（`TGC` / `JSESSIONID` 都是会话级 cookie），
    而定时是每周一次 —— 执行时登录态几乎必然已失效。
    `weekly.py` 的 `ensure_login()` 会先自动尝试登录一次（最多 45 秒，不转人工），
    实测能自愈成功；但它需要**真的创建一个可见的 Edge 窗口**，
-   所以执行那一刻电脑必须是已登录、未锁屏的状态。
-2. **抓取/推送失败现在会告警了**（2026-10-15 加，见「失败告警」一节）：
-   登录失效、抓取崩溃、平台 0 条、过半课程失败、推送失败、以及「该跑没跑」
-   都会走 `alert.py` 出声。**但告警只在 `weekly.py` 真的被执行时才会发** ——
-   如果定时任务根本没触发（原 WorkBuddy 方案就是这样），那就需要
-   `weekly.py --check-freshness --alert-if-stale` 这类**外部定期检查**来兜住。
+   所以执行那一刻电脑必须是**已登录、未锁屏**的状态。锁屏时的表现是：
+   任务照常启动，但自动登录失败 → 触发失败告警 → 由第二部分补推兜住。
+2. **抓取/推送失败会告警**（见「失败告警」一节）：登录失效、抓取崩溃、平台 0 条、
+   过半课程失败、推送失败、以及「该跑没跑」都会走 `alert.py` 出声。
+   但**告警只在任务真的被执行时才会发** —— 如果压根没触发（原 WorkBuddy 方案就是
+   这样），就需要 `weekly.py --check-freshness --alert-if-stale` 这类外部检查来兜住。
    所以告警是定时的前置件，不是替代品。
+3. **推送目标是显式参数，不继承配置**：定时与补推都默认发**测试群**
+   （`--wecom test`），发正式班级群必须显式 `--wecom prod`。
+   这样你为了测试去改 `config.json` 的 `wecom_webhook`，也不会让周日那次误发全班。
 
 ## 查看作业内容（平台作业正文）
 
