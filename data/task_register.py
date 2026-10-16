@@ -14,13 +14,15 @@
     这与第二部分「开机后检查」是两件事：这里是系统级的补跑，第二部分是
     业务级的「这周到底发出去没有」。
   · **任务名固定**，重名就覆盖（/F），避免注册出两个任务各发一次。
-  · **默认发测试群**：命令里带上 --wecom test。要发正式群必须自己改命令，
-    并且 README 里写了怎么改。
+  · **默认跟随 config.json**：命令里不带 --wecom，即 `--wecom config`，
+    发到 config.json 的 `wecom_webhook` —— 你在 config 里换成正式群，它就发正式群；
+    换回测试群，它就发测试群。测试时想临时发测试群就显式 `--wecom test`。
 
 用法：
-    python task_register.py --time 09:00                  # 注册（每周日 09:00，测试群）
+    python task_register.py --time 09:00                  # 注册（每周日 09:00，跟随 config）
     python task_register.py --time 09:00 --dry-run        # 只打印将要执行的命令
-    python task_register.py --time 09:00 --wecom prod     # 注册成发正式班级群
+    python task_register.py --time 09:00 --wecom test     # 注册成只发测试群（测试用）
+    python task_register.py --time 09:00 --wecom prod     # 注册成只发正式班级群
     python task_register.py --query                       # 查看当前任务状态
     python task_register.py --unregister                  # 删除任务
     python task_register.py --run-now                     # 立刻触发一次（验证用）
@@ -222,29 +224,32 @@ Write-Output ('State   : ' + $t.State)
 
 
 def check_target_split(wecom: str) -> tuple:
-    """注册前检查「定时任务要发的群」和「主用那条」是不是分开的。
+    """只在「强制发测试群」时检查测试群是否真的与主用那条分开。
 
-    为什么值得检查：定时任务固定发 wecom_webhook_test，而控制台/notify 命令行
-    发 wecom_webhook。如果这两条是同一个 key，说明"测试群"根本没和主用分开 ——
-    你在控制台做测试就等于直接发到主用那条（可能是班级群）。
+    背景：`--wecom config`（默认）跟随 config.json 的 wecom_webhook，
+    你换成班级群就发班级群、换回测试群就发测试群 —— 这是刻意的，不需要检查。
+
+    但 `--wecom test` 是"我这次要发测试群"，如果 wecom_webhook_test 与
+    wecom_webhook 是同一个 key，那"测试群"根本没和主用分开，测试就等于发主用群。
     返回 (ok, 说明)。
     """
+    if wecom != "test":
+        return True, ("跟随 config.json 的 wecom_webhook（你在 config 里换成哪个群就发哪个群）"
+                      if wecom == "config" else f"强制发 {wecom}，请自行确认")
     try:
         sys.path.insert(0, str(ROOT))
         import notify
         cfg = notify.load_config()
     except Exception as e:  # noqa: BLE001
         return True, f"（读不到 config.json，跳过检查：{e}）"
-    if wecom == "prod":
-        return True, "注册为发正式班级群（--wecom prod），请自行确认"
     test = (cfg.get("wecom_webhook_test") or "").strip()
     main = (cfg.get("wecom_webhook") or "").strip()
     if not test:
-        return False, ("wecom_webhook_test 未配置 —— 定时任务会因为找不到测试群而拒绝运行。"
-                       "请先在 config.json 填好它")
+        return False, ("wecom_webhook_test 未配置，无法强制发测试群。"
+                       "请在 config.json 填好它，或改用 --wecom config 跟随 wecom_webhook")
     if main and test == main:
         return False, ("wecom_webhook_test 与 wecom_webhook 是同一个 key，"
-                       "说明测试群没和主用那条分开：你在控制台测试会直接发到主用那条。"
+                       "说明测试群没和主用那条分开：这次\"测试\"实际会发到主用群。"
                        "若这是你有意为之，加 --force 跳过本检查")
     return True, f"测试群 key 尾 {test[-8:]}，与主用那条已分开"
 
@@ -257,10 +262,13 @@ def register(args) -> int:
 
     when = (f"一次性 {args.date or time.strftime('%Y/%m/%d')} {args.time}"
             if args.once else f"每周{args.day} {args.time}")
+    tgt = {"config": "跟随 config.json 的 wecom_webhook（推荐）",
+           "test": "强制测试群（wecom_webhook_test，测试用）",
+           "prod": "强制正式班级群（wecom_webhook_prod）"}[args.wecom]
     print(f"计划任务名：{args.name}")
     print(f"执行时间　：{when}")
     print(f"解释器　　：{python}")
-    print(f"目标群　　：{'测试群（--wecom test）' if args.wecom == 'test' else args.wecom}")
+    print(f"目标群　　：{tgt}")
     print(f"完整命令　：{command}")
     print(f"schtasks 　：schtasks {' '.join(cmd_args)}")
 
@@ -341,8 +349,10 @@ def main() -> int:
     ap.add_argument("--name", help=f"任务名（默认：每周={TASK_NAME}，补推={TASK_CATCHUP_NAME}）")
     ap.add_argument("--time", default="09:00", help="HH:MM（默认 09:00）")
     ap.add_argument("--day", default="SUN", help="SUN/MON/... 或 1-7（默认 SUN）")
-    ap.add_argument("--wecom", choices=["test", "prod", "config"], default="test",
-                    help="发到哪个群（默认 test=测试群）")
+    ap.add_argument("--wecom", choices=["config", "test", "prod"], default="config",
+                    help="定时任务发到哪个群：config=跟随 config.json 的 wecom_webhook"
+                         "（默认：你在 config 里换成正式群，它就发正式群）/ "
+                         "test=强制测试群（测试用）/ prod=强制班级群")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--once", action="store_true",
                     help="注册「只跑一次」的任务（配合 --time/--date），用于当场验证到点是否自动触发")

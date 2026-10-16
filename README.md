@@ -19,7 +19,7 @@
 # 2) 日常操作（检索 / 添加 / 管理 / 黑名单 / 提前发布）：双击 console.bat（Web 控制台）
 #    双击时若服务已在运行，会把已有窗口置于前台，不会开出第二个窗口
 #    旧版 WinForms 窗体保留在 console-legacy.bat，作为降级备用
-# 3) 每周定时自动推送：已实现（Windows 计划任务，默认发测试群）
+# 3) 每周定时自动推送：已实现（Windows 计划任务，默认跟随 config 的 wecom_webhook）
 #    python data\task_register.py --time 09:00     # 注册；改时间就再跑一次
 #    python data\task_register.py --run-now        # 立刻验证一次
 #    详见「定时」一节（改时间、查状态、切正式群都在那里）
@@ -579,7 +579,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
-| `data/task_run.py` | 定时任务运行器：决定发哪个群（默认测试群）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
+| `data/task_run.py` | 定时任务运行器：决定发哪个群（默认跟随 config.json 的 wecom_webhook）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
 | `data/task_register.py` | 把「每周定时推送」注册成 Windows 计划任务；支持改时间 / 查状态 / 删任务 / 立刻触发 |
 | `data/task_catchup.py` | 第二部分：登录后检查本周日是否已推送，未推送则补推（非周日秒退；只等需要动作的那次） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
@@ -589,33 +589,39 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 ## 定时
 
-定时分两部分，**第一部分已生效**（Windows 计划任务），第二部分见「周日开机补推」。
+定时分两部分，**两部分都已生效**（都是 Windows 计划任务）：
 
 | 部分 | 作用 | 状态 |
 | --- | --- | --- |
-| **① 每周日的定时推送** | 每周日固定时间抓取 + 推送（默认测试群） | ✅ 已实现并实测通过 |
+| **① 每周日的定时推送** | 每周日 09:00 抓取 + 推送（默认跟随 config 的 `wecom_webhook`） | ✅ 已实现并实测通过 |
 | **② 周日开机后的补推检测** | 检查本周日是否已推送，没推则补推 | ✅ 已实现并实测通过 |
+
+> **两者发到哪个群，只看 `config.json` 的 `wecom_webhook`**（默认 `--wecom config`）。
+> 你在那里放测试群就发测试群，换成正式班级群就发正式班级群，**不需要重新注册任务**。
+> 测试时想临时只发测试群，注册时加 `--wecom test`。
 
 ### 第一部分：每周日的定时推送
 
-一条命令注册好（默认**发测试群**）：
+一条命令注册好（默认**跟随 `config.json` 的 `wecom_webhook`**，即你配哪个群就发哪个群）：
 
 ```powershell
-& $PY data\task_register.py --time 09:00            # 每周日 09:00，发测试群
+& $PY data\task_register.py --time 09:00            # 每周日 09:00，跟随 config 的 wecom_webhook
 & $PY data\task_register.py --time 09:00 --dry-run  # 只看会注册什么，不真注册
+& $PY data\task_register.py --time 09:00 --wecom test   # 只发测试群（测试时用）
 & $PY data\task_register.py --query                 # 查看任务状态与下次运行时间
 & $PY data\task_register.py --run-now               # 立刻触发一次（验证用）
 & $PY data\task_register.py --unregister            # 删掉任务
 ```
 
 改时间＝用新 `--time` 再跑一次（`/F` 覆盖同名任务，不会注册出两个各发一次）。
+**改群不用重新注册**：任务运行时会重新读 `config.json`。
 
 任务名固定 `BUCT-Homework-Weekly`，实际执行的是
-`python data\task_run.py --wecom test --days 7`：
+`python data\task_run.py --wecom config --days 7`：
 
 | 环节 | 谁做 | 说明 |
 | --- | --- | --- |
-| 选目标群 | `task_run.py` | **默认测试群**，要发班级群必须显式 `--wecom prod` |
+| 选目标群 | `task_run.py` | **默认跟随 `config.json` 的 `wecom_webhook`**；测试时用 `--wecom test` 强制测试群 |
 | 抓取/汇总/排版/推送 | `weekly.py` | 业务逻辑一行都不重复实现 |
 | 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（约 45 秒，实测能自愈） |
 | 失败告警 | `alert.py` | 抓取 0 条 / 过半失败 / 推送失败都会出声 |
@@ -626,33 +632,42 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 #### 测试群 / 正式班级群，到底在发哪一个
 
-`config.json` 里有三个企业微信 key。**先看这张"谁读哪一条"的表**（这是最容易被绕晕的地方）：
+`config.json` 里有三个企业微信 key。**先看这张"谁读哪一条"的表**：
 
-| 谁在发 | 读哪个字段 | 怎么决定 | 当前默认发到 |
-| --- | --- | --- | --- |
-| **周日定时任务**（第一部分） | `wecom_webhook_test` | 任务命令行里写死 `--wecom test` | **测试群** |
-| **周日补推任务**（第二部分） | `wecom_webhook_test` | 注册时写死 `--wecom test` | **测试群** |
-| 控制台「提前发布」/「检索预览」 | `wecom_webhook` | `config.json` 的 `channel` + 该字段 | 由该字段决定 |
-| `notify.py` 命令行 | `wecom_webhook` | 同上，或 `--channel` 覆盖 | 由该字段决定 |
-| 显式指定 | `wecom_webhook_prod` | `--wecom prod` 或 `alert.channel=wecom_prod` | 正式班级群 |
-| 失败告警（默认） | 不走群 | `alert.channel: local` | 只发本机通知 |
+| 谁在发 | 读哪个字段 | 怎么决定 |
+| --- | --- | --- |
+| **周日定时任务**（第一部分） | **`wecom_webhook`** | 默认 `--wecom config`：**跟随 config.json** |
+| **周日补推任务**（第二部分） | **`wecom_webhook`** | 同上（注册时默认 `--wecom config`） |
+| 控制台「提前发布」/「检索预览」 | `wecom_webhook` | `config.json` 的 `channel` + 该字段 |
+| `notify.py` 命令行 | `wecom_webhook` | 同上，或 `--channel` 覆盖 |
+| 定时任务「只发测试群」（测试用） | `wecom_webhook_test` | 注册/运行时显式 `--wecom test` |
+| 显式发正式群 | `wecom_webhook_prod` | `--wecom prod` 或 `alert.channel=wecom_prod` |
+| 失败告警（默认） | 不走群 | `alert.channel: local` → 只发本机通知 |
 
-**一句话**：定时任务**永远只发 `wecom_webhook_test`**，你在 `wecom_webhook` 里放什么它都不看。
-所以你在控制台做测试时改 `wecom_webhook`，**不会让周日那次误发班级群**。
+**一句话**：**所有推送（含周日定时任务与补推）都看 `wecom_webhook`** ——
+你在那里放测试群就发测试群，换成正式班级群就发正式班级群。
+`wecom_webhook_test` 只在「这次要专门发测试群」时才用（`--wecom test`）。
 
-- **要发正式群**：把 `wecom_webhook` 换成 `wecom_webhook_prod` 的值（控制台就走正式群了）。
-- **要退回测试**：把 `wecom_webhook` 换回 `wecom_webhook_test` 的值。
+- **想发正式群**：把 `wecom_webhook_prod` 的值复制到 `wecom_webhook` 即可，
+  **定时任务不用重新注册**（它下次运行会重新读 config）。
+- **想退回测试**：把 `wecom_webhook` 换回 `wecom_webhook_test` 的值。
 - **认尾号最快**：`…896a828b` = 测试群，`…e73e` = 正式班级群。
+- 想知道「这次到底发哪个群」：注册时打印，运行时也打印
+  （`data/task_run.log` 里那行「目标群：…」）。
 
-> **安全设计：测试群缺失时，定时任务会拒绝运行，而不是退回主用那条。**
-> 因为主用那条（`wecom_webhook`）随时可能被换成班级群 —— 一旦"退回"，
-> 一次无人看管的推送就是全班收到。所以 `task_run.py` 对 `--wecom test` 用
-> **严格模式**：`wecom_webhook_test` 为空就报错退出（会触发告警让你看到），
-> 绝不猜。注册任务时也会检查「测试群和主用那条是不是同一个 key」，
-> 是同一个就中止注册（确认无误可加 `--force`）。
+> **为什么默认是 `--wecom config` 而不是钉死某个群**：
+> 群的选择权只留在一个地方（`config.json`），你换了 key 就全局生效，
+> 不会出现「控制台发新群、定时任务还在发旧群」这种最难发现的错。
+>
+> **测试时怎么不打扰同学**：注册时用 `--wecom test`，
+> 它会强制读 `wecom_webhook_test`，并且**严格模式**——该字段为空就报错停止，
+> 绝不会退回 `wecom_webhook`（那可能正是班级群）。
+> 注册时还会检查「测试群和主用那条是不是同一个 key」，是同一个就中止
+> （说明"测试群"根本没分开，确认无误可加 `--force`）。
 
 > 想确认**某次实际发到哪**：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段
-> （`target` 只留 key 尾号）；或看 `data/task_run.log` 里那行「目标群：…」。
+> （`wecom=config` 表示跟随 config；`target` 只留 key 尾号），
+> 或看 `data/task_run.log` 里那行「目标群：…」。
 
 #### 两个实测踩过的坑
 
@@ -673,7 +688,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 一条命令注册好：
 
 ```powershell
-& $PY data\task_register.py --catchup                    # 仅周日触发 + 错过补跑（默认等 15 分钟）
+& $PY data\task_register.py --catchup                    # 仅周日触发 + 错过补跑 + 跟随 config（默认等 15 分钟）
 & $PY data\task_register.py --catchup --delay-min 15 --target-time 09:00 --wecom test
 & $PY data\task_register.py --query --name BUCT-Homework-Catchup
 & $PY data\task_register.py --unregister --name BUCT-Homework-Catchup

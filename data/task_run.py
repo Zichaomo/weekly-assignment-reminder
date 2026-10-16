@@ -4,9 +4,11 @@
 它不重复实现任何业务逻辑：抓取/汇总/排版/推送全部交给 weekly.py，
 告警交给 alert.py。本文件只负责计划任务特有的那几件事：
 
-  1. **决定往哪个群发**（默认测试群！）—— 这是最容易出人命的地方：
-     作业提醒是发给全班同学的，定时任务第一次跑很可能是在无人看管的时候，
-     所以默认 must 走测试群，要发正式群必须显式 `--wecom prod`。
+  1. **决定往哪个群发**（默认 `--wecom config`）—— 跟随 `config.json` 的
+     `wecom_webhook`：你在那里放测试群就发测试群，换成正式班级群就发正式群。
+     测试时想临时只发测试群，用显式 `--wecom test`（读 `wecom_webhook_test`）。
+     这个选择是刻意的：**群的选择权只在一个地方（config.json）**，避免
+     "换了 key 但某个任务还钉在旧群"这种最难发现的错。
   2. **环境变量控制进程，而不是改配置文件** —— 靠 notify.BUCT_WECOM_WEBHOOK。
      为一次测试去改 config.json、然后忘了改回来，是本项目明确记录过的风险。
   3. **落一份任务级台账**（data/task_log.jsonl）：几点跑的、跑多久、退出码、
@@ -16,8 +18,9 @@
      计划任务本身没有窗口，没日志等于事后无法排查。
 
 用法：
-    python task_run.py                      # 默认：发测试群，未来 7 天
-    python task_run.py --wecom prod         # 发正式班级群
+    python task_run.py                      # 默认：跟随 config.json 的 wecom_webhook
+    python task_run.py --wecom test         # 强制只发测试群（演练用）
+    python task_run.py --wecom prod         # 强制发正式班级群
     python task_run.py --dry-run            # 只抓取+生成文案，不发送
     python task_run.py --days 7 --channel wecom
 
@@ -89,8 +92,9 @@ def mask(hook: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="定时任务运行器（默认发测试群）")
-    ap.add_argument("--wecom", choices=["test", "prod", "config"], default="test",
-                    help="发到哪个群：test=测试群（默认）/ prod=正式班级群 / config=按 config.json")
+    ap.add_argument("--wecom", choices=["config", "test", "prod"], default="config",
+                    help="发到哪个群：config=跟随 config.json 的 wecom_webhook（默认，"
+                         "你换成哪个群就发哪个群）/ test=强制测试群 / prod=强制班级群")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--channel", default="wecom",
                     help="推送渠道（默认 wecom；演练可传 none/clipboard）")
@@ -108,16 +112,18 @@ def main() -> int:
 
     cfg = notify.load_config()
 
-    # ---- 决定目标群（默认测试群，写清楚为什么）----
-    # strict=True：定时任务在「测试群没配」时必须报错停止，绝不退回主用那条 ——
-    # 主用那条随时可能被换成正式班级群，退回去就等于误发全班。
+    # ---- 决定目标群 ----
+    # config（默认）：跟随 config.json 的 wecom_webhook —— 你在那里放哪个群就发哪个群，
+    #   换了 key 不需要重新注册任务，也不会出现"任务钉在旧群"的错。
+    # test：强制测试群，且 strict=True —— 测试群没配就报错停止，绝不退回 wecom_webhook，
+    #   因为"我要发测试群"和"实际发到主用群（可能是班级群）"是完全两回事。
     strict = (args.wecom == "test")
-    target_hook, why = notify.resolve_webhook(
-        "test" if args.wecom == "test" else args.wecom, cfg, strict=strict)
+    target_hook, why = notify.resolve_webhook(args.wecom, cfg, strict=strict)
     if not args.dry_run and args.channel == "wecom" and not target_hook:
         msg = ("未解析到企业微信 webhook —— 不会发出任何消息。\n"
                "原因：" + why + "\n"
-               "请在 config.json 里配好 wecom_webhook_test（定时任务只发测试群）。")
+               "请在 config.json 里配好对应的 key：跟随 config 时是 wecom_webhook，"
+               "强制测试群时是 wecom_webhook_test。")
         log_line("[task_run] ERROR: " + msg.replace("\n", " "))
         log_task(kind=args.kind, ok=False, exit_code=2, elapsed_sec=round(time.time() - t0, 1),
                  wecom=args.wecom, error=msg)
@@ -128,6 +134,9 @@ def main() -> int:
         log_line(f"[task_run] 目标群：{why}  webhook={mask(target_hook)}")
         if args.wecom == "prod":
             log_line("[task_run] ⚠️ 这次会发到【正式班级群】，同学会收到消息")
+        elif args.wecom == "config":
+            log_line("[task_run] 说明：跟随 config.json 的 wecom_webhook，"
+                     "换了 key 下次就会发到新群（不用重新注册任务）")
     os.environ[notify.WECOM_ENV] = target_hook or ""
     os.environ["BUCT_NOTIFY_CHANNEL"] = "none" if args.dry_run else args.channel
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")

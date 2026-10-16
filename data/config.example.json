@@ -1,37 +1,29 @@
 {
   "_说明": "推送渠道配置。复制本文件为 config.json 后填写。channel 可选: clipboard / pushplus / wecom / wechat / none",
   "channel": "clipboard",
-
   "_pushplus": "pushplus.plus 扫码关注公众号后拿 token，填下面两个字段；channel 改成 pushplus",
   "pushplus_token": "",
   "pushplus_topic": "",
-
   "===企业微信三个 webhook · 谁读哪一条===": "",
   "_路由规则": [
-    "① 周日定时任务与周日补推任务：固定读 wecom_webhook_test（命令行写死 --wecom test）。",
-    "② 控制台「提前发布」/「检索预览」或 notify.py 命令行：读 wecom_webhook（主用那条）。",
-    "③ 只有显式 --wecom prod（或 alert.channel=wecom_prod）才读 wecom_webhook_prod。",
-    "④ 安全设计：wecom_webhook_test 为空时，定时任务会【报错停止】而不是退回 wecom_webhook ——",
-    "   否则一旦主用那条是班级群，无人看管的推送就会误发全班。"
+    "① 所有推送都看 wecom_webhook（主用那条）：周日定时任务与补推任务默认 --wecom config。",
+    "② 控制台「提前发布」/ notify.py 命令行：同样读 wecom_webhook。",
+    "③ 显式 --wecom test 才读 wecom_webhook_test（测试时用，避免打扰同学）；",
+    "   显式 --wecom prod 才读 wecom_webhook_prod。",
+    "④ 安全设计：--wecom test 时若 wecom_webhook_test 为空，定时任务【报错停止】，",
+    "   绝不退回 wecom_webhook。"
   ],
-
-  "_wecom_main": "【主用】控制台/命令行发这里。做测试时把它设成测试群；要发正式提醒再换成班级群",
+  "_wecom_main": "【主用 ★定时任务/补推/控制台/命令行都读它★】你想发到哪个群，就把它设成哪个群",
   "wecom_webhook": "",
-
-  "_wecom_test": "【测试群 ★定时任务唯一目标★】填测试群机器人。必须填！为空时定时任务拒绝运行（保护）",
+  "_wecom_test": "【测试群】只在显式 --wecom test 时使用（测试时避免打扰同学）",
   "wecom_webhook_test": "",
-
-  "_wecom_prod": "【正式班级群】填班级群机器人。只有显式 --wecom prod 才会用它",
+  "_wecom_prod": "【正式班级群】只在显式 --wecom prod 时使用",
   "wecom_webhook_prod": "",
-
   "_wechat": "PC 微信 UI 自动化，微信 4.x 常失效，不推荐作为默认",
   "wechat_target": "文件传输助手",
-
   "notify_title": "北化在线作业提醒",
-
   "_dedup": "去重窗口（秒）：窗口内已向同一目标推过完全相同的内容则跳过，防止连点两次重复打扰。设 0 关闭",
   "dedup_window_sec": 300,
-
   "_alert": "失败告警：作业提醒是发给同学的，告警是发给你自己的，两者必须分开配。默认 local（本机通知 + 落盘），不打扰任何群",
   "alert": {
     "_channel": "local=本机通知(推荐) / wecom_test=企业微信测试群(用上面的 wecom_webhook) / wecom_prod=正式班级群(慎用) / pushplus / clipboard / none",

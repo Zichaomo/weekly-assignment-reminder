@@ -127,8 +127,9 @@ def main() -> int:
                     help=f"开机后等待多久再判断（默认 {DEFAULT_DELAY_MIN} 分钟）")
     ap.add_argument("--target-time", default=DEFAULT_TARGET,
                     help=f"计划推送时间，早于它不补推（默认 {DEFAULT_TARGET}）")
-    ap.add_argument("--wecom", choices=["test", "prod", "config"], default="test",
-                    help="补推发哪个群（默认 test=测试群）")
+    ap.add_argument("--wecom", choices=["config", "test", "prod"], default="config",
+                    help="补推发哪个群：config=跟随 config.json 的 wecom_webhook（默认）"
+                         "/ test=强制测试群 / prod=强制班级群")
     ap.add_argument("--days", type=int, default=7)
     args = ap.parse_args()
 
