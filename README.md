@@ -616,6 +616,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 ### 这两个任务在系统里到底在哪
 
 两个任务都在**任务计划程序库的根目录**（`TaskPath = \`），不在任何子文件夹里。
+Catchup 的触发器会显示成「每周」（实际只在周日），Weekly 也是「每周」。
 打开方式任选一种：
 
 | 方式 | 操作 |
@@ -631,16 +632,38 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 > 本项目没有用 `schtasks /TN` 的文件夹语法（`\子目录\任务名`），所以两个任务就是平铺在
 > 库的根目录下，`--query` 输出的 `\BUCT-Homework-Weekly` 那个开头的反斜杠就是根的意思。
 
-任务名 `BUCT-Homework-Catchup`，**登录时触发**（`MSFT_TaskLogonTrigger`）。
-每次登录都会触发一次，但脚本自己判断要不要动作 —— 不需要动作时**秒退**，
-不会白等 15 分钟：
+任务名 `BUCT-Homework-Catchup`，**仅周日触发**：
+每周日 00:05 + `StartWhenAvailable`（那一刻没开机就下次可用时补跑）。
+每次触发都会判断要不要动作 —— 不需要动作时**秒退**，不会白等：
 
 | 周的哪一天 | 时间 | 今天推过没 | 判定 | 动作 |
 | --- | --- | --- | --- | --- |
 | 非周日 | 任意 | — | `not_sunday` | 退出（不等待） |
 | 周日 | 早于计划时间 | — | `too_early` | 退出，把机会让给定时任务 |
 | 周日 | 已过计划时间 | 已成功推送 | `done` | 退出（这就是「检测」本身） |
-| 周日 | 已过计划时间 | 没推成功 | `due` | **等 15 分钟后补推** |
+| 周日 | 已过计划时间 | 没推成功 | `due` | **等到计划时间 +15 分钟（或开机后 15 分钟）再补推** |
+
+#### 为什么不是「仅周日登录时触发」
+
+**Windows 原生做不到。** 登录触发器的 schema 里只有 `UserId` / `Delay` / `Enabled`,
+**没有 `DayOfWeek`**，也没有「Weekly + Logon」这种组合（实测 PowerShell 的
+`New-ScheduledTaskTrigger -AtLogOn` 根本不接受星期参数）。
+
+用「登录时触发」就等于**每次开机登录都跑一次**：非周日那次虽然无害（脚本 0.2 秒退出），
+但字面上不是"只在周日"，还会在任务计划程序里显示成「登录时」。
+
+所以改成 **Weekly(Sunday) + StartWhenAvailable**：
+- **只在周日存在**：周一~周六根本没有触发点；
+- 周日那一刻电脑开着 → 到点触发，脚本自己等到「09:00 + 15 分钟」再动作；
+- 周日那一刻没开机 → `StartWhenAvailable` 在**下次可用时**补跑，
+  也就是你周日开机登录后的正常会话里执行 —— 这正是「开机后约 15 分钟」的来源。
+
+> 脚本里的「只在周日」判断依然保留，作为触发器语义的兜底与**可测**的判断点
+> （`task_catchup.log` 里能看到每次的判定结论）。
+
+> 解释器用的是 **`pythonw.exe`**（无窗口版）：`python.exe` 每次运行会闪一个黑框，
+> 而这个任务周日可能被触发多次。pythonw 一样能跑，子进程输出照样被
+> `task_run.py` 捕获并写进日志 —— 实测 `Last Result=0` 且日志正常落盘。
 
 #### 判定为什么不能复用「该跑没跑」
 

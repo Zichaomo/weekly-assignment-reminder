@@ -6,22 +6,23 @@
     或者开机了但锁屏导致自动登录失败，这一周的提醒就没了 —— 而且没人会发现。
     本脚本负责：开机（登录）后检查「本周日到底推出去了没有」，没推就补推。
 
-运行方式：注册成「登录时触发」的计划任务（`task_register.py --catchup`）。
-脚本自己保证下面这些约束，不依赖任务怎么配：
+运行方式：注册成「**只在周日**触发、错过就补跑」的计划任务
+（`task_register.py --catchup`）。脚本自己保证下面这些约束，不依赖任务怎么配：
 
   1. **只在周日干活**：不是周日直接退出（一次判断，秒退，不占资源）。
-  2. **开机后等 15 分钟再判断**：给正常的定时推送留出发车时间，避免抢跑。
-     等待发生在「已经确认是周日、且已经过了计划时间、且今天还没推」之后，
-     所以不需要等的时候一秒都不浪费。
+     这一条既是安全网，也是触发器语义的兜底 —— Windows 的登录触发器**没有**
+     「仅周日」这个条件（schema 里只有 UserId/Delay/Enabled），所以任务用
+     「每周日 + 错过就补跑」来表达"只在周日"，脚本再确认一次。
+  2. **周日开机后约 15 分钟再动作**：等到「计划时间 + 15 分钟」
+     （如 09:00 计划 → 09:15）或「开机后 15 分钟」两者中较早的那个，
+     给正常的定时推送留出发车时间，避免抢跑。
+     已经是周日、且已过两者时，一秒都不等。
   3. **只在没推的时候补推**：`alert.weekly_due()` 按**日历日**判断
      「今天（周日）有没有成功推过群」，而不是"距今多少小时"。
      已经推过 -> 什么都不做（这就是"检测"本身）。
   4. **不重复补推**：补推成功后再触发本脚本，第 3 条就会拦住它。
-  5. **不抢跑**：没到计划推送时间（默认 09:00，与第一部分一致）就退出，让定时任务先跑。
-
-为什么用「登录时触发」而不是「开机时触发」：
-    抓取要用 Playwright 拉起 Edge，需要一个**已登录的交互式桌面**；
-    系统刚启动、还没人登录时跑，必然失败。登录触发天然满足这个前提。
+  5. **不抢跑**：没到计划推送时间（默认 09:00，与第一部分一致）就退出，
+     让定时任务先跑。
 
 用法：
     python task_catchup.py                  # 正常运行（计划任务用这个）
@@ -36,7 +37,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -161,17 +162,39 @@ def main() -> int:
         log_line("[补推检测] --check-only：只报告，不补推。")
         return 0
 
-    # ---- 需要补推：先等一会儿，给定时任务留出发车时间 ----
-    if args.delay_min > 0 and not args.now:
-        log_line(f"[补推检测] 需要补推。先等 {args.delay_min} 分钟，"
-                 f"避免和刚刚启动的定时任务撞车…")
-        time.sleep(args.delay_min * 60)
-        # 等完再判一次：等待期间定时任务可能已经跑成功了
-        status2, why2, _ = alert.weekly_due(datetime.now(), target_time=args.target_time)
-        log_line(f"[补推检测] 等待结束，复查：{status2} —— {why2}")
-        if status2 == "done":
-            log_line("[补推检测] 等待期间已经推送成功，无需补推。退出。")
-            return 0
+    # ---- 需要补推：等到「计划时间之后 + delay 分钟」为止 ----
+    # 为什么是"等到某个时刻"而不是"死等 N 分钟"：
+    # 触发器改成「仅在周日、错过就补跑」之后，任务可能在周日凌晨开机时就被触发
+    # （比如 02:00 开机），那时离计划时间 09:00 还早。死等 15 分钟毫无意义，
+    # 而应该是「等到 09:00 过了 15 分钟（09:15）再动作」。
+    # 同时把上限设成 delay_min 分钟：开机晚于 09:00 时（如 10:00 开机）
+    # 就是「开机后约 15 分钟」执行，与需求一致。
+    if not args.now:
+        due_at = datetime.now() + timedelta(minutes=max(0, args.delay_min))
+        try:
+            hh, mm = (int(x) for x in str(args.target_time).split(":")[:2])
+            after_target = datetime.now().replace(hour=hh, minute=mm, second=0,
+                                                  microsecond=0) + timedelta(minutes=args.delay_min)
+            if after_target > due_at:
+                due_at = after_target
+        except Exception:  # noqa: BLE001
+            pass
+        wait_sec = (due_at - datetime.now()).total_seconds()
+        if wait_sec > 0:
+            log_line(f"[补推检测] 需要补推，等到 {due_at:%H:%M:%S} 再动作"
+                     f"（约 {wait_sec / 60:.0f} 分钟）…")
+            while wait_sec > 0:
+                time.sleep(min(wait_sec, 60))
+                wait_sec = (due_at - datetime.now()).total_seconds()
+            # 复查：等待期间定时任务可能已经跑成功了（这是最好结局）
+            status2, why2, _ = alert.weekly_due(datetime.now(), target_time=args.target_time)
+            log_line(f"[补推检测] 等待结束，复查：{status2} —— {why2}")
+            if status2 == "done":
+                log_line("[补推检测] 等待期间已经推送成功，无需补推。退出。")
+                return 0
+            if status2 == "not_sunday":
+                log_line("[补推检测] 已经跨天了（不再是周日），退出。")
+                return 0
 
     if still_running():
         log_line("[补推检测] 检测到另一个抓取刚开始（任务台账有待完成的记录），"

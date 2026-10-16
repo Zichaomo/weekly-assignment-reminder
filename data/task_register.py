@@ -124,21 +124,34 @@ def build_create_args(name: str, time_str: str, day: str, command: str,
 
 
 def register_catchup(args) -> int:
-    """注册第二部分：登录时触发的「周日开机补推检测」。
+    """注册第二部分：**仅周日**触发、错过就补跑的「补推检测」。
 
-    为什么不用 schtasks.exe：它表达不了「登录时触发」。这里用 PowerShell 的
-    ScheduledTasks 模块（AtLogOn 触发器），并且**必须**指定 LogonType=Interactive ——
-    默认的 S4U 不加载用户配置文件，Path.home() 会指向系统目录，
-    login.py 就找不到 Edge 的持久 profile，自动登录必然失败（这是个隐蔽的坑）。
+    为什么不用「登录时触发」：
+      Windows 的登录触发器 schema 里只有 UserId / Delay / Enabled，
+      **没有 DayOfWeek** —— 原生表达不出「仅周日登录时」。用登录触发器就必须
+      每次登录都空跑一次（非周日也无害，但字面上不是"只在周日"）。
+
+    改用「每周日 00:05 + StartWhenAvailable（错过就补跑）」：
+      · 只在周日存在（周一~周六根本没有这个触发点）；
+      · 周日那一刻电脑开着 -> 到点就跑（脚本自己等到"计划时间+15 分钟"再动作）；
+      · 周日那一刻没开机 -> StartWhenAvailable 在**下次可用时**补跑，
+        用户登录后的正常会话里就会执行 —— 这正是我们要的"开机后约 15 分钟"。
+
+    ⚠️ 解释器用 pythonw.exe（无窗口）：python.exe 每次运行会闪一个黑框，
+    而这个任务在周日可能被触发多次，闪窗很烦。pythonw 一样能跑，
+    子进程输出照样被 task_run.py 捕获并写进日志。
     """
     ps = shutil.which("pwsh") or shutil.which("powershell")
     if not ps:
-        print("ERROR: 找不到 PowerShell，无法注册登录触发任务", file=sys.stderr)
+        print("ERROR: 找不到 PowerShell，无法注册补推任务", file=sys.stderr)
         return 1
     python = find_python()
     if not Path(python).exists():
         print(f"ERROR: 解释器不存在：{python}", file=sys.stderr)
         return 1
+    # 优先换成无窗口解释器（同目录的 pythonw.exe）
+    pyw = Path(python).with_name("pythonw.exe")
+    exe = str(pyw) if pyw.exists() else python
     if not TASK_CATCHUP.exists():
         print(f"ERROR: 找不到 {TASK_CATCHUP}", file=sys.stderr)
         return 1
@@ -146,38 +159,46 @@ def register_catchup(args) -> int:
     script = f"""
 $ErrorActionPreference = 'Stop'
 $name = '{args.name}'
-$exe  = '{python}'
+$exe  = '{exe}'
 $arg  = '"{TASK_CATCHUP}" --wecom {args.wecom} --days {args.days} --delay-min {args.delay_min} --target-time {args.target_time}'
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# 仅周日：每周日 00:05 触发；错过（当时没开机）由 StartWhenAvailable 补跑
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 00:05
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+    -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 90)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
 if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {{
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
 }}
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
-    -Settings $settings -Principal $principal -Description 'BUCT homework: Sunday catch-up check after logon' | Out-Null
+    -Settings $settings -Principal $principal `
+    -Description 'BUCT homework: Sunday-only catch-up check (missed run starts when available)' | Out-Null
 $t = Get-ScheduledTask -TaskName $name
 $i = $t | Get-ScheduledTaskInfo
 Write-Output 'CATCHUP-OK'
 Write-Output ('Trigger : ' + ($t.Triggers | ForEach-Object {{ $_.CimClass.CimClassName }}))
+Write-Output ('Days    : ' + (($t.Triggers | ForEach-Object {{ $_.DaysOfWeek }})))
+Write-Output ('At      : ' + (($t.Triggers | ForEach-Object {{ $_.StartBoundary }})))
 Write-Output ('LogonType: ' + $t.Principal.LogonType)
 Write-Output ('Execute : ' + $t.Actions[0].Execute)
 Write-Output ('Argument: ' + $t.Actions[0].Arguments)
+Write-Output ('StartWhenAvailable: ' + $t.Settings.StartWhenAvailable)
+Write-Output ('NextRun : ' + $i.NextRunTime)
 Write-Output ('State   : ' + $t.State)
 """
 
-    print(f"计划任务名：{args.name}（登录时触发）")
-    print(f"触发条件　：当前用户登录时（每次登录都会触发，脚本自己判断要不要动作）")
+    print(f"计划任务名：{args.name}（**仅周日**触发）")
+    print(f"触发条件　：每周日 00:05 + 错过就补跑（StartWhenAvailable）")
     print(f"执行脚本　：{TASK_CATCHUP}")
     print(f"参数　　　：--wecom {args.wecom} --days {args.days} "
           f"--delay-min {args.delay_min} --target-time {args.target_time}")
-    print(f"解释器　　：{python}")
-    print(f"判定逻辑　：只在周日 + 已过计划时间 {args.target_time} + 今天还没推成功 时，"
-          f"等待 {args.delay_min} 分钟后补推；否则秒退")
+    print(f"解释器　　：{exe}" + ("（pythonw.exe，无窗口）" if exe != python else "（python.exe）"))
+    print(f"判定逻辑　：仅周日 + 已过计划时间 {args.target_time} + 今天还没推成功 时，"
+          f"等到 {args.target_time} 之后 {args.delay_min} 分钟（或开机后 {args.delay_min} 分钟）补推；"
+          f"否则秒退")
 
     if args.dry_run:
         print("\n[dry-run] 未实际注册。")
@@ -193,7 +214,7 @@ Write-Output ('State   : ' + $t.State)
             print("提示：注册计划任务可能需要管理员权限。", file=sys.stderr)
         return 1
 
-    print(f"\n✅ 已注册补推检测：每次登录时触发（周日且需要时才会真动作）")
+    print(f"\n✅ 已注册补推检测：仅周日触发，错过（没开机）则下次可用时补跑")
     print(f"   补推日志：{ROOT / 'task_catchup.log'}")
     print(f"   任务台账：{ROOT / 'task_log.jsonl'}（kind=catchup）")
     print(f"   立刻验证：python data\\task_catchup.py --now --check-only")
