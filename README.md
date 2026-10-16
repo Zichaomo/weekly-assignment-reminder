@@ -570,6 +570,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/console.html` | Web 控制台界面（单页零依赖；字体走 server.py 的 /fonts/ 路由，找不到自动回退系统字体） |
 | `data/run_hidden.vbs` | 以无窗口方式启动服务（`console.bat` 调用），输出写入 `server_console.log` |
 | `data/wait_ready.py` | 启动器用的就绪探测：判断「已有实例在监听」与「服务真能回答 HTTP」，全程短超时不挂住 |
+| `data/fix_integrity.py` | 检查/修复「低完整性标签」：它会让双击 .bat 弹「无法验证发布者」 |
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
@@ -642,6 +643,53 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 > 「浏览器打开」走的是系统默认浏览器，用的是**浏览器自己的登录态**，
 > 和 `storage_state.json`（给自动化脚本用的）是两套。没登录会先跳统一认证页。
+
+## 双击 .bat 弹出「无法验证发布者」（低完整性标签）
+
+**现象**：双击 `console.bat` 弹出「打开文件 - 安全警告 / 无法验证发布者。
+你确定要运行此软件吗？」，发行商显示「未知发布者」。文件本身完全正常。
+
+**原因**：文件被打上了 Windows 的 **Low 完整性标签**（`Mandatory Label\Low Mandatory Level`）。
+完整性标签是「不能向上写」的强制标记，资源管理器启动低完整性对象前会要你确认。
+**不是**「从网上下载」那类 —— 这些文件上没有 `Zone.Identifier`。
+
+本机的成因（2026-10-16 实测）：受限沙箱会话把**工作区根目录**标成了 Low，
+之后在这个目录里新建/修改的文件都会**继承**它 —— 当时 `console.bat`、`README.md`、
+`.gitignore` 中招，而 `data/` 下的旧文件仍是 Medium。
+
+**判断方法**（一条命令看清全工作区）：
+
+```powershell
+& $PY data\fix_integrity.py           # 只扫描，报告带 Low 标签的对象
+& $PY data\fix_integrity.py --list    # 顺带列出清单
+```
+
+**修复**：
+
+```powershell
+& $PY data\fix_integrity.py --fix           # 修复
+& $PY data\fix_integrity.py --fix --dry-run # 先看会改哪些
+```
+
+修复做法是「**原样删除重建**」：先给父目录设成 Medium（这一步允许），
+再让文件重新继承父目录的标签。内容一个字节都不改，重建前后逐字节校验，不一致立即回滚。
+
+> **为什么不能用 `icacls` / `Set-Acl` 直接改？**（都试过，都失败）
+> - `icacls <file> /setintegritylevel Medium` → `Access is denied`
+> - PowerShell `Set-Acl -Audit` → `需要 SeSecurityPrivilege`（管理员才有）
+> - `SetNamedSecurityInfo(LABEL_SECURITY_INFORMATION)` → 返回 5（拒绝访问）
+>
+> 原因是这些对象的写权限来自沙箱身份而非登录用户，所以「所有者」也没法直接改标签。
+> 能给目录设标签、且新文件会继承父目录标签 —— 这才是能走通的那条路。
+
+**怎么避免再次发生**：让**工作区根目录一直是 Medium**。标签是继承的 ——
+根目录一旦被标成 Low，之后在里面新建的每个文件都会继承它。所以：
+
+1. 修好后，根目录与新文件都回到 Medium，就**不会再弹**这个警告；
+2. 万一又出现（例如某次受限会话又把根目录标了 Low）：跑一次
+   `fix_integrity.py --fix` 即可，**不需要重装、不需要改注册表、不需要管理员**；
+3. 别去右键属性勾「解除锁定」—— 那是给「从网上下载」的文件去 `Zone.Identifier` 的，
+   对付不了完整性标签（这两个东西经常被混为一谈，实测本机文件根本没有那个标记）。
 
 ## 已知坑（都是实测踩出来的）
 
