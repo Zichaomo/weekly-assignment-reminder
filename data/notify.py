@@ -164,12 +164,17 @@ WECOM_ENV = "BUCT_WECOM_WEBHOOK"
 CHANNEL_ENV = "BUCT_NOTIFY_CHANNEL"
 
 
-def resolve_webhook(when: str = "config", cfg: dict = None) -> tuple:
+def resolve_webhook(when: str = "config", cfg: dict = None, strict: bool = False) -> tuple:
     """决定往哪个企业微信机器人发。返回 (webhook, 说明)。
 
     when: config（按 config.json 的 wecom_webhook）/ test / prod
     环境变量 BUCT_WECOM_WEBHOOK 优先级最高 —— 定时任务用它在不修改 config.json 的
     前提下把这次推送定向到测试群，避免「为了测试改了配置文件、忘了改回来」。
+
+    strict=True（定时任务用）：when=test 而 wecom_webhook_test 为空时**返回空**
+    而不是退回 wecom_webhook。理由：无人看管的定时任务绝不能因为"测试群没配"
+    就退回到主用那条 —— 主用那条随时可能被你换成正式班级群，那样一次误发就是
+    全班同学都收到。宁可任务报错停止（会被告警看到），也不要发错群。
     """
     cfg = cfg or load_config()
     env = (os.environ.get(WECOM_ENV) or "").strip()
@@ -179,7 +184,10 @@ def resolve_webhook(when: str = "config", cfg: dict = None) -> tuple:
         t = (cfg.get("wecom_webhook_test") or "").strip()
         if t:
             return t, "config.wecom_webhook_test（测试群）"
-        # 没单独配测试群就退回主用那条，并把这件事说清楚（不静默）
+        if strict:
+            return "", ("wecom_webhook_test 未配置 —— 定时任务拒绝运行，"
+                        "以免退回主用那条（可能是班级群）")
+        # 非严格场景（人工操作）才退回，并把这件事说清楚（不静默）
         main = (cfg.get("wecom_webhook") or "").strip()
         return main, "未配 wecom_webhook_test，退回 wecom_webhook（主用那条）"
     if when == "prod":

@@ -6,13 +6,22 @@
   "pushplus_token": "",
   "pushplus_topic": "",
 
-  "_wecom": "企业微信群 -> 添加群机器人 -> 复制 Webhook 地址填这里；channel 改成 wecom",
+  "===企业微信三个 webhook · 谁读哪一条===": "",
+  "_路由规则": [
+    "① 周日定时任务与周日补推任务：固定读 wecom_webhook_test（命令行写死 --wecom test）。",
+    "② 控制台「提前发布」/「检索预览」或 notify.py 命令行：读 wecom_webhook（主用那条）。",
+    "③ 只有显式 --wecom prod（或 alert.channel=wecom_prod）才读 wecom_webhook_prod。",
+    "④ 安全设计：wecom_webhook_test 为空时，定时任务会【报错停止】而不是退回 wecom_webhook ——",
+    "   否则一旦主用那条是班级群，无人看管的推送就会误发全班。"
+  ],
+
+  "_wecom_main": "【主用】控制台/命令行发这里。做测试时把它设成测试群；要发正式提醒再换成班级群",
   "wecom_webhook": "",
 
-  "_wecom_test": "测试群机器人（可选）。定时任务默认发这里做演练，避免一次失误就把技术性消息推给全班",
+  "_wecom_test": "【测试群 ★定时任务唯一目标★】填测试群机器人。必须填！为空时定时任务拒绝运行（保护）",
   "wecom_webhook_test": "",
 
-  "_wecom_prod": "可选：把正式群（如班级群）的 webhook 也放这里，测试时用 wecom_webhook、发正式消息前再换过去",
+  "_wecom_prod": "【正式班级群】填班级群机器人。只有显式 --wecom prod 才会用它",
   "wecom_webhook_prod": "",
 
   "_wechat": "PC 微信 UI 自动化，微信 4.x 常失效，不推荐作为默认",

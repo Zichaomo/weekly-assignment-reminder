@@ -109,12 +109,16 @@ def main() -> int:
     cfg = notify.load_config()
 
     # ---- 决定目标群（默认测试群，写清楚为什么）----
+    # strict=True：定时任务在「测试群没配」时必须报错停止，绝不退回主用那条 ——
+    # 主用那条随时可能被换成正式班级群，退回去就等于误发全班。
+    strict = (args.wecom == "test")
     target_hook, why = notify.resolve_webhook(
-        "test" if args.wecom == "test" else args.wecom, cfg)
+        "test" if args.wecom == "test" else args.wecom, cfg, strict=strict)
     if not args.dry_run and args.channel == "wecom" and not target_hook:
-        msg = ("未解析到企业微信 webhook —— 不会发出任何消息。"
-               "请在 config.json 里配 wecom_webhook(_test)。")
-        log_line("[task_run] ERROR: " + msg)
+        msg = ("未解析到企业微信 webhook —— 不会发出任何消息。\n"
+               "原因：" + why + "\n"
+               "请在 config.json 里配好 wecom_webhook_test（定时任务只发测试群）。")
+        log_line("[task_run] ERROR: " + msg.replace("\n", " "))
         log_task(kind=args.kind, ok=False, exit_code=2, elapsed_sec=round(time.time() - t0, 1),
                  wecom=args.wecom, error=msg)
         _alert("task-no-webhook", "作业提醒定时任务：没有可用的企业微信 webhook", msg)

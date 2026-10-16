@@ -221,6 +221,34 @@ Write-Output ('State   : ' + $t.State)
     return 0
 
 
+def check_target_split(wecom: str) -> tuple:
+    """注册前检查「定时任务要发的群」和「主用那条」是不是分开的。
+
+    为什么值得检查：定时任务固定发 wecom_webhook_test，而控制台/notify 命令行
+    发 wecom_webhook。如果这两条是同一个 key，说明"测试群"根本没和主用分开 ——
+    你在控制台做测试就等于直接发到主用那条（可能是班级群）。
+    返回 (ok, 说明)。
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        import notify
+        cfg = notify.load_config()
+    except Exception as e:  # noqa: BLE001
+        return True, f"（读不到 config.json，跳过检查：{e}）"
+    if wecom == "prod":
+        return True, "注册为发正式班级群（--wecom prod），请自行确认"
+    test = (cfg.get("wecom_webhook_test") or "").strip()
+    main = (cfg.get("wecom_webhook") or "").strip()
+    if not test:
+        return False, ("wecom_webhook_test 未配置 —— 定时任务会因为找不到测试群而拒绝运行。"
+                       "请先在 config.json 填好它")
+    if main and test == main:
+        return False, ("wecom_webhook_test 与 wecom_webhook 是同一个 key，"
+                       "说明测试群没和主用那条分开：你在控制台测试会直接发到主用那条。"
+                       "若这是你有意为之，加 --force 跳过本检查")
+    return True, f"测试群 key 尾 {test[-8:]}，与主用那条已分开"
+
+
 def register(args) -> int:
     python = find_python()
     command = task_command(python, args.wecom, args.days)
@@ -241,6 +269,14 @@ def register(args) -> int:
         return 1
     if not TASK_RUN.exists():
         print(f"ERROR: 找不到 {TASK_RUN}", file=sys.stderr)
+        return 1
+
+    # 群分离检查：防止"以为在测试、其实发到班级群"
+    ok_split, why_split = check_target_split(args.wecom)
+    print(f"目标群检查：{'通过' if ok_split else '不通过'} —— {why_split}")
+    if not ok_split and not args.force:
+        print("\nERROR: 为了不误发班级群，已中止注册。确认无误可加 --force 跳过。",
+              file=sys.stderr)
         return 1
 
     if args.dry_run:
@@ -319,6 +355,8 @@ def main() -> int:
                     help="计划推送时间 HH:MM（默认 09:00，与第一部分保持一致）；"
                          "早于它不补推，避免抢在定时任务前面")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不注册")
+    ap.add_argument("--force", action="store_true",
+                    help="跳过「测试群与主用那条是否分开」的检查（确认无误再用）")
     ap.add_argument("--query", action="store_true", help="查看任务状态")
     ap.add_argument("--unregister", action="store_true", help="删除任务")
     ap.add_argument("--run-now", action="store_true", help="立刻触发一次（验证用）")

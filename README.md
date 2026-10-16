@@ -626,22 +626,33 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 #### 测试群 / 正式班级群，到底在发哪一个
 
-`config.json` 里有三个企业微信 key，**认尾号就不会错**：
+`config.json` 里有三个企业微信 key。**先看这张"谁读哪一条"的表**（这是最容易被绕晕的地方）：
 
-| config 字段 | key 尾号 | 是哪个群 | 谁在用 |
+| 谁在发 | 读哪个字段 | 怎么决定 | 当前默认发到 |
 | --- | --- | --- | --- |
-| `wecom_webhook` | `…896a828b` | **测试群** | 控制台「提前发布」等按 config 走的地方 |
-| `wecom_webhook_test` | `…896a828b` | **测试群**（同一条） | **定时任务**（`--wecom test`）与告警定向 |
-| `wecom_webhook_prod` | `…e73e` | **正式班级群** | 只有显式 `--wecom prod` 才用 |
+| **周日定时任务**（第一部分） | `wecom_webhook_test` | 任务命令行里写死 `--wecom test` | **测试群** |
+| **周日补推任务**（第二部分） | `wecom_webhook_test` | 注册时写死 `--wecom test` | **测试群** |
+| 控制台「提前发布」/「检索预览」 | `wecom_webhook` | `config.json` 的 `channel` + 该字段 | 由该字段决定 |
+| `notify.py` 命令行 | `wecom_webhook` | 同上，或 `--channel` 覆盖 | 由该字段决定 |
+| 显式指定 | `wecom_webhook_prod` | `--wecom prod` 或 `alert.channel=wecom_prod` | 正式班级群 |
+| 失败告警（默认） | 不走群 | `alert.channel: local` | 只发本机通知 |
 
-- **要发正式群**：把 `wecom_webhook_prod` 的值整条复制到 `wecom_webhook`。
-- **要退回来**：把 `wecom_webhook_test` 的值复制到 `wecom_webhook`。
-- **定时任务不受这个切换影响**：它读的是 `wecom_webhook_test`，
-  所以你在测试时改 `wecom_webhook`，**不会让周日那次误发到班级群**。
+**一句话**：定时任务**永远只发 `wecom_webhook_test`**，你在 `wecom_webhook` 里放什么它都不看。
+所以你在控制台做测试时改 `wecom_webhook`，**不会让周日那次误发班级群**。
 
-> 这个设计是刻意的：定时推送是无人看管的，一旦发错群就是全班同学收到。
-> 所以「定时发哪个群」必须是一个**显式的参数**，而不是继承某个可能被改过的字段。
-> 想确认某次实际发到哪：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段。
+- **要发正式群**：把 `wecom_webhook` 换成 `wecom_webhook_prod` 的值（控制台就走正式群了）。
+- **要退回测试**：把 `wecom_webhook` 换回 `wecom_webhook_test` 的值。
+- **认尾号最快**：`…896a828b` = 测试群，`…e73e` = 正式班级群。
+
+> **安全设计：测试群缺失时，定时任务会拒绝运行，而不是退回主用那条。**
+> 因为主用那条（`wecom_webhook`）随时可能被换成班级群 —— 一旦"退回"，
+> 一次无人看管的推送就是全班收到。所以 `task_run.py` 对 `--wecom test` 用
+> **严格模式**：`wecom_webhook_test` 为空就报错退出（会触发告警让你看到），
+> 绝不猜。注册任务时也会检查「测试群和主用那条是不是同一个 key」，
+> 是同一个就中止注册（确认无误可加 `--force`）。
+
+> 想确认**某次实际发到哪**：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段
+> （`target` 只留 key 尾号）；或看 `data/task_run.log` 里那行「目标群：…」。
 
 #### 两个实测踩过的坑
 
