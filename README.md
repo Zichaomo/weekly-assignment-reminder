@@ -606,10 +606,30 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 ```powershell
 & $PY data\task_register.py --catchup                    # 登录时触发，等待 15 分钟
-& $PY data\task_register.py --catchup --delay-min 15 --wecom test
+& $PY data\task_register.py --catchup --delay-min 15 --target-time 09:00 --wecom test
 & $PY data\task_register.py --query --name BUCT-Homework-Catchup
 & $PY data\task_register.py --unregister --name BUCT-Homework-Catchup
 ```
+
+> `--target-time` 必须与第一部分的定时时间一致（现在是 **09:00**）。改定时时间时两处都要改。
+
+### 这两个任务在系统里到底在哪
+
+两个任务都在**任务计划程序库的根目录**（`TaskPath = \`），不在任何子文件夹里。
+打开方式任选一种：
+
+| 方式 | 操作 |
+| --- | --- |
+| 图形界面 | `Win+R` → 输入 `taskschd.msc` → 回车；左侧点最上面的 **「任务计划程序库」**，中间列表里就能看到 `BUCT-Homework-Weekly` 与 `BUCT-Homework-Catchup` |
+| 控制台 | `schtasks /query /tn BUCT-Homework-Weekly /v /fo LIST` |
+| PowerShell | `Get-ScheduledTask -TaskName "BUCT*"` |
+
+> **找不到时的常见原因**：① 左侧停在「任务计划程序(本地)」而不是「任务计划程序库」；
+> ② 中间列表需要往下翻（按名称排序，`B` 开头其实很靠前）；
+> ③ 用中文关键字搜「每周」是搜不到的 —— 任务名是英文的 `BUCT-Homework-*`，按名字找。
+>
+> 本项目没有用 `schtasks /TN` 的文件夹语法（`\子目录\任务名`），所以两个任务就是平铺在
+> 库的根目录下，`--query` 输出的 `\BUCT-Homework-Weekly` 那个开头的反斜杠就是根的意思。
 
 任务名 `BUCT-Homework-Catchup`，**登录时触发**（`MSFT_TaskLogonTrigger`）。
 每次登录都会触发一次，但脚本自己判断要不要动作 —— 不需要动作时**秒退**，

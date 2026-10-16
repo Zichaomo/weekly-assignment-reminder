@@ -17,7 +17,7 @@
      「今天（周日）有没有成功推过群」，而不是"距今多少小时"。
      已经推过 -> 什么都不做（这就是"检测"本身）。
   4. **不重复补推**：补推成功后再触发本脚本，第 3 条就会拦住它。
-  5. **不抢跑**：没到计划推送时间（默认 12:45）就退出，让定时任务先跑。
+  5. **不抢跑**：没到计划推送时间（默认 09:00，与第一部分一致）就退出，让定时任务先跑。
 
 为什么用「登录时触发」而不是「开机时触发」：
     抓取要用 Playwright 拉起 Edge，需要一个**已登录的交互式桌面**；
@@ -54,7 +54,8 @@ LOG_FILE = ROOT / "task_catchup.log"
 TASK_LOG = ROOT / "task_log.jsonl"
 
 # 与第一部分保持一致的默认值；改定时时间时这里和任务一起改
-DEFAULT_TARGET = "12:45"
+# （也可用注册命令覆盖：task_register.py --catchup --target-time HH:MM）
+DEFAULT_TARGET = "09:00"
 DEFAULT_DELAY_MIN = 15
 WEEKDAY_SUNDAY = 7
 

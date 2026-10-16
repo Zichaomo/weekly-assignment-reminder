@@ -147,7 +147,7 @@ def register_catchup(args) -> int:
 $ErrorActionPreference = 'Stop'
 $name = '{args.name}'
 $exe  = '{python}'
-$arg  = '"{TASK_CATCHUP}" --wecom {args.wecom} --days {args.days} --delay-min {args.delay_min}'
+$arg  = '"{TASK_CATCHUP}" --wecom {args.wecom} --days {args.days} --delay-min {args.delay_min} --target-time {args.target_time}'
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -173,9 +173,10 @@ Write-Output ('State   : ' + $t.State)
     print(f"计划任务名：{args.name}（登录时触发）")
     print(f"触发条件　：当前用户登录时（每次登录都会触发，脚本自己判断要不要动作）")
     print(f"执行脚本　：{TASK_CATCHUP}")
-    print(f"参数　　　：--wecom {args.wecom} --days {args.days} --delay-min {args.delay_min}")
+    print(f"参数　　　：--wecom {args.wecom} --days {args.days} "
+          f"--delay-min {args.delay_min} --target-time {args.target_time}")
     print(f"解释器　　：{python}")
-    print(f"判定逻辑　：只在周日 + 已过计划时间 + 今天还没推成功 时，"
+    print(f"判定逻辑　：只在周日 + 已过计划时间 {args.target_time} + 今天还没推成功 时，"
           f"等待 {args.delay_min} 分钟后补推；否则秒退")
 
     if args.dry_run:
@@ -293,6 +294,9 @@ def main() -> int:
                     help="注册第二部分：登录时触发的「周日开机补推检测」")
     ap.add_argument("--delay-min", type=int, default=15,
                     help="补推前等待分钟数（默认 15，即「开机后约 15 分钟」）")
+    ap.add_argument("--target-time", default="09:00",
+                    help="计划推送时间 HH:MM（默认 09:00，与第一部分保持一致）；"
+                         "早于它不补推，避免抢在定时任务前面")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不注册")
     ap.add_argument("--query", action="store_true", help="查看任务状态")
     ap.add_argument("--unregister", action="store_true", help="删除任务")
