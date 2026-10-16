@@ -9,6 +9,9 @@
   "_wecom": "企业微信群 -> 添加群机器人 -> 复制 Webhook 地址填这里；channel 改成 wecom",
   "wecom_webhook": "",
 
+  "_wecom_test": "测试群机器人（可选）。定时任务默认发这里做演练，避免一次失误就把技术性消息推给全班",
+  "wecom_webhook_test": "",
+
   "_wecom_prod": "可选：把正式群（如班级群）的 webhook 也放这里，测试时用 wecom_webhook、发正式消息前再换过去",
   "wecom_webhook_prod": "",
 

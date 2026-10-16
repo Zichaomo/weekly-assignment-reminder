@@ -361,6 +361,14 @@ def send(kind: str, title: str, detail: str, level: str = "error",
 
 
 # ---------------------------------------------------------------- 该跑没跑？
+# 哪些 source 算「自动任务跑过」：
+#   weekly    = 直接跑 weekly.py（手动或旧路子）
+#   task-run  = 计划任务经 task_run.py 跑的（定时推送的正路）
+# 手动点控制台「提前发布」写的是 hub-*，**不算** —— 把它算成功就永远查不出
+# 「定时任务其实从没跑过」，那正是本项目此前的真实状态。
+AUTO_SOURCES = ("weekly", "task-run")
+
+
 def _last_run() -> dict:
     """最近一次「成功的自动跑」：只认 source=weekly 且 ok 的记录。
 
@@ -394,7 +402,7 @@ def _last_run() -> dict:
             if not isinstance(rec, dict):
                 continue
             out[any_key] = out[any_key] or rec
-            if rec.get("ok") and str(rec.get("source") or "").startswith("weekly"):
+            if rec.get("ok") and str(rec.get("source") or "").startswith(AUTO_SOURCES):
                 out[key] = rec
                 break
 

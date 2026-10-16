@@ -154,6 +154,44 @@ def load_config() -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------- 目标群解析
+# 本项目的 webhook 有两个来源，很容易搞混，所以解析集中在这一个函数里：
+#   wecom_webhook        主用（按 README 的约定，日常测试时放测试群）
+#   wecom_webhook_prod   正式班级群（发之前把上面那条换成它）
+#   wecom_webhook_test   测试群（新增：与 prod 对称，避免「主用到底是哪个」说不清）
+#   BUCT_WECOM_WEBHOOK   环境变量覆盖（定时任务/一次性演练用，改的是进程而不是文件）
+WECOM_ENV = "BUCT_WECOM_WEBHOOK"
+CHANNEL_ENV = "BUCT_NOTIFY_CHANNEL"
+
+
+def resolve_webhook(when: str = "config", cfg: dict = None) -> tuple:
+    """决定往哪个企业微信机器人发。返回 (webhook, 说明)。
+
+    when: config（按 config.json 的 wecom_webhook）/ test / prod
+    环境变量 BUCT_WECOM_WEBHOOK 优先级最高 —— 定时任务用它在不修改 config.json 的
+    前提下把这次推送定向到测试群，避免「为了测试改了配置文件、忘了改回来」。
+    """
+    cfg = cfg or load_config()
+    env = (os.environ.get(WECOM_ENV) or "").strip()
+    if env:
+        return env, f"环境变量 {WECOM_ENV} 覆盖"
+    if when == "test":
+        t = (cfg.get("wecom_webhook_test") or "").strip()
+        if t:
+            return t, "config.wecom_webhook_test（测试群）"
+        # 没单独配测试群就退回主用那条，并把这件事说清楚（不静默）
+        main = (cfg.get("wecom_webhook") or "").strip()
+        return main, "未配 wecom_webhook_test，退回 wecom_webhook（主用那条）"
+    if when == "prod":
+        p = (cfg.get("wecom_webhook_prod") or "").strip()
+        if p:
+            return p, "config.wecom_webhook_prod（正式班级群）"
+        main = (cfg.get("wecom_webhook") or "").strip()
+        return main, "未配 wecom_webhook_prod，退回 wecom_webhook（主用那条）"
+    main = (cfg.get("wecom_webhook") or "").strip()
+    return main, "config.wecom_webhook（主用那条）"
+
+
 # ---------------------------------------------------------------- clipboard
 def _set_clipboard(text: str) -> None:
     CF_UNICODETEXT = 13
@@ -275,7 +313,7 @@ def send_pushplus(text: str, cfg: dict) -> bool:
 
 # ---------------------------------------------------------------- wecom
 def send_wecom(text: str, cfg: dict) -> bool:
-    hook = (cfg.get("wecom_webhook") or "").strip()
+    hook = (os.environ.get(WECOM_ENV) or "").strip() or (cfg.get("wecom_webhook") or "").strip()
     if not hook:
         print("ERROR: wecom_webhook 为空，请在 config.json 填写。", file=sys.stderr)
         return False
@@ -388,7 +426,11 @@ def main() -> int:
         print("ERROR: 需要 --file 或 --message", file=sys.stderr)
         return 1
 
-    channel = args.channel or cfg.get("channel", "clipboard")
+    # 渠道优先级：--channel > 环境变量 > config.json
+    # 环境变量这条是给定时任务用的：一次演练（--dry-run）靠它把渠道切成 none，
+    # 而不必修改 config.json —— 改文件再忘改回来是本项目记过的风险。
+    channel = (args.channel or os.environ.get(CHANNEL_ENV) or ""
+               or cfg.get("channel", "clipboard"))
     target = dedup_target(channel, cfg)
 
     # 去重：同一目标上、窗口内推过完全相同的内容就跳过（防止连点两次造成重复打扰）

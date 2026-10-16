@@ -19,8 +19,10 @@
 # 2) 日常操作（检索 / 添加 / 管理 / 黑名单 / 提前发布）：双击 console.bat（Web 控制台）
 #    双击时若服务已在运行，会把已有窗口置于前台，不会开出第二个窗口
 #    旧版 WinForms 窗体保留在 console-legacy.bat，作为降级备用
-# 3) 定时自动推送：⚠️ 尚未生效，方案待定 —— 见「定时」一节
-#    在它做好之前，每周手动点一次「检索北化在线」+「提前发布」即可
+# 3) 每周定时自动推送：已实现（Windows 计划任务，默认发测试群）
+#    python data\task_register.py --time 09:00     # 注册；改时间就再跑一次
+#    python data\task_register.py --run-now        # 立刻验证一次
+#    详见「定时」一节（改时间、查状态、切正式群都在那里）
 ```
 
 ## 首次部署（换机器 / 刚 clone 下来必做）
@@ -548,6 +550,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
     ├── alert_log.jsonl    # 告警台账：每条告警的时间/级别/是否送达（不入库）
     ├── alert_state.json   # 告警冷却状态（不入库）
     ├── last_alert.txt     # 最近一条告警正文（不入库）
+    ├── task_log.jsonl     # 定时任务台账：哪次跑的/多久/退出码/发到哪个群（不入库）
+    ├── task_run.log       # 定时任务完整输出（计划任务无窗口，这是唯一现场）（不入库）
     ├── storage_state.json # 登录会话（不入库）
     ├── last_message.txt   # 最近一次生成的推送文本（不入库）
     ├── server_console.log / server_error.log  # 服务日志（不入库）
@@ -574,6 +578,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
+| `data/task_run.py` | 定时任务运行器：决定发哪个群（默认测试群）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
+| `data/task_register.py` | 把「每周定时推送」注册成 Windows 计划任务；支持改时间 / 查状态 / 删任务 / 立刻触发 |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
 | `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
@@ -581,8 +587,69 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 ## 定时
 
-> ⚠️ **当前状态：自动定时尚未生效（待决定方案）。**
-> 需要一个每周固定时间自动跑 `data/weekly.py --days 7` 的机制，但原方案不可用，详见下。
+定时分两部分，**第一部分已生效**（Windows 计划任务），第二部分见「周日开机补推」。
+
+| 部分 | 作用 | 状态 |
+| --- | --- | --- |
+| **① 每周日的定时推送** | 每周日固定时间抓取 + 推送（默认测试群） | ✅ 已实现并实测通过 |
+| **② 周日开机后的补推检测** | 检查本周日是否已推送，没推则补推 | ⏳ 待做 |
+
+### 第一部分：每周日的定时推送
+
+一条命令注册好（默认**发测试群**）：
+
+```powershell
+& $PY data\task_register.py --time 09:00            # 每周日 09:00，发测试群
+& $PY data\task_register.py --time 09:00 --dry-run  # 只看会注册什么，不真注册
+& $PY data\task_register.py --query                 # 查看任务状态与下次运行时间
+& $PY data\task_register.py --run-now               # 立刻触发一次（验证用）
+& $PY data\task_register.py --unregister            # 删掉任务
+```
+
+改时间＝用新 `--time` 再跑一次（`/F` 覆盖同名任务，不会注册出两个各发一次）。
+
+任务名固定 `BUCT-Homework-Weekly`，实际执行的是
+`python data\task_run.py --wecom test --days 7`：
+
+| 环节 | 谁做 | 说明 |
+| --- | --- | --- |
+| 选目标群 | `task_run.py` | **默认测试群**，要发班级群必须显式 `--wecom prod` |
+| 抓取/汇总/排版/推送 | `weekly.py` | 业务逻辑一行都不重复实现 |
+| 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（约 45 秒，实测能自愈） |
+| 失败告警 | `alert.py` | 抓取 0 条 / 过半失败 / 推送失败都会出声 |
+| 记账 | `data/task_log.jsonl` | 几点跑的、多久、退出码、抓到多少条、**发到哪个群** |
+
+**错过了会补跑**：任务设了 `StartWhenAvailable`，周日那一刻没开机/休眠，开机后系统会补跑一次。
+（这与第二部分是两件事：这里是系统级补跑，第二部分是业务级「这周到底发出去没有」。）
+
+#### 测试群 / 正式班级群，到底在发哪一个
+
+`config.json` 里有三个企业微信 key，**认尾号就不会错**：
+
+| config 字段 | key 尾号 | 是哪个群 | 谁在用 |
+| --- | --- | --- | --- |
+| `wecom_webhook` | `…896a828b` | **测试群** | 控制台「提前发布」等按 config 走的地方 |
+| `wecom_webhook_test` | `…896a828b` | **测试群**（同一条） | **定时任务**（`--wecom test`）与告警定向 |
+| `wecom_webhook_prod` | `…e73e` | **正式班级群** | 只有显式 `--wecom prod` 才用 |
+
+- **要发正式群**：把 `wecom_webhook_prod` 的值整条复制到 `wecom_webhook`。
+- **要退回来**：把 `wecom_webhook_test` 的值复制到 `wecom_webhook`。
+- **定时任务不受这个切换影响**：它读的是 `wecom_webhook_test`，
+  所以你在测试时改 `wecom_webhook`，**不会让周日那次误发到班级群**。
+
+> 这个设计是刻意的：定时推送是无人看管的，一旦发错群就是全班同学收到。
+> 所以「定时发哪个群」必须是一个**显式的参数**，而不是继承某个可能被改过的字段。
+> 想确认某次实际发到哪：看 `data/task_log.jsonl` 的 `wecom` / `target` 字段。
+
+#### 两个实测踩过的坑
+
+1. **计划任务里不能写 shell 重定向**。最初把命令写成
+   `python task_run.py … >> log 2>&1`，结果 `>>` 被当成 python 的参数，
+   argparse 报错退出 2 —— 表现是「任务显示跑过了，但日志文件根本没被创建」。
+   现在日志由 `task_run.py` 自己写 `data/task_run.log`，不依赖 shell。
+2. **必须用装了 playwright 的那个解释器**。`task_register.py` 会自动探测
+   `%USERPROFILE%\.workbuddy\...\envs\default\Scripts\python.exe`，找不到就报错，
+   不会静默注册一个跑不起来任务。
 
 ### 原方案（WorkBuddy 自动化）已失效
 
