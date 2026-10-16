@@ -409,6 +409,104 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 > 它解决过的问题：曾出现「黑名单候选突然消失」，当时分不清是抓取失败还是数据被覆盖；
 > 也出现过「推送说平台 0 条」，看不出是登录态失效还是真没作业 —— 有了这份账就能一眼判断。
 
+## 失败告警（定时任务的前置件）
+
+> **为什么先做告警、再做定时**：本工具的失败是**静默**的 —— 群里没消息，和
+> 「这周真的没作业」在表面上一模一样。定时任务一旦静默失败，你可能漏掉两周作业才发现。
+> 所以自动化之前必须先让失败**出声**。
+
+### 铁律：告警绝不发到班级群
+
+作业提醒是发给**全班同学**的，告警是发给**你自己**的。两者必须分开配置，
+否则一次抓取失败就会把「自动登录失败 / 抓取异常」这类技术文字轰到班级群里。
+
+所以告警默认渠道是 **`local`**：写 `data/last_alert.txt` + 弹一条 Windows 通知，
+**不碰任何群**。要用企业微信，必须显式改成测试群：
+
+```jsonc
+"alert": {
+  "enabled": true,
+  "channel": "local",          // local=本机通知(推荐) / wecom_test=测试群 / wecom_prod=班级群(慎用)
+  "fallback_channel": "local", // 主渠道失败时的降级目标
+  "local_style": "balloon",    // balloon=托盘气泡(自动收回) / dialog=消息框(必须点掉) / both / auto
+  "cooldown_sec": 3600,        // 同类告警该窗口内只发一次
+  "interval_days": 7,          // 「该跑没跑」阈值：7 天 + 12 小时
+  "grace_hours": 12
+}
+```
+
+### 本机通知长什么样
+
+`channel=local` 时，**屏幕右下角弹一个托盘气泡**：警告图标 + 标题
+（如「作业提醒：抓取失败」）+ 一行摘要，约 10 秒后自动收回，不需要点它。
+完整正文同时写进 `data/last_alert.txt`。
+
+想要一个**必须点掉**的：`--style dialog`，或把 `local_style` 改成 `dialog`。
+
+> **为什么不用系统自带的 WinRT toast？**（2026-10-16 实测）
+> 原来那套 `Windows.UI.Notifications` + `CreateToastNotifier` 在这台机器上**已经失效**：
+> 报 `The process has no package identity. (HRESULT: 0x80073D54)` ——
+> 新版 Windows 不再允许**没有 MSIX 包标识**的进程弹 WinRT toast。
+> 更糟的是旧代码把失败吞掉了、照样 `return True`，台账里一路记着 `sent=true`，
+> **通知其实一次都没弹出来**。这就是典型的静默失败，也正是这个模块要消灭的东西。
+>
+> 现在改用 WinForms 托盘气泡（不需要包标识，实测可用），并且**通知失败就如实返回失败**
+> （退出码 2、台账 `sent=false`）。兜底顺序：气泡 → 消息框 → 把 `last_alert.txt` 推到台前，
+> 保证告警不会彻底消失。
+>
+> 另外，所有内嵌 PowerShell 统一用 `-EncodedCommand`（base64 / UTF-16LE）传参：
+> 既避开引号嵌套，也避开「无 BOM 的 `.ps1` 被 Windows PowerShell 5.1 按 GBK 读」——
+> 后者实测会让脚本里的中文直接变成语法错误。
+
+- `wecom_test` 用 `wecom_webhook`（测试群），`wecom_prod` 用 `wecom_webhook_prod`（班级群）。
+- **`wecom_prod` 会把同学拉进你的运维现场**，除非确实需要否则别用。
+
+### 什么时候告警
+
+| 触发 | kind | 级别 | 为什么算失败 |
+| --- | --- | --- | --- |
+| 登录失效且自动登录也失败 | `login-failed` | error | 本次没生成提醒，群里不会有消息 |
+| 抓取子进程非 0 退出 / 抛异常 | `fetch-crashed` | error | 同上 |
+| 扫了课但平台 **0 条** | `fetch-empty` | error | 全部课程都没作业的可能性极小，更像会话失效或改版 |
+| **过半课程**抓取失败 | `fetch-partial` | error | 覆盖严重不完整，漏报风险高 |
+| 推送失败（webhook/token 失效等） | `push-failed` | error | 提醒没发出去 |
+| 到点没跑成功 | `missed-run` | error | 定时任务本身没工作 |
+
+**故意不告警的情况**：个别课程失败（只警告）、以及「窗口内确实没作业」——
+后者会正常发一条「✅ 这段时间没有待交作业，安心休息」，那是正常结果不是故障。
+
+### 「该跑没跑」怎么判
+
+```powershell
+& $PY data\weekly.py --check-freshness                  # 只看，不发
+& $PY data\weekly.py --check-freshness --alert-if-stale # 陈旧就发告警（挂到计划任务/登录补跑上）
+& $PY data\alert.py --check-freshness --notify
+```
+
+判定用的是**台账**，不是某个状态文件：距最近一次 **`source=weekly` 且成功**的记录
+超过 `interval_days + grace_hours` 就告警。
+
+> **只认 `source=weekly`**：手动点「提前发布」写进台账的是 `hub-*`。
+> 如果把手动也算成功，那「定时任务其实一次都没跑过」就永远查不出来 ——
+> 这正是本项目此前的真实状态（`fetch_log` 里 weekly 只有一条演练记录）。
+
+### 告警自己的台账
+
+每条告警都往 `data/alert_log.jsonl` 追一条（时间 / kind / 级别 / 是否送达 / 渠道 /
+内容哈希 / 首行），运行记录在：
+
+```powershell
+Get-Content data\alert_log.jsonl -Tail 5     # 最近 5 条告警
+& $PY data\alert.py --self-test              # 打印告警配置与「该跑没跑」状态，不发送
+```
+
+冷却状态在 `data/alert_state.json`（按 kind 记时间），所以**同一类问题连续出现不会
+变成每天一条骚扰**；但换了一类问题（kind 变了）会立刻发。
+
+> 手动发一条测试：
+> `& $PY data\alert.py --title "测试" --detail "正文" --kind manual-test --channel clipboard`
+> （`--channel clipboard` 只进剪贴板，不会打扰任何人。）
+
 ## 在终端里跑
 
 ```powershell
@@ -447,6 +545,9 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
     ├── course_blacklist.json / test_blacklist.json  # 黑名单（不入库）
     ├── push_log.jsonl     # 推送台账（不入库）
     ├── fetch_log.jsonl    # 检索台账（不入库）
+    ├── alert_log.jsonl    # 告警台账：每条告警的时间/级别/是否送达（不入库）
+    ├── alert_state.json   # 告警冷却状态（不入库）
+    ├── last_alert.txt     # 最近一条告警正文（不入库）
     ├── storage_state.json # 登录会话（不入库）
     ├── last_message.txt   # 最近一次生成的推送文本（不入库）
     ├── server_console.log / server_error.log  # 服务日志（不入库）
@@ -471,6 +572,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/wait_ready.py` | 启动器用的就绪探测：判断「已有实例在监听」与「服务真能回答 HTTP」，全程短超时不挂住 |
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
+| `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
 | `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
@@ -509,8 +611,12 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
    `weekly.py` 的 `ensure_login()` 会先自动尝试登录一次（最多 45 秒，不转人工），
    实测能自愈成功；但它需要**真的创建一个可见的 Edge 窗口**，
    所以执行那一刻电脑必须是已登录、未锁屏的状态。
-2. **抓取/推送失败目前是静默的** —— 群里没消息与「这周真的没作业」看起来一样。
-   排查时先看 `data/fetch_log.jsonl` 与 `data/push_log.jsonl` 两份台账。
+2. **抓取/推送失败现在会告警了**（2026-10-15 加，见「失败告警」一节）：
+   登录失效、抓取崩溃、平台 0 条、过半课程失败、推送失败、以及「该跑没跑」
+   都会走 `alert.py` 出声。**但告警只在 `weekly.py` 真的被执行时才会发** ——
+   如果定时任务根本没触发（原 WorkBuddy 方案就是这样），那就需要
+   `weekly.py --check-freshness --alert-if-stale` 这类**外部定期检查**来兜住。
+   所以告警是定时的前置件，不是替代品。
 
 ## 查看作业内容（平台作业正文）
 

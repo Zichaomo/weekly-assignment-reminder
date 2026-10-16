@@ -7,9 +7,13 @@
     python weekly.py --days 3              # 只看未来 3 天
     python weekly.py --no-send             # 演练：只打印/落盘，不推送
     python weekly.py --channel pushplus    # 临时指定推送渠道（覆盖 config.json）
+    python weekly.py --check-freshness     # 只检查「该跑没跑」（定时任务的前置检查）
+    python weekly.py --check-freshness --alert-if-stale   # 陈旧则发一条告警
 
 手动补录（老师发在微信群/其他企业微信群、平台抓不到的）：
     见 manual.py —— python manual.py add
+
+失败告警：见 alert.py。默认走本机通知（不发任何群），配置在 config.json 的 alert 段。
 """
 import argparse
 import json
@@ -27,6 +31,9 @@ PY = sys.executable
 # 子进程统一按 utf-8 输出，避免 Windows 下 GBK 中文把父进程解码搞崩。
 UTF8_ENV = os.environ.copy()
 UTF8_ENV["PYTHONIOENCODING"] = "utf-8"
+
+# 连续多少比例的门课抓取失败算「覆盖严重不完整」（与 server.py 的缓存守卫同一口径）
+MAX_FAIL_RATIO = 0.5
 
 
 def fetch(extra_args: list = None) -> dict:
@@ -52,7 +59,12 @@ def fetch(extra_args: list = None) -> dict:
     if not out.stdout:
         raise RuntimeError(f"抓取无输出（耗时 {elapsed:.0f} 秒）:\n{out.stderr}")
     data = json.loads(out.stdout)
+    if not data.get("ok"):
+        # scrape.py 在「未登录」等情况下会输出 {"ok": false} 且退出码为 0。
+        # 不在这里拦住，它就会被当成「成功的空结果」——那正是漏报的开始。
+        raise RuntimeError("抓取未成功：" + (out.stderr or "").strip()[-400:])
     data["_elapsed_sec"] = round(elapsed, 1)
+    data["_stderr_tail"] = (out.stderr or "")[-4000:]
     return data
 
 
@@ -241,16 +253,49 @@ def ensure_login() -> bool:
     return False
 
 
-def send_alert(text: str) -> bool:
-    """把告警文本通过 notify.py 发出（默认 wecom 渠道）。"""
-    f = ROOT / "_login_alert.txt"
-    f.write_text(text, encoding="utf-8")
-    r = subprocess.run(
-        [PY, str(ROOT / "notify.py"), "--file", str(f)],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", env=UTF8_ENV, cwd=str(ROOT),
-    )
-    return r.returncode == 0
+# ---------------------------------------------------------------- 失败告警
+def send_alert(kind: str, title: str, detail: str, level: str = "error",
+               no_dedup: bool = False) -> bool:
+    """发一条失败告警（实现在 alert.py：渠道选择、冷却去重、台账都在那边）。
+
+    为什么不再是「直接调 notify.py 发 wecom」：
+      作业提醒是发给**全班**的，告警是发给**自己**的 —— 两者必须分开配。
+      旧实现会把技术性文字（"自动登录失败"/"抓取异常"）直接发到班级群。
+      现在默认走本机通知，要用企业微信必须显式配 alert.channel=wecom_test。
+
+    告警是旁路：它自己出任何问题都不该影响主流程，所以这里一律兜住异常。
+    """
+    try:
+        import alert  # 延迟导入：没有告警需求时不影响启动
+        return alert.send(kind, title, detail, level=level, no_dedup=no_dedup)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: 告警发送失败（已忽略）{type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
+def check_freshness() -> int:
+    """检查「自动任务该跑没跑」，返回 0=正常 / 2=陈旧 / 1=检查本身失败。
+
+    存在的理由：本工具的失败是**静默**的 —— 群里没消息与「这周没作业」长得一样。
+    定时机制落地后，这条检查可以挂在计划任务或「登录时补跑」上，
+    也可以手动跑它来确认自动化到底有没有在工作。
+
+    只认 source=weekly 且成功的台账记录：手动点「提前发布」写的是 hub-*，
+    把它算成功就永远查不出「定时任务其实从没跑过」。
+    """
+    try:
+        import alert
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR: 无法导入 alert.py：{e}", file=sys.stderr)
+        return 1
+    cfg = alert.load_cfg()
+    fresh, why, ev = alert.check_freshness(cfg)
+    print(("⚠️ " if fresh else "✅ ") + why)
+    print("证据：" + json.dumps(ev, ensure_ascii=False))
+    print("（只认 source=weekly 且成功的台账；手动点「提前发布」不算）")
+    if fresh:
+        print(r"提示：定时任务尚未生效时，可手动跑 python data\weekly.py --days 7 后发布。")
+    return 2 if fresh else 0
 
 
 def main() -> int:
@@ -261,7 +306,24 @@ def main() -> int:
     ap.add_argument("--pool", action="store_true",
                     help="旧行为：只用首页「待提交作业」视图的课程（快，但谁交了哪门课，"
                          "全班就收不到那门课的提醒）。默认关闭")
+    ap.add_argument("--check-freshness", action="store_true",
+                    help="只检查「自动任务该跑没跑」，不抓取不推送（定时任务的前置检查）")
+    ap.add_argument("--alert-if-stale", action="store_true",
+                    help="配合 --check-freshness：发现陈旧时发一条告警")
     args = ap.parse_args()
+
+    # ---- 前置检查：定时任务到底有没有在工作？（不抓取，秒回）----
+    if args.check_freshness:
+        code = check_freshness()
+        if code == 2 and args.alert_if_stale:
+            try:
+                import alert
+                cfg = alert.load_cfg()
+                _, why, _ = alert.check_freshness(cfg)
+                alert.send("missed-run", "作业提醒自动任务该跑没跑", why, level="error")
+            except Exception as e:  # noqa: BLE001
+                print(f"WARN: 告警发送失败 {e}", file=sys.stderr)
+        return code
 
     # 默认按「截止日期」取作业（全量扫描所有课程，不看是否已提交）——
     # 这份提醒是发给全班同学的，谁交没交不该决定某门课要不要提醒。
@@ -269,18 +331,27 @@ def main() -> int:
 
     print("抓取中..." + ("（全量扫描所有课程，约 1-3 分钟）" if not args.pool else ""))
     if not ensure_login():
-        alert = ("⚠️ 北化在线作业提醒：平台登录态已失效，且自动登录未成功"
-                 "（可能平台要求验证码，或 Edge 里存的密码已过期）。"
-                 f"请双击 {ROOT.parent / 'login.bat'} 手动登录一次后，再运行作业提醒。")
-        print(alert)
-        try:
-            ok = send_alert(alert)
-            print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print("告警发送异常:", e, file=sys.stderr)
+        text = ("北化在线登录态已失效，且自动登录未成功"
+                "（可能平台要求验证码，或 Edge 里存的密码已过期）。\n"
+                f"处理：双击 {ROOT.parent / 'login.bat'} 手动登录一次，再重跑作业提醒。\n"
+                "影响：本次没有生成提醒，群里不会收到消息。")
+        print(text)
+        ok = send_alert("login-failed", "北化在线登录失效，自动登录也失败", text)
+        print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
         return 1
 
-    data = fetch(extra or None)
+    # ---- 抓取：这里的失败必须告警，否则就是静默漏报 ----
+    try:
+        data = fetch(extra or None)
+    except Exception as e:  # noqa: BLE001
+        text = (f"抓取阶段直接失败：{type(e).__name__}\n{e}\n\n"
+                "可能原因：登录态失效、平台改版、网络或浏览器异常。\n"
+                r"排查：看 data\server_console.log 与 data\fetch_log.jsonl；"
+                r"必要时双击 login.bat 重新登录后重跑。")
+        print("抓取失败：", e, file=sys.stderr)
+        send_alert("fetch-crashed", "作业提醒：抓取失败", text)
+        return 1
+
     elapsed = data.get("_elapsed_sec")
     platform = data.get("homeworks", [])
     tests_n = len(data.get("tests", []) or [])
@@ -291,10 +362,37 @@ def main() -> int:
         mins = elapsed / 60
         print(f"⏱ 本次抓取用时 {mins:.1f} 分钟（{elapsed:.0f} 秒）"
               f"（其中含在线测试扫描）")
+
     warn = data.get("warnings") or {}
-    if warn.get("failed_courses"):
-        print(f"⚠️ {len(warn['failed_courses'])} 门课抓取失败，覆盖不完整："
-              f"{', '.join(warn['failed_courses'][:5])}", file=sys.stderr)
+    failed = warn.get("failed_courses") or []
+    per_course = data.get("per_course") or []
+    total_courses = len(per_course)
+    if failed:
+        print(f"⚠️ {len(failed)} 门课抓取失败，覆盖不完整："
+              f"{', '.join(failed[:5])}", file=sys.stderr)
+
+    # ---- 抓到了，但结果明显不健康：必须当失败处理，不能当「这周没作业」----
+    unhealthy = []
+    if failed and total_courses and len(failed) >= max(1, int(total_courses * MAX_FAIL_RATIO)):
+        unhealthy.append(f"{len(failed)}/{total_courses} 门课抓取失败（过半，覆盖严重不完整）")
+    if not platform and total_courses:
+        unhealthy.append(f"扫了 {total_courses} 门课却一条平台作业都没抓到"
+                         "（课程确实全没作业的可能性极小，更像会话失效或平台改版）")
+    if unhealthy:
+        text = ("本次抓取结果不可信，**本周提醒很可能漏报**：\n"
+                + "\n".join(f"· {x}" for x in unhealthy)
+                + f"\n\n统计：课程 {total_courses} 门 / 平台作业 {len(platform)} 条 / "
+                  f"在线测试 {tests_n} 条。")
+        if failed:
+            text += "\n失败课程：\n" + "\n".join(f"  - {c}" for c in failed[:12])
+        if warn.get("zero_homework_courses"):
+            text += ("\n返回 0 条的课（可能确实没作业）："
+                     + "、".join(warn["zero_homework_courses"][:10]))
+        text += ("\n排查：data\\fetch_log.jsonl 看本次记录；"
+                 "若是平台 0 条，先双击 login.bat 重新登录再重跑。")
+        print("⚠️ " + "；".join(unhealthy), file=sys.stderr)
+        send_alert("fetch-empty" if not platform else "fetch-partial",
+                   "作业提醒：本次抓取结果不可信", text, level="error")
 
     manual = load_manual()
     if manual:
@@ -333,13 +431,28 @@ def main() -> int:
     cmd = [PY, str(ROOT / "notify.py"), "--file", str(msg_file), "--source", "weekly"]
     if args.channel:
         cmd += ["--channel", args.channel]
-    r = subprocess.run(
-        cmd, cwd=str(ROOT), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", env=UTF8_ENV,
-    )
+    try:
+        r = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=UTF8_ENV,
+        )
+    except Exception as e:  # noqa: BLE001
+        text = (f"调用推送脚本时直接异常：{type(e).__name__}\n{e}\n\n"
+                r"提醒正文已生成在 data\last_message.txt，可以先手动复制到群里顶上。")
+        print("推送异常：", e, file=sys.stderr)
+        send_alert("push-crashed", "作业提醒：推送环节异常", text)
+        return 1
+
     print(r.stdout or "", end="")
     if r.returncode != 0:
+        text = ("推送失败，**群里没有收到本周提醒**：\n"
+                f"notify.py 退出码 {r.returncode}\n"
+                f"stderr：{(r.stderr or '').strip()[-600:] or '（无）'}\n"
+                f"stdout：{(r.stdout or '').strip()[-300:] or '（无）'}\n\n"
+                r"提醒正文在 data\last_message.txt —— 可先手动复制到群里顶上，"
+                "再排查渠道（config.json 里的 webhook / token 是否还有效）。")
         print("推送失败:", r.stderr or "", file=sys.stderr)
+        send_alert("push-failed", "作业提醒：推送失败，群里没收到", text, level="error")
     return r.returncode
 
 

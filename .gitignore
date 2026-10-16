@@ -56,3 +56,11 @@ data/server_error.log
 
 # 检索台账（本地记录：抓了什么、多久、失败几门）
 data/fetch_log.jsonl
+
+# ── 失败告警（本地记录，各人不同）────────────────────
+# 告警台账：每条告警的时间 / 级别 / 内容 / 是否送达
+data/alert_log.jsonl
+# 告警冷却状态：同类告警在该窗口内只发一次
+data/alert_state.json
+# 最近一条告警的正文（本机通知与排查用）
+data/last_alert.txt
