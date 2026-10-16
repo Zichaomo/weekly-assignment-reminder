@@ -410,6 +410,99 @@ def _last_run() -> dict:
     scan(ROOT / "push_log.jsonl", "push", "any_push")
     return out
 
+
+# ---------------------------------------------------------------- 本周日推送了吗？
+def _parse_time(s):
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _push_records():
+    """推送台账里所有成功推送到「群」的记录（倒序无关，调用方自己筛）。"""
+    out = []
+    p = ROOT / "push_log.jsonl"
+    if not p.exists():
+        return out
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(rec, dict) or not rec.get("ok"):
+            continue
+        if (rec.get("channel") or "") not in ("wecom", "pushplus"):
+            continue          # 剪贴板/本地/none 不算「推给群里了」
+        out.append(rec)
+    return out
+
+
+def weekly_due(now=None, target_time: str = "12:45"):
+    """本周日（今天）的推送到底完成了没有 —— 第二部分「开机补推」的判定核心。
+
+    为什么要单独做这个判定，而不是复用 check_freshness：
+      check_freshness 问的是「距上次成功超过 7 天了吗」，它答不出
+      **「今天这个周日到底发没发」** —— 而补推要的正是后者。
+      反例：上周日成功了、这周日失败了，距今只有 7 天，check_freshness 会判"正常"，
+      但本周的提醒实际上没发出去。
+
+    判定（只认 source=weekly / task-run 且 ok 且渠道是群的记录）：
+      done       今天（周日）已经成功推送过
+      due        今天还没推，且当前时间已过 *计划推送时间*（默认 12:45）-> 该补推
+      too_early  今天还没推，但还没到计划时间 -> 别抢在定时任务前面
+      not_sunday 今天不是周日 -> 不关我们的事
+
+    返回 (status, 说明, 证据 dict)。
+    """
+    now = now or datetime.now()
+    ev = {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "target_time": target_time,
+          "weekday": now.isoweekday()}
+
+    try:
+        hh, mm = (int(x) for x in str(target_time).split(":")[:2])
+    except Exception:  # noqa: BLE001
+        hh, mm = 12, 45
+    target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+    # 最近一次成功的群推送
+    recs = _push_records()
+    last = None
+    for rec in recs:
+        dt = _parse_time(rec.get("time"))
+        if dt and (last is None or dt > last[0]):
+            last = (dt, rec)
+    ev["last_group_push"] = last[1].get("time") if last else None
+    ev["last_group_push_source"] = last[1].get("source") if last else None
+
+    if now.isoweekday() != 7:
+        return "not_sunday", f"今天不是周日（周{'一二三四五六日'[now.isoweekday() - 1]}），无需补推。", ev
+
+    # 今天推过吗？（按日历日比较，而不是按"距今多少小时"）
+    if last and last[0].date() == now.date():
+        return "done", (f"今天（{now:%m-%d}）已经成功推送过：{last[0]:%H:%M:%S}"
+                        f"（来源 {last[1].get('source')}），不需要补推。"), ev
+
+    if now < target_dt:
+        return "too_early", (f"今天还没推送，但尚未到计划时间 {target_time}"
+                             f"（现在 {now:%H:%M}）—— 等定时任务先跑。"), ev
+
+    if last:
+        days = (now - last[0]).days
+        return "due", (f"今天是周日（{now:%m-%d}），已过计划时间 {target_time}，"
+                       f"但今天还没有成功推送过。"
+                       f"最近一次成功推送是 {last[0]:%Y-%m-%d %H:%M}（{days} 天前）——需要补推。"), ev
+    return "due", (f"今天是周日，已过计划时间 {target_time}，"
+                   f"且台账里没有任何成功推送群的记录 —— 需要补推。"), ev
+
+
 def check_freshness(cfg: dict = None, now=None):
     """检查「该跑没跑」。返回 (是否陈旧, 说明文本, 证据 dict)。
 
@@ -506,8 +599,10 @@ def main() -> int:
     ap.add_argument("--no-dedup", action="store_true", help="跳过冷却检查，强制发送")
     ap.add_argument("--self-test", action="store_true", help="打印告警配置，不发送")
     ap.add_argument("--check-freshness", action="store_true", help="只检查「该跑没跑」")
+    ap.add_argument("--weekly-due", action="store_true",
+                    help="只检查「本周日推送了没有」——第二部分补推检测的判定（只报告）")
     ap.add_argument("--notify", action="store_true",
-                    help="配合 --check-freshness：陈旧时真的发告警")
+                    help="配合 --check-freshness / --weekly-due：需要动作时真的发告警")
     args = ap.parse_args()
 
     cfg = load_cfg()
@@ -521,6 +616,16 @@ def main() -> int:
         print("证据: " + json.dumps(ev, ensure_ascii=False))
         if fresh and args.notify:
             ok = send("missed-run", "作业提醒该跑没跑", why, level="error")
+            return 0 if ok else 2
+        return 0
+
+    if args.weekly_due:
+        status, why, ev = weekly_due()
+        icon = {"done": "✅", "due": "⚠️", "too_early": "⏳", "not_sunday": "·"}.get(status, "?")
+        print(f"{icon} {status}: {why}")
+        print("证据: " + json.dumps(ev, ensure_ascii=False))
+        if status == "due" and args.notify:
+            ok = send("weekly-missed", "作业提醒：本周日的提醒没有发出去", why, level="error")
             return 0 if ok else 2
         return 0
 

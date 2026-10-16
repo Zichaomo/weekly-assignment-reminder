@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -41,7 +42,9 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 TASK_NAME = "BUCT-Homework-Weekly"
+TASK_CATCHUP_NAME = "BUCT-Homework-Catchup"
 TASK_RUN = ROOT / "task_run.py"
+TASK_CATCHUP = ROOT / "task_catchup.py"
 
 
 def find_python() -> str:
@@ -105,24 +108,111 @@ def task_command(python: str, wecom: str, days: int) -> str:
     return f'"{python}" "{TASK_RUN}" --wecom {wecom} --days {days}'
 
 
-def build_create_args(name: str, time_str: str, day: str, command: str) -> list:
-    return ["/Create", "/TN", name, "/TR", command,
-            "/SC", "WEEKLY", "/D", day, "/ST", time_str,
-            "/F",          # 重名直接覆盖，避免注册出两个任务各发一次
-            "/RL", "LIMITED"]
+def build_create_args(name: str, time_str: str, day: str, command: str,
+                      once: bool = False, date_str: str = None) -> list:
+    """组 schtasks 参数。
+
+    once=True 时注册「只跑一次」的任务（/SC ONCE /SD 日期）——
+    用来当场验证「到点会不会自己触发」，不必等到周日。
+    """
+    common = ["/Create", "/TN", name, "/TR", command, "/ST", time_str,
+              "/F",          # 重名直接覆盖，避免注册出两个任务各发一次
+              "/RL", "LIMITED"]
+    if once:
+        return common + ["/SC", "ONCE", "/SD", date_str or time.strftime("%Y/%m/%d")]
+    return common + ["/SC", "WEEKLY", "/D", day]
+
+
+def register_catchup(args) -> int:
+    """注册第二部分：登录时触发的「周日开机补推检测」。
+
+    为什么不用 schtasks.exe：它表达不了「登录时触发」。这里用 PowerShell 的
+    ScheduledTasks 模块（AtLogOn 触发器），并且**必须**指定 LogonType=Interactive ——
+    默认的 S4U 不加载用户配置文件，Path.home() 会指向系统目录，
+    login.py 就找不到 Edge 的持久 profile，自动登录必然失败（这是个隐蔽的坑）。
+    """
+    ps = shutil.which("pwsh") or shutil.which("powershell")
+    if not ps:
+        print("ERROR: 找不到 PowerShell，无法注册登录触发任务", file=sys.stderr)
+        return 1
+    python = find_python()
+    if not Path(python).exists():
+        print(f"ERROR: 解释器不存在：{python}", file=sys.stderr)
+        return 1
+    if not TASK_CATCHUP.exists():
+        print(f"ERROR: 找不到 {TASK_CATCHUP}", file=sys.stderr)
+        return 1
+
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$name = '{args.name}'
+$exe  = '{python}'
+$arg  = '"{TASK_CATCHUP}" --wecom {args.wecom} --days {args.days} --delay-min {args.delay_min}'
+
+$action = New-ScheduledTaskAction -Execute $exe -Argument $arg
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+
+if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {{
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+}}
+Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
+    -Settings $settings -Principal $principal -Description 'BUCT homework: Sunday catch-up check after logon' | Out-Null
+$t = Get-ScheduledTask -TaskName $name
+$i = $t | Get-ScheduledTaskInfo
+Write-Output 'CATCHUP-OK'
+Write-Output ('Trigger : ' + ($t.Triggers | ForEach-Object {{ $_.CimClass.CimClassName }}))
+Write-Output ('LogonType: ' + $t.Principal.LogonType)
+Write-Output ('Execute : ' + $t.Actions[0].Execute)
+Write-Output ('Argument: ' + $t.Actions[0].Arguments)
+Write-Output ('State   : ' + $t.State)
+"""
+
+    print(f"计划任务名：{args.name}（登录时触发）")
+    print(f"触发条件　：当前用户登录时（每次登录都会触发，脚本自己判断要不要动作）")
+    print(f"执行脚本　：{TASK_CATCHUP}")
+    print(f"参数　　　：--wecom {args.wecom} --days {args.days} --delay-min {args.delay_min}")
+    print(f"解释器　　：{python}")
+    print(f"判定逻辑　：只在周日 + 已过计划时间 + 今天还没推成功 时，"
+          f"等待 {args.delay_min} 分钟后补推；否则秒退")
+
+    if args.dry_run:
+        print("\n[dry-run] 未实际注册。")
+        return 0
+
+    r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    print("\nPowerShell 输出：\n" + "\n".join("  " + l for l in out.splitlines()))
+    if "CATCHUP-OK" not in out:
+        print("ERROR: 注册失败", file=sys.stderr)
+        if "拒绝访问" in out or "Access is denied" in out:
+            print("提示：注册计划任务可能需要管理员权限。", file=sys.stderr)
+        return 1
+
+    print(f"\n✅ 已注册补推检测：每次登录时触发（周日且需要时才会真动作）")
+    print(f"   补推日志：{ROOT / 'task_catchup.log'}")
+    print(f"   任务台账：{ROOT / 'task_log.jsonl'}（kind=catchup）")
+    print(f"   立刻验证：python data\\task_catchup.py --now --check-only")
+    return 0
 
 
 def register(args) -> int:
     python = find_python()
     command = task_command(python, args.wecom, args.days)
-    cmd_args = build_create_args(args.name, args.time, args.day, command)
+    cmd_args = build_create_args(args.name, args.time, args.day, command,
+                                once=args.once, date_str=args.date)
 
+    when = (f"一次性 {args.date or time.strftime('%Y/%m/%d')} {args.time}"
+            if args.once else f"每周{args.day} {args.time}")
     print(f"计划任务名：{args.name}")
-    print(f"执行时间：每周{'日一二三四五六'[int(args.day)] if args.day.isdigit() else args.day} {args.time}")
-    print(f"解释器　：{python}")
-    print(f"目标群　：{'测试群（--wecom test）' if args.wecom == 'test' else args.wecom}")
-    print(f"完整命令：{command}")
-    print(f"schtasks ：schtasks {' '.join(cmd_args)}")
+    print(f"执行时间　：{when}")
+    print(f"解释器　　：{python}")
+    print(f"目标群　　：{'测试群（--wecom test）' if args.wecom == 'test' else args.wecom}")
+    print(f"完整命令　：{command}")
+    print(f"schtasks 　：schtasks {' '.join(cmd_args)}")
 
     if not Path(python).exists():
         print(f"ERROR: 解释器不存在：{python}", file=sys.stderr)
@@ -147,10 +237,13 @@ def register(args) -> int:
 
     ok, why = apply_extra_settings(args.name)
     print(f"附加设置（错过补跑/超时上限/不叠加）：{'已应用' if ok else '未应用'}（{why}）")
-    print(f"\n✅ 已注册：每周 {args.day} {args.time} 自动推送（{'测试群' if args.wecom == 'test' else args.wecom}）")
+    print(f"\n✅ 已注册：{when} 自动推送（{'测试群' if args.wecom == 'test' else args.wecom}）")
     print(f"   任务台账：{ROOT / 'task_log.jsonl'}")
     print(f"   运行日志：{ROOT / 'task_run.log'}（由 task_run.py 自己写，不靠 shell 重定向）")
-    print(f"   立刻验证：python data\\task_register.py --run-now")
+    print(f"   查看状态：python data\\task_register.py --query --name {args.name}")
+    if args.once:
+        print("   ⏳ 到点会自动触发，**不需要你做任何事**；跑完看上面的台账与日志。")
+        print(f"   验证完记得删掉：python data\\task_register.py --unregister --name {args.name}")
     return 0
 
 
@@ -186,18 +279,28 @@ def run_now(name: str) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="注册/管理「每周定时推送」计划任务")
-    ap.add_argument("--name", default=TASK_NAME)
+    ap = argparse.ArgumentParser(description="注册/管理定时任务（每周推送 + 周日补推检测）")
+    ap.add_argument("--name", help=f"任务名（默认：每周={TASK_NAME}，补推={TASK_CATCHUP_NAME}）")
     ap.add_argument("--time", default="09:00", help="HH:MM（默认 09:00）")
     ap.add_argument("--day", default="SUN", help="SUN/MON/... 或 1-7（默认 SUN）")
     ap.add_argument("--wecom", choices=["test", "prod", "config"], default="test",
                     help="发到哪个群（默认 test=测试群）")
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--once", action="store_true",
+                    help="注册「只跑一次」的任务（配合 --time/--date），用于当场验证到点是否自动触发")
+    ap.add_argument("--date", help="配合 --once：YYYY/MM/DD（默认今天）")
+    ap.add_argument("--catchup", action="store_true",
+                    help="注册第二部分：登录时触发的「周日开机补推检测」")
+    ap.add_argument("--delay-min", type=int, default=15,
+                    help="补推前等待分钟数（默认 15，即「开机后约 15 分钟」）")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不注册")
     ap.add_argument("--query", action="store_true", help="查看任务状态")
     ap.add_argument("--unregister", action="store_true", help="删除任务")
     ap.add_argument("--run-now", action="store_true", help="立刻触发一次（验证用）")
     args = ap.parse_args()
+
+    if not args.name:
+        args.name = TASK_CATCHUP_NAME if args.catchup else TASK_NAME
 
     if args.query:
         return query(args.name)
@@ -205,6 +308,8 @@ def main() -> int:
         return unregister(args.name)
     if args.run_now:
         return run_now(args.name)
+    if args.catchup:
+        return register_catchup(args)
     return register(args)
 
 

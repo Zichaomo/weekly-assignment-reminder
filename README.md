@@ -552,6 +552,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
     ├── last_alert.txt     # 最近一条告警正文（不入库）
     ├── task_log.jsonl     # 定时任务台账：哪次跑的/多久/退出码/发到哪个群（不入库）
     ├── task_run.log       # 定时任务完整输出（计划任务无窗口，这是唯一现场）（不入库）
+    ├── task_catchup.log   # 补推检测日志：每次登录一条判定记录（不入库）
     ├── storage_state.json # 登录会话（不入库）
     ├── last_message.txt   # 最近一次生成的推送文本（不入库）
     ├── server_console.log / server_error.log  # 服务日志（不入库）
@@ -580,6 +581,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
 | `data/task_run.py` | 定时任务运行器：决定发哪个群（默认测试群）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
 | `data/task_register.py` | 把「每周定时推送」注册成 Windows 计划任务；支持改时间 / 查状态 / 删任务 / 立刻触发 |
+| `data/task_catchup.py` | 第二部分：登录后检查本周日是否已推送，未推送则补推（非周日秒退；只等需要动作的那次） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
 | `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
@@ -592,7 +594,65 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | 部分 | 作用 | 状态 |
 | --- | --- | --- |
 | **① 每周日的定时推送** | 每周日固定时间抓取 + 推送（默认测试群） | ✅ 已实现并实测通过 |
-| **② 周日开机后的补推检测** | 检查本周日是否已推送，没推则补推 | ⏳ 待做 |
+| **② 周日开机后的补推检测** | 检查本周日是否已推送，没推则补推 | ✅ 已实现并实测通过 |
+
+### 第二部分：周日开机后的补推检测
+
+第一部分只在**那一刻电脑开着**时才跑得成。周日上午没开机、或者开机了但锁屏导致
+自动登录失败，这一周的提醒就没了 —— 而且没人会发现。第二部分负责兜住这个：
+**开机登录后检查「本周日到底推出去了没有」，没推就补推。**
+
+一条命令注册好：
+
+```powershell
+& $PY data\task_register.py --catchup                    # 登录时触发，等待 15 分钟
+& $PY data\task_register.py --catchup --delay-min 15 --wecom test
+& $PY data\task_register.py --query --name BUCT-Homework-Catchup
+& $PY data\task_register.py --unregister --name BUCT-Homework-Catchup
+```
+
+任务名 `BUCT-Homework-Catchup`，**登录时触发**（`MSFT_TaskLogonTrigger`）。
+每次登录都会触发一次，但脚本自己判断要不要动作 —— 不需要动作时**秒退**，
+不会白等 15 分钟：
+
+| 周的哪一天 | 时间 | 今天推过没 | 判定 | 动作 |
+| --- | --- | --- | --- | --- |
+| 非周日 | 任意 | — | `not_sunday` | 退出（不等待） |
+| 周日 | 早于计划时间 | — | `too_early` | 退出，把机会让给定时任务 |
+| 周日 | 已过计划时间 | 已成功推送 | `done` | 退出（这就是「检测」本身） |
+| 周日 | 已过计划时间 | 没推成功 | `due` | **等 15 分钟后补推** |
+
+#### 判定为什么不能复用「该跑没跑」
+
+`alert.check_freshness()` 问的是「距上次成功超过 7 天了吗」，它**答不出
+「今天这个周日到底发没发」**。实测反例：上周日成功了、这周日失败了，
+距今只有 7 天，`check_freshness` 会判"正常"，但本周提醒根本没发出去。
+
+所以补推用的是独立的 `alert.weekly_due()`：按**日历日**比较
+「今天（周日）有没有成功推送到群」，而不是按距今多少小时。
+
+> **"成功推送到群"只认企业微信 / pushplus 的记录**。剪贴板、本机通知、`none`
+> 都不算 —— 否则一次「落盘成功」就会被当成"已经通知过全班了"。
+
+#### 实测过的细节
+
+- **登录触发必须用 `LogonType: Interactive`**：PowerShell 的
+  `New-ScheduledTaskPrincipal` 默认是 S4U，**不加载用户配置文件**，
+  `Path.home()` 会指向系统目录，`login.py` 就找不到 Edge 的持久 profile，
+  自动登录必然失败。这个坑很隐蔽 —— 任务会"跑成功"但永远登不上。
+  `task_register.py --catchup` 已显式指定，可用 `--query` 复核。
+- **为什么是登录触发而不是开机触发**：抓取要拉起 Edge，需要一个**已登录的交互式桌面**；
+  系统刚启动还没人登录时跑，必然失败。登录触发天然满足这个前提。
+- **不重复补推**：补推成功后再触发本脚本，`done` 分支就会拦住它。
+- **不和定时任务撞车**：`--delay-min 15` 给定时任务留出发车时间；
+  万一两个抓取真的重叠，也有 `scrape.py` 的文件锁排队，脚本还会检查
+  任务台账里有没有「刚启动还没结束」的记录，有就跳过。
+- **去重会把紧跟其后的补推标记为 `duplicate-skipped`**（这是对的）：
+  实测定时任务 12:52 送达后，补推在 12:56 尝试（相距 235 秒 < 300 秒去重窗口），
+  内容与目标都相同 → 跳过，群里不会收到两条一样的提醒；
+  窗口过后（实测 12:58）补推就能真正送达。**注意**：这种情况下
+  `push_log.jsonl` 记的是 `ok=true` + `note=duplicate-skipped`，
+  而 `task_run.log` 会写「已发」——想确认"到底有没有真送达"，看 `note` 字段。
 
 ### 第一部分：每周日的定时推送
 

@@ -70,3 +70,5 @@ data/last_alert.txt
 data/task_log.jsonl
 # 运行日志：计划任务无窗口，这是唯一的现场
 data/task_run.log
+# 补推检测日志（登录触发，每次登录都会留下一次判定记录）
+data/task_catchup.log
