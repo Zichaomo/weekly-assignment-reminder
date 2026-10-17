@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 抓取北化在线（THEOL）待提交作业及其截止时间。
 
@@ -1030,6 +1030,33 @@ def build_blacklist_candidates(now=None) -> dict:
     }
 
 
+def resolve_lid(token: str, index: dict) -> str:
+    """把「lid」或「课程名的一部分」解析成 lid；找不到或有歧义返回 None。
+
+    为什么要按名字找：课程名像「嵌入式系统创新应用与实践」，手打 lid 太麻烦。
+    只在唯一匹配时才返回，多个匹配宁可报错让人写全 —— 拉错课会漏掉整门课的提醒，
+    这个代价比多敲几个字大得多。
+    """
+    token = (token or "").strip()
+    if not token:
+        return None
+    if token in index:                      # 直接给了 lid
+        return token
+    # 先精确同名，再退化为子串匹配
+    for lid, name in index.items():
+        if name == token:
+            return lid
+    hits = [(lid, name) for lid, name in index.items() if token.lower() in name.lower()]
+    if len(hits) == 1:
+        return hits[0][0]
+    if len(hits) > 1:
+        print(f"「{token}」匹配到 {len(hits)} 门课，请写得更具体或直接用 lid：",
+              file=sys.stderr)
+        for lid, name in hits:
+            print(f"    [{lid}] {name}", file=sys.stderr)
+    return None
+
+
 def _blacklist_cli(args) -> int:
     """处理黑名单相关子命令。
 
@@ -1123,12 +1150,57 @@ def _blacklist_cli(args) -> int:
             print("  （无）")
         print()
         print("【已拉黑】扫描时跳过：")
-        for lid, v in bl.items():
-            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} {v.get('reason', '')}"
-                  f"  确认于 {v.get('confirmed_at', '?')}")
+        LBL = {"elective": "选修课", "stale": "陈旧", "no-homework-entry": "无入口",
+               "no-homework-yet": "暂无作业", "manual": "手动"}
+        electives = [(lid, v) for lid, v in bl.items() if v.get("reason") == "elective"]
+        others = [(lid, v) for lid, v in bl.items() if v.get("reason") != "elective"]
+        for lid, v in electives:
+            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} "
+                  f"【选修课】每人选课不同，作业不影响全班")
+        for lid, v in others:
+            reason = v.get("reason", "")
+            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} "
+                  f"{LBL.get(reason, reason):8s} 确认于 {v.get('confirmed_at', '?')}")
         print()
         print("确认：python scrape.py --blacklist-confirm <lid> ...  （或 all-candidates）")
+        print("选修：python scrape.py --blacklist-elective <lid 或 课程名片段> ...")
         print("移除：python scrape.py --blacklist-remove <lid> ...  （或 all）")
+        return 0
+
+    if args.blacklist_elective:
+        # 「选修课」：每人选的课不一样，班里多数人根本没上这门课 ——
+        # 它的作业只对你个人成立，放进群提醒就是纯噪音。
+        # 与 stale/no-homework-entry 的区别：那两类是"这课本学期没作业"，
+        # 选修课是"这门课跟我们班无关"，理由不同，界面上也要能分开看。
+        data = load_blacklist()
+        added, unknown = [], []
+        for token in args.blacklist_elective:
+            lid = resolve_lid(token, index)
+            if not lid:
+                unknown.append(token)
+                continue
+            if lid in data["courses"]:
+                continue
+            data["courses"][lid] = {
+                "name": index[lid],
+                "reason": "elective",
+                "detail": "选修课（每人选课不同，作业不影响全班）",
+                "last_homework": None,
+                "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "confirmed_by": "human",
+            }
+            added.append(lid)
+        save_blacklist(data)
+        if added:
+            print(f"已按「选修课」拉黑 {len(added)} 门（扫描时跳过）：")
+            for lid in added:
+                print(f"  [{lid}] {index[lid]}")
+        else:
+            print("没有新增（可能已在黑名单里）。")
+        if unknown:
+            print(f"未找到匹配课程：{', '.join(unknown)}", file=sys.stderr)
+            print("提示：可以给 lid，也可以给课程名的一部分，例如 --blacklist-elective 嵌入式",
+                  file=sys.stderr)
         return 0
 
     if args.blacklist_confirm:
@@ -1214,6 +1286,10 @@ def main():
                          "all-including-advisory = 连「仅供参考·暂无作业」的也一起确认")
     ap.add_argument("--blacklist-remove", nargs="+", metavar="LID",
                     help="把指定课程移出黑名单（可多个 lid，或用 all）")
+    ap.add_argument("--blacklist-elective", nargs="+", metavar="LID_OR_NAME",
+                    help="按「选修课」拉黑：每人选的课不同，这门课的作业对全班没意义。"
+                         "可给 lid 或课程名的一部分（唯一匹配时生效），"
+                         "例如 --blacklist-elective 嵌入式")
     ap.add_argument("--test-blacklist-list", action="store_true",
                     help="列出「仅屏蔽在线测试」的课程（作业仍照常搜）")
     ap.add_argument("--test-blacklist-add", nargs="+", metavar="LID",
@@ -1224,6 +1300,7 @@ def main():
 
     # --- 黑名单命令（纯本地，不需要浏览器）---
     if (args.blacklist_list or args.blacklist_confirm or args.blacklist_remove
+            or args.blacklist_elective
             or args.test_blacklist_list or args.test_blacklist_add
             or args.test_blacklist_remove):
         return _blacklist_cli(args)

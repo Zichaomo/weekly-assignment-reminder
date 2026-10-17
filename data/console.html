@@ -210,6 +210,7 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     </div>
     <footer>
       <button class="btn" id="blApply">加入勾选项（需确认）</button>
+      <button class="btn ghost" id="blElective">标记为选修课</button>
       <button class="btn" id="blRemove">移出勾选项（恢复抓取）</button>
       <button class="btn ghost" id="blReload">刷新课程表</button>
     </footer>
@@ -470,7 +471,8 @@ function renderBlacklist() {
           + `扫描失败次数：${c.fail_streak ?? 0}\n`
           + `连续空课轮数：${c.empty_streak ?? 0}`
           + (c.advisory ? '\n\n⚠ 若这门课本学期还有课（有些课只在期末布置一次作业），请勿拉黑。' : '') })),
-      ...cur.map(b => ({ key: String(b.lid), cand: false, tag: '已拉黑', name: b.name,
+      ...cur.map(b => ({ key: String(b.lid), cand: false,
+        tag: b.reason === 'elective' ? '已拉黑·选修' : '已拉黑', name: b.name,
         detail: `课程：${b.name}\n编号：${b.lid}\n状态：已拉黑（不抓取）\n理由：${b.reason || ''}\n说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` })),
     ];
   } else {
@@ -545,12 +547,33 @@ $('#blApply').onclick = async () => {
   log(`已加入黑名单 ${lids.length} 门：${lids.join(', ')}`);
   loadBlacklist();
 };
+$('#blElective').onclick = async () => {
+  // 「选修课」与候选拉黑的区别：这不是程序推导出来的证据，而是你声明
+  // 「这门课我们班里只有我（少数人）上，它的作业对全班没意义」。
+  if (state.blKind !== 'course') { alert('「选修课」只对课程黑名单有效。'); return; }
+  const input = prompt(
+    '把哪门课标记为「选修课」？\n\n'
+    + '· 填课程编号（如 26543），或课程名的一部分（如 嵌入式）\n'
+    + '· 多个用空格分隔\n'
+    + '· 唯一匹配才会生效；匹配到多门会提示你写具体些\n\n'
+    + '效果：这门课**作业与在线测试都不再抓取**（扫描时跳过），\n'
+    + '它的作业只对你个人成立，本来就不该进给全班的提醒。');
+  if (!input) return;
+  const tokens = input.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return;
+  if (!confirm(`确认把下面这些标记为「选修课」并停止抓取？\n\n${tokens.join('、')}\n\n可用「移出勾选项」恢复。`)) return;
+  const res = await api('/api/blacklist', { kind: 'course', action: 'elective', lids: tokens });
+  if (res.error) { alert(res.error); return; }
+  const added = res.added || [], unknown = res.unknown || [];
+  if (added.length) log(`已标记为选修课 ${added.length} 门：` + added.map(a => `${a.name}(${a.lid})`).join('、'));
+  if (unknown.length) log(`未找到匹配课程：${unknown.join('、')}（可试更具体的名称或直接用编号）`);
+  loadBlacklist();
+};
 $('#blRemove').onclick = async () => {
   const lids = checkedKeys(false);
   if (!lids.length) { alert('没有勾选任何「已拉黑 / 已屏蔽」条目。'); return; }
   if (!confirm(`确认把 ${lids.length} 门移出黑名单（恢复抓取）？`)) return;
-  const res = await api('/api/blacklist', { kind: state.blKind, action: 'remove', lids });
-  if (res.error) { alert(res.error); return; }
+  const res = await api('/api/blacklist', { kind: state.blKind, action: 'remove', lids });  if (res.error) { alert(res.error); return; }
   log(`已移出黑名单 ${lids.length} 门：${lids.join(', ')}`);
   loadBlacklist();
 };

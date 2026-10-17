@@ -378,6 +378,40 @@ def run_blacklist_apply(lids, reason="manual"):
             "total": len(data["courses"])}
 
 
+def run_blacklist_elective(tokens):
+    """按「选修课」拉黑：每人选的课不同，这门课的作业对全班没意义。
+
+    与候选确认的区别：候选是程序按证据推导的（陈旧 / 无入口 / 暂无作业），
+    而选修课是**用户主观声明**「这门课只有我（少数人）上」，跟作业有没有、早不早无关。
+    所以单独一个入口，reason 记 elective，界面上也能分开看。
+
+    tokens 可以是 lid，也可以是课程名的一部分（唯一匹配时才生效）。
+    """
+    import scrape
+    index = scrape.load_course_index()
+    data = scrape.load_blacklist()
+    added, unknown = [], []
+    for token in tokens:
+        lid = scrape.resolve_lid(str(token), index)
+        if not lid:
+            unknown.append(str(token))
+            continue
+        if lid in data["courses"]:
+            continue
+        data["courses"][lid] = {
+            "name": index[lid],
+            "reason": "elective",
+            "detail": "选修课（每人选课不同，作业不影响全班）",
+            "last_homework": None,
+            "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "confirmed_by": "human",
+        }
+        added.append({"lid": lid, "name": index[lid]})
+    scrape.save_blacklist(data)
+    return {"ok": True, "added": added, "unknown": unknown,
+            "total": len(data["courses"])}
+
+
 def run_blacklist_remove(lids):
     import scrape
     data = scrape.load_blacklist()

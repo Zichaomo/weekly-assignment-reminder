@@ -228,7 +228,33 @@
 | 名单 | 作用 | 加入方式 |
 | --- | --- | --- |
 | **课程黑名单** | 整门课都不抓（作业 + 在线测试） | 控制台「课程黑名单」勾选候选 →「加入勾选项(需确认)」→ 二次确认；或 `scrape.py --blacklist-confirm <lid>` |
+| **课程黑名单 · 选修课** | 同上（整门不抓），但理由是「每人选课不同」 | 控制台「课程黑名单」→「**标记为选修课**」；或 `scrape.py --blacklist-elective 嵌入式` |
 | **测试黑名单** | 只跳过「在线测试」，作业照抓 | 控制台「测试黑名单」→ 输入 lid；或 `scrape.py --test-blacklist-add <lid>` |
+
+### 选修课：每人选的课不一样，别让它进群提醒
+
+**典型场景**：你选修了「嵌入式系统创新应用与实践」，但班里大多数人根本没上这门课 ——
+它的作业截止时间只对**你个人**成立，放进「发给全班」的提醒里就是纯噪音，
+而且别人收到还会困惑「这课是什么/我什么时候选过」。
+
+所以给它一个独立的理由 `elective`（选修课）：
+
+```powershell
+& $PY data\scrape.py --blacklist-elective 嵌入式          # 按课程名片段（唯一匹配才生效）
+& $PY data\scrape.py --blacklist-elective 26543 35274     # 也可以直接给 lid，多个空格分隔
+```
+
+控制台里是同一个功能：**课程黑名单** → 底部「**标记为选修课**」→ 填编号或名字片段。
+
+- **效果**：整门课（作业 + 在线测试）都不再抓取，扫描时直接跳过 ——
+  既少了噪音，也省了每门课约 2 秒的扫描时间。
+- **与「陈旧 / 无入口 / 暂无作业」的区别**：那三类是程序**按证据推导**的
+  （这课本学期有没有作业），选修课是**你的主观声明**（这课跟班里无关）。
+  所以 `--blacklist-list` 和界面上都会单独标成「选修课 / 已拉黑·选修」，一眼能分开。
+- **误标了怎么办**：和其他黑名单一样，控制台「移出勾选项」或
+  `scrape.py --blacklist-remove <lid>`（或 `all`）。
+- **黑名单不下发**：它存在本地 `data/course_blacklist.json`（不入库），
+  所以 clone 仓库的人拿到的是空黑名单，得自己建自己的（各自的选修课本来就不同）。
 
 ### 候选是怎么算出来的
 
@@ -241,6 +267,7 @@
 | `stale`（陈旧） | 该课最近一次作业截止时间**早于本学期起点** —— 这课本学期没有作业了 | ✅ 建议 |
 | `no-homework-entry`（无入口） | **连续 ≥2 次**扫描都没能进入「课程作业」栏目，且从未见过作业 | ✅ 建议 |
 | `no-homework-yet`（暂无作业） | 能正常进入课程页、栏目也在，但**连续 ≥2 轮都是 0 条** | ⚠️ 仅供参考 |
+| `elective`（选修课） | **不推导**，由你手动标记「这门课跟班里无关」 | 👤 你决定 |
 
 门槛都设成 2 次，是为了避免一次网络抖动就把正常课程误杀。
 
@@ -282,6 +309,7 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 & $PY data\scrape.py --blacklist-list                  # 查看课程黑名单 + 候选（只读）
 & $PY data\scrape.py --blacklist-confirm 19865 33867   # 确认加入（要显式给 lid）
 & $PY data\scrape.py --blacklist-confirm all-candidates # 当前全部候选一次确认
+& $PY data\scrape.py --blacklist-elective 嵌入式      # 按「选修课」拉黑（可给名字片段或 lid）
 & $PY data\scrape.py --blacklist-remove 19865          # 移出单个
 & $PY data\scrape.py --blacklist-remove all            # 清空
 

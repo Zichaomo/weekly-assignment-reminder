@@ -484,6 +484,9 @@ class Handler(BaseHTTPRequestHandler):
             kind = p.get("kind", "course")
             action = p.get("action", "")
             lids = [str(x) for x in (p.get("lids") or [])]
+            if kind == "course" and action == "elective":
+                # 按「选修课」拉黑：可以传 lid，也可以传课程名的一部分
+                return self._send(200, hub.run_blacklist_elective(lids))
             if kind == "course":
                 fn = hub.run_blacklist_apply if action == "apply" else hub.run_blacklist_remove
             else:
