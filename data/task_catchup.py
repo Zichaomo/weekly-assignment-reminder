@@ -59,6 +59,9 @@ TASK_LOG = ROOT / "task_log.jsonl"
 DEFAULT_TARGET = "09:00"
 DEFAULT_DELAY_MIN = 15
 WEEKDAY_SUNDAY = 7
+# 「还早」但离计划时间不到这么多分钟时，不退出、而是等到计划时间再判定。
+# 2026-10-18 漏发就发生在这个窗口里（08:21 开机，08:25 关机，09:00 定时任务错过）。
+EARLY_WAIT_LIMIT_MIN = 90
 
 
 def log_line(*parts) -> None:
@@ -153,8 +156,24 @@ def main() -> int:
         log_line("[补推检测] 今天已经推过了，无需补推。退出。")
         return 0
     if status == "too_early":
-        log_line("[补推检测] 还没到计划时间，交给定时任务。退出。")
-        return 0
+        # 2026-10-18 真实漏发：08:21 开机 → 判定 too_early → 直接退出；
+        # 而 09:00 那次定时任务因为「那一刻机器刚开机、还停在登录界面」没跑成，
+        # 于是既没有定时推送、也没有补推，群里一整天没有消息。
+        # 所以不再"还早就走人"：离计划时间不远就等到「计划时间 + delay」再判定。
+        try:
+            hh, mm = (int(x) for x in str(args.target_time).split(":")[:2])
+            target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            mins_to_go = (target_dt - now).total_seconds() / 60
+        except Exception:  # noqa: BLE001
+            mins_to_go = 999
+        if args.now or mins_to_go > EARLY_WAIT_LIMIT_MIN:
+            log_line(f"[补推检测] 还没到计划时间（还有 {mins_to_go:.0f} 分钟），"
+                     f"超过 {EARLY_WAIT_LIMIT_MIN} 分钟就先退出，交给定时任务。")
+            return 0
+        log_line(f"[补推检测] 还没到计划时间（还有 {mins_to_go:.0f} 分钟）——"
+                 f"不直接退出：等到 {args.target_time} + {args.delay_min} 分钟再判定，"
+                 f"免得定时任务没跑成时这一天彻底没人管。")
+
     if status == "not_sunday" and not args.now:
         log_line("[补推检测] 非周日，退出。")
         return 0

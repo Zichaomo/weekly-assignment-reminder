@@ -99,15 +99,56 @@ def apply_extra_settings(task_name: str) -> tuple:
     return ok, ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
 
 
-def task_command(python: str, wecom: str, days: int) -> str:
+def apply_repetition(task_name: str, interval_min: int = 10,
+                     duration_min: int = 120) -> tuple:
+    """给「每周日 09:00」触发器加上「每 N 分钟重试、持续 M 分钟」。
+
+    为什么需要（2026-10-18 真实漏发，不是理论问题）：
+      09:00 那一刻电脑可能刚开机、还停在登录界面。这个任务用的是
+      `LogonType=Interactive`（必须如此，否则 Path.home() 指向系统目录、
+      找不到 Edge 持久 profile，自动登录必然失败）。没有交互会话时它起不来，
+      Windows 把它记成「错过一次」（NumberOfMissedRuns=1），
+      **而且不会在你登录之后自动补跑** —— 那一周就彻底静默了。
+      实测时间线：08:25 关机 → 08:59:44 开机 → 09:00 触发（停在登录界面）→
+      09:00:23 登录 → 什么都没有发生。
+
+    加上重复间隔后，09:10 / 09:20 … 只要人在且已登录，就会真的跑起来。
+    重复触发不会重复发消息：task_run.py 开头有「今天已推过就秒退」的幂等闸。
+    """
+    ps = shutil.which("pwsh") or shutil.which("powershell")
+    if not ps:
+        return False, "找不到 PowerShell，跳过重复触发设置"
+    script = (
+        f"$t = Get-ScheduledTask -TaskName '{task_name}' -ErrorAction Stop\n"
+        "$tr = $t.Triggers[0]\n"
+        f"$tr.Repetition.Interval = 'PT{int(interval_min)}M'\n"
+        f"$tr.Repetition.Duration = 'PT{int(duration_min)}M'\n"
+        "$tr.Repetition.StopAtDurationEnd = $false\n"
+        f"Set-ScheduledTask -TaskName '{task_name}' -Trigger $tr | Out-Null\n"
+        "$t2 = Get-ScheduledTask -TaskName '" + task_name + "'\n"
+        "Write-Output ('REPEAT-OK ' + $t2.Triggers[0].Repetition.Interval + ' / ' "
+        "+ $t2.Triggers[0].Repetition.Duration)\n"
+    )
+    r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    ok = "REPEAT-OK" in out
+    return ok, out.splitlines()[-1] if out else "（无输出）"
+
+
+def task_command(python: str, wecom: str, days: int, time_str: str = "09:00") -> str:
     """计划任务要执行的命令行。
 
     ⚠️ 这里**不能**写 `>> log 2>&1`：计划任务的「操作」不做 shell 解释，
     重定向符会被当成 python 的参数传进去，argparse 直接报错退出 2
     （实测：Last Result=2、日志文件根本没被创建，任务看起来"跑了但什么都没有"）。
     日志改由 task_run.py 自己写 data/task_run.log，更可靠也更可控。
+
+    `--target-time` 必须与触发器时间一致：task_run.py 用它判断
+    「今天（这个周日）到底推过群没有」，重复触发时才不会重复发。
     """
-    return f'"{python}" "{TASK_RUN}" --wecom {wecom} --days {days}'
+    return (f'"{python}" "{TASK_RUN}" --wecom {wecom} --days {days} '
+            f'--target-time {time_str}')
 
 
 def build_create_args(name: str, time_str: str, day: str, command: str,
@@ -256,7 +297,7 @@ def check_target_split(wecom: str) -> tuple:
 
 def register(args) -> int:
     python = find_python()
-    command = task_command(python, args.wecom, args.days)
+    command = task_command(python, args.wecom, args.days, args.time)
     cmd_args = build_create_args(args.name, args.time, args.day, command,
                                 once=args.once, date_str=args.date)
 
@@ -303,6 +344,24 @@ def register(args) -> int:
 
     ok, why = apply_extra_settings(args.name)
     print(f"附加设置（错过补跑/超时上限/不叠加）：{'已应用' if ok else '未应用'}（{why}）")
+
+    # 重复触发：兜住「09:00 那一刻没登录 / 刚开机」导致的静默漏发。
+    # 幂等由 task_run.py 保证（今天已推过就秒退），不会连发。
+    if args.once:
+        print("一次性任务：跳过重复触发设置。")
+    elif args.no_repeat or args.repeat_min <= 0:
+        print("已按 --no-repeat 跳过重复触发（只保留单次 09:00 触发）。")
+    else:
+        rok, rwhy = apply_repetition(args.name, args.repeat_min,
+                                     args.repeat_hours * 60)
+        if rok:
+            print(f"重复触发：{args.time} 起每 {args.repeat_min} 分钟重试一次，"
+                  f"持续 {args.repeat_hours} 小时 —— {rwhy}")
+            print("  作用：09:00 没跑成（关机 / 还在登录界面）时，后续每 10 分钟还有机会；")
+            print("        已推过的会被幂等闸跳过，不会重复打扰群。")
+        else:
+            print(f"重复触发：未应用（{rwhy}）")
+            print("  ⚠️ 少了这层兜底：09:00 那一刻没登录就整周不会自动补（补推任务仍会兜一部分）。")
     print(f"\n✅ 已注册：{when} 自动推送（{'测试群' if args.wecom == 'test' else args.wecom}）")
     print(f"   任务台账：{ROOT / 'task_log.jsonl'}")
     print(f"   运行日志：{ROOT / 'task_run.log'}（由 task_run.py 自己写，不靠 shell 重定向）")
@@ -361,6 +420,12 @@ def main() -> int:
                     help="注册第二部分：登录时触发的「周日开机补推检测」")
     ap.add_argument("--delay-min", type=int, default=15,
                     help="补推前等待分钟数（默认 15，即「开机后约 15 分钟」）")
+    ap.add_argument("--repeat-min", type=int, default=10,
+                    help="09:00 没跑成时，每隔多少分钟再试一次（默认 10；0 效果同 --no-repeat）")
+    ap.add_argument("--repeat-hours", type=int, default=2,
+                    help="重复触发持续多少小时（默认 2，即 09:00-11:00 之间一直有机会）")
+    ap.add_argument("--no-repeat", action="store_true",
+                    help="不加重试：只保留单次触发（旧的严格行为，容易漏发）")
     ap.add_argument("--target-time", default="09:00",
                     help="计划推送时间 HH:MM（默认 09:00，与第一部分保持一致）；"
                          "早于它不补推，避免抢在定时任务前面")

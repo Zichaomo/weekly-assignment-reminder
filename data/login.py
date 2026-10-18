@@ -104,7 +104,9 @@ def is_logged_in(page) -> bool:
     不能凭空 body 判登录；登录页本身会显示「忘记/修改密码」等字样，要排除。
     """
     url = (page.url or "").lower()
-    if "cas/login" in url or "experimental-auth-endpoint" in url:
+    # 停在任一登录页就一定是「未登录」：旧 CAS / 旧门户 iframe / 新版 sidportal
+    if ("cas/login" in url or "experimental-auth-endpoint" in url
+            or "sidportal" in url and "/login" in url):
         return False
 
     text = ""
@@ -177,14 +179,80 @@ def _logged_in_via_state() -> bool:
 
 
 # ---------------------------------------------------------------- 自动登录
+def is_new_sso(page) -> bool:
+    """是否落在 2026-10 改版后的新统一认证页（sidportal，Angular 单页、没有 iframe）。"""
+    u = (page.url or "").lower()
+    return ("sidportal" in u) or ("experimental-auth-endpoint" in u)
+
+
+def ensure_password_tab(page) -> bool:
+    """新版登录页默认停在「企业微信扫码」，必须以「用户名密码」标签为前提。
+
+    这一步是改版后最关键的新增动作：以前表单在 iframe 里直接可见，
+    现在它是四个标签中的第一个，不切过去就根本填不了。
+    """
+    if not is_new_sso(page):
+        return True
+    for sel in (".ant-tabs-tab:has-text('用户名密码')",
+                "[class*=tabs-tab]:has-text('用户名密码')"):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible():
+                loc.click(timeout=4000)
+                page.wait_for_timeout(1200)
+                if page.locator("#submitBtn, input[type=password]").count():
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        page.get_by_text("用户名密码", exact=True).first.click(timeout=3000)
+        page.wait_for_timeout(1200)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _saved_credentials():
+    """从本机 Edge 密码库取北化账号（运行时解密，不落盘）。"""
+    try:
+        sys.path.insert(0, str(ROOT))
+        import edge_cred
+        return edge_cred.get_saved_credentials(verbose=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  凭据：读取 Edge 密码库失败（{type(e).__name__}: {e}）")
+        return None, None
+
+
+def _visible(loc):
+    """在一个定位器匹配到的多个元素里挑第一个可见的。"""
+    try:
+        n = loc.count()
+    except Exception:  # noqa: BLE001
+        return None
+    for i in range(min(n, 6)):
+        try:
+            el = loc.nth(i)
+            if el.is_visible():
+                return el
+        except Exception:  # noqa: BLE001
+            continue
+    return loc.first if n else None
+
+
 def find_login_frame(page):
-    """登录表单在 portal 的 iframe `normal/login-normal.html` 里。"""
+    """登录表单所在位置。
+
+    旧版：portal 的 iframe `normal/login-normal.html`。
+    新版（2026-10）：sidportal 的 Angular 主页面上，直接返回 page。
+    """
     for fr in page.frames:
         try:
             if "login-normal.html" in (fr.url or ""):
                 return fr
         except Exception:  # noqa: BLE001
             pass
+    if is_new_sso(page):
+        return page
     return None
 
 
@@ -197,22 +265,27 @@ def read_value(loc) -> str:
 
 
 def has_captcha(page) -> bool:
-    """腾讯滑块 / 短信验证码是否已弹出。"""
+    """腾讯滑块 / 图形验证码 / 短信验证码是否已弹出（含新版页面的选择器）。"""
     try:
         if page.locator(
-            "iframe[src*='captcha'], iframe[src*='turing'], iframe[id*='tcaptcha']"
+            "iframe[src*='captcha'], iframe[src*='turing'], iframe[id*='tcaptcha'], "
+            "iframe[src*='challenge']"
         ).count():
             return True
     except Exception:  # noqa: BLE001
         pass
     try:
         for s in ("#tcaptcha_iframe", ".tcaptcha-transform", "#TencentCaptcha",
-                  ".nc-container", "#nc_1_wrapper", "#aliyunCaptcha"):
-            if page.locator(s).count():
+                  ".nc-container", "#nc_1_wrapper", "#aliyunCaptcha",
+                  "img[src*='captcha' i]", ".captcha-img", "#captchaImg",
+                  "input[placeholder*='验证码']"):
+            el = page.locator(s)
+            if el.count() and el.first.is_visible():
                 return True
     except Exception:  # noqa: BLE001
         pass
     return False
+
 
 
 def dismiss_device_dialog(page) -> bool:
@@ -233,62 +306,17 @@ def dismiss_device_dialog(page) -> bool:
     return False
 
 
-def auto_submit(page) -> str:
-    """尝试自动登录一次，返回结果码：
+def _sync_values(fr, u_val: str, p_val: str) -> None:
+    """把账号密码写回 DOM 并派发 input/change 事件。
 
-    ok       —— 已点下登录按钮
-    noframe  —— 没找到登录 iframe（多半已经在登录后的页面，或页面结构变了）
-    nopass   —— iframe 在，但密码框是空的（Edge 没有自动填充）
-    noclick  —— 填了密码但没点到登录按钮
+    自动填充（或 fill）有时只改 DOM 不触发框架事件，提交时 Angular/Vue
+    从自己的模型取到的仍是空值 —— 那样点下去只会白等。
     """
-    fr = find_login_frame(page)
-    if not fr:
-        return "noframe"
-
-    user = fr.locator("input[name='username']").first
-    pwd = fr.locator("input[name='password']").first
-    try:
-        user.wait_for(state="visible", timeout=15000)
-        pwd.wait_for(state="attached", timeout=5000)
-    except Exception:  # noqa: BLE001
-        return "noframe"
-
-    # 点一下用户名，触发 Edge 密码管理器的自动填充（实测要几秒才灌进 DOM）
-    u_val = ""
-    for _ in range(10):
-        try:
-            user.click(timeout=1000)
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(1.0)
-        u_val = read_value(user)
-        if u_val:
-            break
-    if not u_val:
-        return "nopass"
-
-    # 再点密码框，让密码也灌进来
-    p_val = ""
-    for _ in range(8):
-        try:
-            pwd.click(timeout=1000)
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.8)
-        p_val = read_value(pwd)
-        if p_val:
-            break
-    masked = "*" * min(len(p_val), 8) if p_val else "（空！）"
-    print(f"  自动填充状态：账号 {u_val}，密码 {masked}")
-    if not p_val:
-        return "nopass"
-
-    # 兜底：把值写回去并派发 input/change，保证 Vue 的 v-model 与 DOM 同步
-    # （自动填充有时只改 DOM 不触发事件，提交时表单拿到的是空值）
     try:
         fr.evaluate("""([u, p]) => {
-            const us = document.querySelectorAll("input[name='username']");
-            const ps = document.querySelectorAll("input[name='password']");
+            const us = document.querySelectorAll(
+                "#nameInput, input[name='username']:not([type=hidden])");
+            const ps = document.querySelectorAll("input[type='password']");
             const fire = (el, v) => {
                 const proto = el.tagName === 'TEXTAREA'
                     ? window.HTMLTextAreaElement.prototype
@@ -305,20 +333,121 @@ def auto_submit(page) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"  提示：同步表单值失败（{type(e).__name__}），继续尝试提交")
 
-    # 点「登录」：优先按钮，其次回车
-    btn = fr.locator("button:has-text('登录'), input[type=submit][value*='登录'], .login-btn, #loginBtn")
+
+def _click_submit(page, fr, p_loc):
+    """点登录按钮。新版是 #submitBtn（两个框都有值才从 disabled 变可点）。"""
+    if is_new_sso(page):
+        btn = _visible(page.locator("#submitBtn"))
+        if btn is not None:
+            try:
+                page.wait_for_function(
+                    "() => { const b = document.querySelector('#submitBtn');"
+                    " return !!b && !/\\bdisabled\\b/.test(b.className); }",
+                    timeout=8000)
+            except Exception:  # noqa: BLE001
+                print("  提示：登录按钮仍是禁用态（可能值没进框架模型），稍后重试")
+            try:
+                btn.click(timeout=4000)
+                return "ok"
+            except Exception as e:  # noqa: BLE001
+                print(f"  点「立即登录」失败（{type(e).__name__}），改按回车")
+
+    btn = fr.locator("button:has-text('登录'), button:has-text('立即登录'), "
+                     "input[type=submit][value*='登录'], .login-btn, #loginBtn")
     try:
-        if btn.count():
-            btn.first.click(timeout=4000)
+        b = _visible(btn)
+        if b is not None:
+            b.click(timeout=4000)
             return "ok"
     except Exception as e:  # noqa: BLE001
         print(f"  点登录按钮失败（{type(e).__name__}），改按回车")
     try:
-        pwd.press("Enter")
+        p_loc.press("Enter")
         return "ok"
     except Exception as e:  # noqa: BLE001
         print(f"  回车也失败：{e}")
         return "noclick"
+
+
+def auto_submit(page) -> str:
+    """尝试自动登录一次，返回结果码：
+
+    ok       —— 已点下登录按钮
+    noframe  —— 没找到登录表单（多半已经在登录后的页面，或页面结构又变了）
+    nopass   —— 表单在，但账号密码拿不到（自动填充为空，Edge 密码库里也没有）
+    noclick  —— 填了密码但没点到登录按钮
+
+    2026-10 平台改版后新增了两步：
+      1. 登录页默认停在「企业微信扫码」标签 —— 必须切到「用户名密码」；
+      2. Edge 的自动填充绑在**旧域名** origin 上，新域名填不上 ——
+         所以自动填充只是"优先尝试"，失败就用 Edge 密码库（运行时解密）兜底。
+    """
+    if not ensure_password_tab(page):
+        return "noframe"
+    fr = find_login_frame(page)
+    if not fr:
+        return "noframe"
+
+    if is_new_sso(page):
+        u_loc = _visible(fr.locator("#nameInput"))
+        p_loc = _visible(fr.locator("input[type='password']"))
+    else:
+        u_loc = _visible(fr.locator("input[name='username']"))
+        p_loc = _visible(fr.locator("input[name='password']"))
+    if u_loc is None or p_loc is None:
+        return "noframe"
+    try:
+        u_loc.wait_for(state="visible", timeout=15000)
+        p_loc.wait_for(state="attached", timeout=5000)
+    except Exception:  # noqa: BLE001
+        return "noframe"
+
+    # ---- 第一步：点一下用户名，看 Edge 自动填充会不会灌值 ----
+    u_val = ""
+    for _ in range(5):
+        try:
+            u_loc.click(timeout=1000)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.8)
+        u_val = read_value(u_loc)
+        if u_val:
+            break
+
+    p_val = ""
+    if u_val:
+        for _ in range(4):
+            try:
+                p_loc.click(timeout=1000)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.6)
+            p_val = read_value(p_loc)
+            if p_val:
+                break
+        print(f"  Edge 自动填充：账号 {u_val}，"
+              f"密码 {'*' * min(len(p_val), 8) if p_val else '（空）'}")
+
+    # ---- 第二步：填充拿不到就用 Edge 密码库（新版域名必然走这里）----
+    if not u_val or not p_val:
+        user, pwd = _saved_credentials()
+        if not user or not pwd:
+            return "nopass"
+        try:
+            u_loc.fill(user)
+            p_loc.fill(pwd)
+        except Exception as e:  # noqa: BLE001
+            print(f"  填入凭据失败（{type(e).__name__}: {e}）")
+            return "nopass"
+        u_val, p_val = read_value(u_loc), read_value(p_loc)
+        print(f"  已用 Edge 密码库填入：账号 {u_val}，"
+              f"密码 {'*' * min(len(p_val), 8) if p_val else '（空）'}")
+    if not u_val or not p_val:
+        return "nopass"
+
+    _sync_values(fr, u_val, p_val)
+    return _click_submit(page, fr, p_loc)
+
 
 
 def save_state(ctx, page, why: str) -> bool:
@@ -339,11 +468,30 @@ def save_state(ctx, page, why: str) -> bool:
     return True
 
 
+def launch_any(p, headless=False):
+    """优先用持久 profile；被别的窗口占用时退回临时上下文。
+
+    为什么要这层降级（2026-10-18 实测）：计划任务在 09:08 补跑时，持久 profile
+    正被另一个 Edge 窗口占用，Edge 只回一句「已在现有浏览器会话中打开」就退出，
+    `launch_persistent_context` 抛 TargetClosedError，3 次重试全废 —— 一次登录
+    都没尝试就失败了。而改版后凭据本来就不依赖 profile（由 edge_cred 从密码库取），
+    所以退回临时上下文同样能自动登录，只是少了一点设备指纹的连续性。
+    """
+    try:
+        return launch_ctx(p, headless=headless)
+    except Exception as e:  # noqa: BLE001
+        print(f"！持久 profile 启动失败（{type(e).__name__}），改用临时上下文继续…")
+        browser = p.chromium.launch(headless=headless, channel="msedge",
+                                    args=["--no-sandbox"])
+        return browser.new_context(ignore_https_errors=True, locale="zh-CN",
+                                   viewport=None)
+
+
 # ---------------------------------------------------------------- 主流程
 def run_auto(headless=False, no_wait=False) -> int:
     """自动登录优先；卡住则不关窗口，转人工，同一窗口继续等。"""
     with sync_playwright() as p:
-        ctx = launch_ctx(p, headless=headless)
+        ctx = launch_any(p, headless=headless)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         time.sleep(4)
@@ -354,7 +502,13 @@ def run_auto(headless=False, no_wait=False) -> int:
             return 0 if ok else 1
 
         print("=" * 64)
-        print("未登录，开始自动登录：Edge 会自动填充账号密码，脚本自动点「登录」。")
+        print("未登录，开始自动登录：")
+        if is_new_sso(page):
+            print("  平台已改版为 sidportal 统一身份认证（无 iframe）——")
+            print("  自动切到「用户名密码」标签，填账号密码后点「立即登录」。")
+            print("  凭据优先取 Edge 自动填充；取不到则从 Edge 密码库解密（不落盘）。")
+        else:
+            print("  Edge 会自动填充账号密码，脚本自动点「登录」。")
         print("=" * 64)
 
         result = auto_submit(page)

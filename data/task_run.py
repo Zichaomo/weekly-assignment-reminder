@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -90,8 +91,21 @@ def mask(hook: str) -> str:
     return ("…" + hook[-8:]) if len(hook) > 8 else "(空)"
 
 
+def already_pushed_today(target_time: str) -> tuple:
+    """今天（日历日）是否已经成功把提醒推到群里。返回 (是否已推, 说明)。"""
+    try:
+        import alert
+    except Exception as e:  # noqa: BLE001
+        return False, f"无法导入 alert.py（{e}）"
+    try:
+        status, why, _ev = alert.weekly_due(datetime.now(), target_time=target_time)
+    except Exception as e:  # noqa: BLE001
+        return False, f"判定失败（{e}）"
+    return status == "done", why
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="定时任务运行器（默认发测试群）")
+    ap = argparse.ArgumentParser(description="定时任务运行器（默认跟随 config）")
     ap.add_argument("--wecom", choices=["config", "test", "prod"], default="config",
                     help="发到哪个群：config=跟随 config.json 的 wecom_webhook（默认，"
                          "你换成哪个群就发哪个群）/ test=强制测试群 / prod=强制班级群")
@@ -101,6 +115,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只抓取并生成文案，不发送")
     ap.add_argument("--kind", default="scheduled",
                     help="触发来源标记，写进任务台账（scheduled / manual / boot-check）")
+    ap.add_argument("--target-time", default="09:00",
+                    help="计划推送时间 HH:MM（默认 09:00）；用于判断「今天推过没有」")
+    ap.add_argument("--force", action="store_true",
+                    help="跳过「今天已推过就跳过」的幂等闸（确实要重发时用）")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -111,6 +129,23 @@ def main() -> int:
              f"channel={'none(演练)' if args.dry_run else args.channel}")
 
     cfg = notify.load_config()
+
+    # ---- 幂等闸：今天已经成功推过群，就立刻退出 ----
+    # 为什么必须有（2026-10-18 的实际缺口）：
+    #   09:00 那一刻电脑可能刚开机、还停在登录界面，交互式任务起不来，
+    #   Windows 记成「错过一次」且**不会**在登录后自动补跑 → 整周静默。
+    #   对策是把 Weekly 触发器改成「09:00 起每 10 分钟重试，持续 2 小时」，
+    #   代价是同一天会被触发多次。所以真正的第一件事必须是问一句：
+    #   「今天已经发出去了吗？」是 -> 秒退，绝不重复打扰班上同学。
+    if not args.dry_run and args.channel == "wecom" and not args.force:
+        done, why = already_pushed_today(args.target_time)
+        if done:
+            log_line("[task_run] 今天已经成功推送过 —— 本次跳过，不重复打扰群。")
+            log_line(f"[task_run] 证据：{why}")
+            log_task(kind=args.kind, ok=True, skipped=True, exit_code=0,
+                     elapsed_sec=round(time.time() - t0, 1), wecom=args.wecom,
+                     reason="already-pushed-today")
+            return 0
 
     # ---- 决定目标群 ----
     # config（默认）：跟随 config.json 的 wecom_webhook —— 你在那里放哪个群就发哪个群，

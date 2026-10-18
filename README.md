@@ -30,8 +30,9 @@
 1. 装依赖：`pip install playwright`（**不要** `playwright install`，本项目复用系统 Edge，不下载 Chromium）
 2. 建配置：`copy data\config.example.json data\config.json`，再按里面注释填你的推送渠道
    （`data/config.json` 已被 .gitignore 忽略 —— webhook 的 `key=` 就是群发口令，不能进仓库）
-3. 登录：双击 `login.bat`。它会打开你的 Edge 并自动填充账号密码；
-   **前提是 Edge 里已保存北化在线的账号密码**（用哪个 Edge 用户无所谓，登录页能自动填充即可）
+3. 登录：双击 `login.bat`。它会自己填账号密码并点「立即登录」。
+   **前提是 Edge 里存过北化账号密码**（`data/edge_cred.py` 会从任意 Edge 用户目录的密码库读，
+   旧域名存的也算；没存过就第一次手动输一次，浏览器问「保存密码」时选**保存**）
 4. **刷新课程表**：双击 `console.bat` → 打开「课程黑名单」→ 点里面的「刷新课程表」
    （这个按钮会真的去平台重扫一遍课程总表，约 10-20 秒），生成 `data/courses.json`
    （课程索引含你账号下的课程编号与名称，属个人数据、不入库，所以 clone 后是空的）
@@ -358,15 +359,44 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 登录态失效时双击 `login.bat` 即可，**正常情况下不需要你输入任何东西**：
 
-1. 用持久 Edge profile（`%USERPROFILE%\.workbuddy\profiles\buct-course-edge`，存过北化账号密码的那份）打开 `sso_login.jsp`。
+1. 用持久 Edge profile（`%USERPROFILE%\.workbuddy\profiles\buct-course-edge`）打开 `sso_login.jsp`。
 2. 若会话还有效 → 直接保存 `storage_state.json` 并退出。
-3. 否则落到登录页：脚本在 iframe `login-normal.html` 里点一下用户名触发 **Edge 自动填充**，
-   再点密码框、点「登录」按钮（若自动填充没灌进 DOM，还会派发 input/change 事件让 Vue 同步值）。
+3. 否则落到登录页：切到「用户名密码」标签 → **先试 Edge 自动填充**，填不上就从
+   **Edge 密码库运行时解密**取账号密码（见下）→ 填进两个输入框 → 点「立即登录」。
 4. 登录成功 → 自动保存会话 + 截图 `data/login_result.png` + 关窗口，退出码 0。
 
-**唯一需要你动手的情况**：平台弹验证码（登录页确实加载了腾讯验证码 SDK `turing.captcha.gtimg.com`）。
-这时脚本**不关窗口**，会打印提示并继续轮询 300 秒 —— 你在那个窗口里拖一下滑块就行。
-登录时若门户弹「是否添加常用设备？」，脚本会自动选「是」，之后再登录一般就不弹验证码了。
+### 2026-10-18：平台换成 `sidportal.buct.edu.cn`，自动填充彻底失效
+
+学校把统一认证换了：旧地址 `portal.buct.edu.cn/normal/login-normal.html` 现在 **404**，
+`sso_login.jsp` 会 302 到 **`https://sidportal.buct.edu.cn/login`**。
+新页面是 Angular 单页，和老实现有六处根本差别：
+
+| 项目 | 旧实现（已失效） | 现在 |
+| --- | --- | --- |
+| 表单位置 | 跨域 iframe `login-normal.html` | **没有 iframe**，就在主页面里 |
+| 默认标签 | 只有一个表单 | 默认停在**「企业微信扫码」**，必须先点「用户名密码」 |
+| 账号框 | `input[name=username]` | `#nameInput`（`autocomplete=username`） |
+| 密码框 | `input[name=password]` | `input[type=password]`（**没有 name**，`autocomplete=new-password`） |
+| 提交按钮 | `button:has-text('登录')` | `#submitBtn`，两个框都有值前一直是 `disabled` |
+| 自动填充 | 点一下用户名，Edge 灌值 | **不再可靠**：密码框标了 `autocomplete=new-password`，浏览器不往里填密码 |
+
+所以现在的凭据来源是 `data/edge_cred.py`：从**本机 Edge 自己的密码库**里取
+（`Local State` 的 `os_crypt.encrypted_key` 用 DPAPI 解出 AES 密钥，
+再用 AES-256-GCM 解 `Login Data` 里的 `v10` 密文；全部走 Windows 原生能力，无第三方依赖）。
+
+- **只在内存里用**：解出来的密码不写文件、不进日志、不进台账，日志里只打印位数。
+- **不写死域名**：先找 `sidportal`，再退回 `portal` / `experimental-auth-endpoint`，
+  你在旧域名存过的密码、或新域名刚存的那条，都能用。
+- **多个 Edge 用户目录都看**：专用 profile 与日常 Edge（`…\Edge\User Data\Default`）都会查 ——
+  平时在常用浏览器里登录一次，脚本就能读到。
+- 拿不到凭据时**不硬猜**：保留窗口转人工（最多 300 秒）并打印可操作提示。
+- **profile 被占用时不再直接失败**：改用临时上下文继续（凭据照样能从密码库取）。
+  实测过：计划任务启动那一刻，持久 profile 正被另一个窗口占着，Edge 只回一句
+  「已在现有浏览器会话中打开」就退出，3 次重试全废 —— 一次登录都没尝试。
+
+**现在唯一需要你动手的情况**：平台弹验证码（图形码 / 短信 / 滑块）。
+这时脚本**不关窗口**，打印提示并继续轮询 300 秒 —— 你在那个窗口里完成即可。
+
 
 ```powershell
 & $PY data\login.py             # 自动登录优先，卡住转人工（login.bat 用的就是它）
@@ -375,7 +405,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 & $PY data\login.py --check     # 只检查 storage_state.json 是否仍有效
 ```
 
-> 密码不落盘：脚本只保存登录后的 cookie / storage_state，账号密码仍由 Edge 密码管理器保管。
+> 密码不落盘：脚本只保存登录后的 cookie / storage_state；账号密码仍由 Edge 密码管理器保管，
+> 需要时由 `edge_cred.py` 在内存里解密（见上一节）。
 > **改过北化密码后**：Edge 里存的是旧密码，自动登录会失败 —— 此时手动登录一次，
 > 浏览器问「是否保存密码」选「保存」，之后就恢复全自动。
 
@@ -593,7 +624,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 
 | 文件 | 作用 |
 | --- | --- |
-| `data/login.py` | 自动登录：打开持久 Edge profile → 自动填充 → 自动点「登录」→ 保存 `storage_state.json`；卡住则同窗口转人工 |
+| `data/login.py` | 自动登录：打开持久 Edge profile → 切「用户名密码」标签 → 填账号密码（先试自动填充，取不到则用 `edge_cred.py`）→ 点「立即登录」→ 保存 `storage_state.json`；卡住则同窗口转人工 |
+| `data/edge_cred.py` | 从本机 Edge 密码库取北化账号密码（DPAPI + AES-256-GCM，**只在内存里用**）；支持多个 Edge 用户目录，新域名 / 旧域名都能认 |
 | `data/scrape.py` | 抓取核心。全量扫描所有课程（每门课一次进课程页，同时取「课程作业 + 在线测试」）；含黑名单、课程索引、时间归一化、并发锁 |
 | `data/weekly.py` | 端到端入口：抓取 → 合并手动条目 → 按截止时间筛选 → 生成汇总文本 → 调 `notify.py` 推送 |
 | `data/notify.py` | 推送层，多渠道可插拔；含推送台账与去重 |
@@ -607,9 +639,9 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 | `data/focus_console.py` | 把已存在的控制台窗口置于前台（第 2 次双击时用）；按窗口标题精确匹配 |
 | `data/fetch_log.py` / `fetch_log_show.py` | 检索台账的写入模块 / 查看脚本（`python fetch_log_show.py [条数]`） |
 | `data/alert.py` | 失败告警层：渠道选择（默认本机）、冷却去重、告警台账、「该跑没跑」判定 |
-| `data/task_run.py` | 定时任务运行器：决定发哪个群（默认跟随 config.json 的 wecom_webhook）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
-| `data/task_register.py` | 把「每周定时推送」注册成 Windows 计划任务；支持改时间 / 查状态 / 删任务 / 立刻触发 |
-| `data/task_catchup.py` | 第二部分：登录后检查本周日是否已推送，未推送则补推（非周日秒退；只等需要动作的那次） |
+| `data/task_run.py` | 定时任务运行器：**幂等闸**（今天已推过就秒退）→ 决定发哪个群（默认跟随 config.json 的 wecom_webhook）→ 调 `weekly.py` → 落任务台账；**不重复实现任何业务逻辑** |
+| `data/task_register.py` | 把「每周定时推送」注册成 Windows 计划任务；支持改时间 / 查状态 / 删任务 / 立刻触发 / **重复触发重试** |
+| `data/task_catchup.py` | 第二部分：周日检查本周是否已推送，未推送则补推（非周日秒退；`too_early` 在 90 分钟内会等到点再判定） |
 | `data/console.ps1` | 旧版 WinForms 控制台窗体（降级备用，无需修改） |
 | `data/wechat_send.py` | PC 微信 UI 自动化（**已验证在微信 4.x 上不可用**，保留备用） |
 | `data/config.example.json` | 配置模板，复制成 `config.json` 使用 |
@@ -645,18 +677,25 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 **改群不用重新注册**：任务运行时会重新读 `config.json`。
 
 任务名固定 `BUCT-Homework-Weekly`，实际执行的是
-`python data\task_run.py --wecom config --days 7`：
+`python data\task_run.py --wecom config --days 7 --target-time 09:00`：
 
 | 环节 | 谁做 | 说明 |
 | --- | --- | --- |
+| **幂等闸** | `task_run.py` | 今天已成功推过群 → **秒退不发送**（重复触发才敢开） |
 | 选目标群 | `task_run.py` | **默认跟随 `config.json` 的 `wecom_webhook`**；测试时用 `--wecom test` 强制测试群 |
 | 抓取/汇总/排版/推送 | `weekly.py` | 业务逻辑一行都不重复实现 |
-| 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（约 45 秒，实测能自愈） |
+| 登录自愈 | `weekly.py` 的 `ensure_login()` | 会话过期时自己调 `login.py --no-wait`（实测 10-50 秒能自愈） |
 | 失败告警 | `alert.py` | 抓取 0 条 / 过半失败 / 推送失败都会出声 |
 | 记账 | `data/task_log.jsonl` | 几点跑的、多久、退出码、抓到多少条、**发到哪个群** |
 
+**重复触发（2026-10-18 加）**：`09:00` 起**每 10 分钟再试一次，持续 2 小时**（09:00–11:00）。
+这一层是给下面这种真实情况兜底：09:00 那一刻电脑刚开机、还停在登录界面，
+交互式任务起不来（见「漏发复盘」）。重复触发**不会连发** ——
+`task_run.py` 开头会先问「今天已经发过没有」，发过就秒退（台账记 `reason=already-pushed-today`）。
+
 **错过了会补跑**：任务设了 `StartWhenAvailable`，周日那一刻没开机/休眠，开机后系统会补跑一次。
 （这与第二部分是两件事：这里是系统级补跑，第二部分是业务级「这周到底发出去没有」。）
+
 
 #### 测试群 / 正式班级群，到底在发哪一个
 
@@ -750,9 +789,40 @@ Catchup 的触发器会显示成「每周」（实际只在周日），Weekly �
 | 周的哪一天 | 时间 | 今天推过没 | 判定 | 动作 |
 | --- | --- | --- | --- | --- |
 | 非周日 | 任意 | — | `not_sunday` | 退出（不等待） |
-| 周日 | 早于计划时间 | — | `too_early` | 退出，把机会让给定时任务 |
+| 周日 | 早于计划时间（≤90 分钟） | — | `too_early` | **等到「计划时间 +15 分钟」再判定**（2026-10-18 改） |
+| 周日 | 早于计划时间（>90 分钟） | — | `too_early` | 退出，交给定时任务（凌晨开机时不该占着进程） |
 | 周日 | 已过计划时间 | 已成功推送 | `done` | 退出（这就是「检测」本身） |
 | 周日 | 已过计划时间 | 没推成功 | `due` | **等到计划时间 +15 分钟（或开机后 15 分钟）再补推** |
+
+> **`too_early` 为什么不再直接退出**（2026-10-18 的真实漏发）：那天 08:21 开机，
+> 补推任务判定 `too_early` → 退出；而 09:00 那次定时任务因为「机器刚开机、还停在
+> 登录界面」没跑成 —— 两条路都没接手，群里一整天没有消息。
+> 现在只要离计划时间不到 90 分钟，就等到「计划时间 + delay」再判定一次。
+
+
+#### 2026-10-18 漏发复盘：那天 09:00 为什么群里没消息
+
+不是单一故障，是**三处问题叠加**，每一处单独都足以让一周静默。时间线（全部有台账/事件日志）：
+
+| 时间 | 发生了什么 | 证据 |
+| --- | --- | --- |
+| 08:20:53 | 补推任务被 `StartWhenAvailable` 补跑（周日 00:05 那个触发点当时没开机） | `task_catchup.log`：判定 `too_early` |
+| 08:20:53 | 旧逻辑：`too_early` → **直接退出**，把机会让给定时任务 | 同上 |
+| 08:25:44 | 系统关机 | System 日志 Kernel-Power 109 |
+| 08:59:44 | 开机 | Kernel-Boot 12 |
+| **09:00:00** | Weekly 触发点到了，但机器**还停在登录界面**（09:00:23 才登录）。任务是 `Interactive`，没有交互会话就起不来 → Windows 记 `NumberOfMissedRuns=1` | `Get-ScheduledTaskInfo` |
+| 09:00:23 | 用户登录，**Weekly 并没有因此自动补跑** | 同上（NextRunTime 已跳到下周） |
+| 09:07:08 | 手动补推：登录态已失效，自动登录按旧版找 `login-normal.html` iframe → 找不到 | `task_run.log`「没找到登录表单」 |
+| 09:08:52 | Weekly 其实补跑了一次，但仍然死在登录（且那一刻持久 profile 被另一个窗口占用，浏览器根本没起来） | `task_run.log` `TargetClosedError: … browser has been closed` |
+| 09:13:15 | 登录修好后补推成功 → 群里收到 5 项 | `push_log.jsonl` / `task_log.jsonl` |
+
+对应的三处修复：
+
+1. **触发时刻没有交互会话** → Weekly 触发器加「每 10 分钟重试、持续 2 小时」，
+   登录之后还有机会（`task_register.py --repeat-min/--repeat-hours`）。
+2. **重复触发会连发** → `task_run.py` 加幂等闸：今天已成功推过就秒退。
+3. **补推提前退出** → `too_early` 在 ±90 分钟内改为等到「计划时间 + delay」再判定。
+4. （另加）**登录改版** → 见「自动登录」一节，凭据改从 Edge 密码库取。
 
 #### 为什么不是「仅周日登录时触发」
 
@@ -946,14 +1016,22 @@ B 项的落地形式与当初设想略有不同：不是「登录时补跑」这
 ### 登录侧
 
 - **登录态会过期**：CAS 的 `CASTGC` / 门户的 `TGC` 是长效票据但不保证长期有效。
-- **登录表单在跨域 iframe 里**：`portal.buct.edu.cn/normal/login-normal.html`，
-  字段 `input[name=username]` / `input[name=password]`，脚本必须进 frame 操作。
-- **Edge 自动填充不会立刻灌进 DOM**：必须先用 Playwright 点一下用户名框触发，实测 1~3 秒才有值。
+- **2026-10-18 平台改版**：统一认证换到 `sidportal.buct.edu.cn`（Angular 单页、无 iframe），
+  旧 `portal.buct.edu.cn/normal/login-normal.html` 已 **404**。新页要：先点「用户名密码」标签、
+  用 `#nameInput` / `input[type=password]`、最后点 `#submitBtn`（两个框有值前是 `disabled`）。
+  详见「自动登录」一节。
+- **Edge 自动填充在新域名上不可靠**：密码框标了 `autocomplete="new-password"`，浏览器不填密码；
+  而且自动填充绑的是 **origin**，新域名永远命不中旧域名那条记录。所以凭据改从 Edge 密码库取
+  （`edge_cred.py`），自动填充只作为"优先尝试"。
+- **持久 profile 会被占用**：另一个 Edge 窗口（含 login.bat 自己开着的那个）占着它时，
+  `launch_persistent_context` 抛 `TargetClosedError`，Edge 只回一句「已在现有浏览器会话中打开」。
+  `login.py` 现在会退回临时上下文继续，不再整体失败。
+- **登录页有验证码风控**（图形码 / 短信 / 滑块）。实测本机 IP + 常用设备下不弹；
+  万一弹了，脚本保留窗口并轮询，人工过一次即可，不要试图自动过。
 - **别改回「有死代码的 main」**：login.py 曾有一段永远执行不到的分支
   （`if args.check:` 后直接 `return`，紧跟的 `if args.auto:` 成了死代码），
   表现为「自动填充成功但从来没点过登录按钮」。改完必须实跑验证。
-- **登录页加载了腾讯验证码 SDK**（`turing.captcha.gtimg.com`）与阿里无痕风控（`g.alicdn.com/AWSC/et/*`）。
-  实测本机 IP + 常用设备下点登录不弹；万一弹了，脚本保留窗口并轮询，人工拖滑块即可，不要试图自动过。
+
 
 ### 服务与并发
 
