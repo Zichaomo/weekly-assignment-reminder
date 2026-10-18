@@ -621,6 +621,12 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 1. **换掉班级群机器人 key**（企业微信群 → 机器人 → 移除后重新添加）。
    webhook 的 key 就是**群发口令**，谁拿到都能往群里发消息；现在已知有别人的机器在用。
    换完只改 `data/config.json` 的 `wecom_webhook`，**定时任务不用重新注册**。
+   > ✅ **已执行（2026-10-18）**：班级群换成新机器人 `…55a4492f`，
+   > `wecom_webhook` 与 `wecom_webhook_prod` 都已更新；旧号 `…d3e7e73e` 探测返回
+   > `93000 invalid webhook url`（机器人已删，旧口令作废）。
+   > 测试群 `…896a828b` 与选修课小群 `…d43e9d22` 是两个独立机器人，**未改动**。
+   > 验证方式：用非法 `msgtype` 打探针 —— 企业微信只回错误码、不投递消息，
+   > 返回 `40008 invalid message type` 即说明新 key 有效。
 2. 如果那份工具是发给同学用的：让他们把 `alert.channel` 保持 `local`
    （或直接用本仓最新版本，硬闸会拦住），**别把 `data/config.json` 一起发出去**。
 3. 自己这边保持 `alert.channel=local` + `allow_class_group=false`（默认就是这样）。
@@ -851,7 +857,8 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 - **想发正式群**：把 `wecom_webhook_prod` 的值复制到 `wecom_webhook` 即可，
   **定时任务不用重新注册**（它下次运行会重新读 config）。
 - **想退回测试**：把 `wecom_webhook` 换回 `wecom_webhook_test` 的值。
-- **认尾号最快**：`…896a828b` = 测试群，`…e73e` = 正式班级群。
+- **认尾号最快**：`…896a828b` = 测试群，`…55a4492f` = 正式班级群（2026-10-18 换了新机器人；
+  旧号 `…d3e7e73e` 已删除，探针返回 `93000 invalid webhook url`）。
 - 想知道「这次到底发哪个群」：注册时打印，运行时也打印
   （`data/task_run.log` 里那行「目标群：…」）。
 
