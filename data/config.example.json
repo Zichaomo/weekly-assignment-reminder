@@ -35,10 +35,12 @@
   },
   "_alert": "失败告警：作业提醒是发给同学的，告警是发给你自己的，两者必须分开配。默认 local（本机通知 + 落盘），不打扰任何群",
   "alert": {
-    "_channel": "local=本机通知(推荐) / wecom_test=企业微信测试群(用上面的 wecom_webhook) / wecom_prod=正式班级群(慎用) / pushplus / clipboard / none",
+    "_channel": "local=本机通知(推荐) / wecom_test=企业微信测试群(读 wecom_webhook_test) / wecom_prod=正式班级群(慎用) / pushplus / clipboard / none",
     "enabled": true,
     "channel": "local",
     "fallback_channel": "local",
+    "_allow_class_group": "硬闸：false=告警绝不进班级群（即使 channel 指向班级群那条 key 也会被拦下、改走本机）。真要让同学一起看到技术告警才改 true",
+    "allow_class_group": false,
     "_style": "本机通知形式：balloon=托盘气泡(默认，右下角自动收回) / dialog=消息框(模态，必须点掉) / both / auto",
     "local_style": "balloon",
     "_cooldown": "同类告警在该秒数内只发一次，避免连续失败变成每天一条骚扰",

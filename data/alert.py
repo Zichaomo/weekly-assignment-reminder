@@ -59,7 +59,7 @@ LEVELS = ("info", "warn", "error")
 DEFAULT_ALERT = {
     "enabled": True,
     # local = 落盘 + Windows 通知（默认：不打扰任何人）
-    # wecom_test = 企业微信【测试群】机器人（wecom_webhook）
+    # wecom_test = 企业微信【测试群】机器人（**读 wecom_webhook_test**）
     # wecom_prod = 企业微信【正式班级群】（wecom_webhook_prod）—— 慎用
     # clipboard / pushplus / none 同 notify.py
     "channel": "local",
@@ -72,6 +72,11 @@ DEFAULT_ALERT = {
     # 「该跑没跑」的判定：距上次成功跑完超过 interval_days + grace_hours 就告警
     "interval_days": 7,
     "grace_hours": 12,
+    # 【硬闸】默认禁止把告警发到「班级群/主用群」那个 webhook。
+    # 作业提醒是发给同学的、告警是发给你自己的，混在一起就是事故：
+    # 同学会看到「登录态失效 / 抓取失败」这类技术文字，还以为提醒坏了。
+    # 真要发班级群（比如你想让同学一起盯着），显式改成 true。
+    "allow_class_group": False,
 }
 
 
@@ -89,24 +94,50 @@ def load_cfg() -> dict:
     return out
 
 
+def _class_group_hooks(raw: dict) -> set:
+    """哪些 webhook 算「班级群 / 主用群」（告警绝不往这里发）。
+
+    两个都算：
+      wecom_webhook       主用那条 —— README 约定里它就是"当前正式发的群"
+      wecom_webhook_prod  显式声明的正式班级群
+    告警是发给你自己的，技术性文字进班级群就是事故，所以默认一律拒绝。
+    """
+    out = set()
+    for k in ("wecom_webhook", "wecom_webhook_prod"):
+        v = (raw.get(k) or "").strip()
+        if v:
+            out.add(v)
+    return out
+
+
 def resolve_channel(name: str, raw: dict):
     """把告警渠道名翻译成 notify.py 的 (channel, cfg) 调用参数。
 
     wecom_test / wecom_prod 是本文件专有的别名：
-      · wecom_test -> 用 wecom_webhook（测试群）
-      · wecom_prod -> 把 wecom_webhook_prod 临时顶到 wecom_webhook 位置上发给班级群
+      · wecom_test -> 读 **wecom_webhook_test**（专用测试群字段）
+      · wecom_prod -> 把 wecom_webhook_prod 临时顶到 wecom_webhook 位置上
     local 不走 notify.py，由本文件自己实现（toast + 落盘）。
+
+    ⚠️ 2026-10-18 修：wecom_test 以前读的是 `wecom_webhook`（"主用那条"）。
+    可主用那条按设计随时可以是**正式班级群** —— 于是「我要发测试群」的告警
+    实际发进了班级群。现在测试群只认专用字段，找不到就交给 deliver 的
+    班级群硬闸去拦（最终退到本机通知）。
     """
     name = (name or "").strip().lower()
     if name in ("local", "none"):
         return name, raw
     if name == "wecom_test":
-        return "wecom", raw
-    if name == "wecom_prod":
+        test = (raw.get("wecom_webhook_test") or "").strip()
+        if not test:
+            return "wecom", raw        # 没配专用测试群 -> 由硬闸决定（大概率退本机）
         cfg = dict(raw)
+        cfg["wecom_webhook"] = test
+        return "wecom", cfg
+    if name == "wecom_prod":
         prod = (raw.get("wecom_webhook_prod") or "").strip()
         if not prod:
-            return "wecom", raw        # 没配就退回测试群，不静默失败
+            return "wecom", raw        # 没配就交给硬闸（不会静默发错群）
+        cfg = dict(raw)
         cfg["wecom_webhook"] = prod
         return "wecom", cfg
     return name, raw
@@ -251,6 +282,19 @@ def deliver(channel: str, raw: dict, title: str, text: str, style: str = None) -
     if ch == "none":
         print("[告警渠道 none] 未发送，仅落盘", file=sys.stderr)
         return True
+    if ch == "wecom":
+        hook = (cfg.get("wecom_webhook") or "").strip()
+        allow = bool((cfg.get("alert") or {}).get("allow_class_group"))
+        if hook and hook in _class_group_hooks(raw) and not allow:
+            print("告警被拦下：目标 webhook 是【班级群/主用群】，"
+                  "按 alert.allow_class_group=false 拒绝发送"
+                  "（告警只发给你自己，不能进班级群）。已改走降级渠道。",
+                  file=sys.stderr)
+            return False
+        # 用 override 传目标，别让环境变量 BUCT_WECOM_WEBHOOK 把告警劫持到班级群
+        # ——定时任务会把那个变量设成班级群，weeklly 里的告警正是它的子进程。
+        cfg = dict(cfg)
+        cfg["_wecom_webhook_override"] = hook
     try:
         return bool(notify.dispatch(text, ch, cfg))
     except Exception as e:  # noqa: BLE001
@@ -560,19 +604,25 @@ def check_freshness(cfg: dict = None, now=None):
 def self_test(cfg: dict) -> int:
     ch = cfg["channel"]
     raw = cfg["_raw"]
-    resolved, _ = resolve_channel(ch, raw)
+    resolved, rcfg = resolve_channel(ch, raw)
+    allow = bool(cfg.get("allow_class_group"))
     print(f"告警开关: {'开启' if cfg['enabled'] else '关闭（enabled=false）'}")
     print(f"告警渠道: {ch}  ->  实际使用 {resolved}")
     print(f"降级渠道: {cfg.get('fallback_channel')}")
+    print(f"班级群硬闸: {'⚠️ 已放开（allow_class_group=true）' if allow else '生效（告警绝不进班级群）'}")
     print(f"冷却窗口: {cfg['cooldown_sec']} 秒（同类告警该窗口内只发一次）")
     print(f"陈旧阈值: {cfg['interval_days']} 天 + {cfg['grace_hours']} 小时")
     print("-" * 46)
     if resolved == "wecom":
-        hook = ("wecom_webhook_prod" if ch == "wecom_prod" else "wecom_webhook")
-        has = bool((raw.get(hook) or "").strip())
-        print(f"{'[就绪]' if has else '[缺配置]':10s} 企业微信群机器人（{hook}）")
-        if ch == "wecom_prod":
-            print("  ⚠️ wecom_prod 会把告警发到【班级群】，同学会看到技术性文字")
+        hook = (rcfg.get("wecom_webhook") or "").strip()
+        is_class = hook in _class_group_hooks(raw) if hook else False
+        tail = ("…" + hook[-8:]) if len(hook) > 8 else "（空）"
+        print(f"{'[就绪]' if hook else '[缺配置]':10s} 企业微信群机器人（key 尾 {tail}）")
+        if is_class and not allow:
+            print("  ⛔ 这条 key 是【班级群/主用群】——告警会被硬闸拒绝，实际只走本机通知。")
+            print("     想真的发群，请填 wecom_webhook_test（专用测试群）并改 channel=wecom_test。")
+        elif is_class and allow:
+            print("  ⚠️ allow_class_group=true + 班级群 key：告警会进班级群，同学会看到技术文字。")
     elif resolved == "pushplus":
         print(f"{'[就绪]' if (raw.get('pushplus_token') or '').strip() else '[缺配置]':10s} pushplus")
     elif resolved in ("clipboard", "local"):

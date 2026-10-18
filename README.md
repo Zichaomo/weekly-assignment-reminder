@@ -573,10 +573,58 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
   "fallback_channel": "local", // 主渠道失败时的降级目标
   "local_style": "balloon",    // balloon=托盘气泡(自动收回) / dialog=消息框(必须点掉) / both / auto
   "cooldown_sec": 3600,        // 同类告警该窗口内只发一次
+  "allow_class_group": false,  // 【硬闸】false=告警绝不进班级群（见下）
   "interval_days": 7,          // 「该跑没跑」阈值：7 天 + 12 小时
   "grace_hours": 12
 }
 ```
+
+#### 三道硬防护（2026-10-18 加，配套下面那次复盘）
+
+1. **班级群硬闸**：`deliver()` 会比对目标 webhook 是否等于 `wecom_webhook`
+   （主用那条）或 `wecom_webhook_prod`（正式班级群）。**是就拒绝发送**，
+   并自动降级到 `fallback_channel`（默认本机通知）。
+   除非显式 `allow_class_group: true`，否则技术上发不出去。
+2. **`wecom_test` 只读专用字段**：以前它读的是 `wecom_webhook`（"主用那条"），
+   而主用那条按设计随时可以是**正式班级群** —— 等于「我要发测试群」却发进了班级群。
+   现在 `wecom_test` 只认 `wecom_webhook_test`；没配就交给硬闸，退到本机通知。
+3. **环境变量不能劫持告警**：定时任务会给子进程设 `BUCT_WECOM_WEBHOOK`（指向班级群）。
+   告警投递现在用 `_wecom_webhook_override` 显式指定目标，优先级高于环境变量；
+   否则「告警发测试群」会在定时任务里静默变成「告警发班级群」。
+
+排查当前状态一条命令：
+
+```powershell
+& $PY data\alert.py --self-test      # 会打印「班级群硬闸: 生效」以及告警实际会投到哪个 key 尾号
+```
+
+#### 2026-10-18 复盘：班级群里出现了一条技术告警
+
+**现象**：班级群收到
+「⚠️ 北化在线作业提醒：平台登录态已失效，且自动登录未成功……请双击
+`C:\Users\23150\Desktop\每周作业提醒\login.bat` 手动登录一次后，再运行作业提醒。」
+
+**排查结论：不是本机发的。**
+
+| 证据 | 结果 |
+| --- | --- |
+| 消息里的路径 | `C:\Users\23150\Desktop\…` —— 本机是 `C:\Users\MECHREVO` + `D:\项目\…` |
+| 本机 `alert_log.jsonl` | 当天所有告警 `channels=local`，**没有一条走 wecom** |
+| 本机 `push_log.jsonl` | 只有「作业提醒」两条（班级群 + 个人小群），没有任何告警 |
+| 措辞比对 | 消息写「平台登录态」「再运行作业提醒」，本项目代码里**没有**这些字（本项目是「北化在线登录态」「再重跑」）→ 来自**另一份实现** |
+| git 历史 | 全历史搜 `wecom_webhook` 的 key 片段：**未命中**，`config.json` 从未入库 |
+
+**结论**：另一台机器上跑着一份"类似本项目"的工具，它把告警发进了班级群。
+
+**处置建议（按优先级）**：
+
+1. **换掉班级群机器人 key**（企业微信群 → 机器人 → 移除后重新添加）。
+   webhook 的 key 就是**群发口令**，谁拿到都能往群里发消息；现在已知有别人的机器在用。
+   换完只改 `data/config.json` 的 `wecom_webhook`，**定时任务不用重新注册**。
+2. 如果那份工具是发给同学用的：让他们把 `alert.channel` 保持 `local`
+   （或直接用本仓最新版本，硬闸会拦住），**别把 `data/config.json` 一起发出去**。
+3. 自己这边保持 `alert.channel=local` + `allow_class_group=false`（默认就是这样）。
+
 
 ### 本机通知长什么样
 
@@ -601,8 +649,9 @@ $PY = & "$env:USERPROFILE\.workbuddy\binaries\python\envs\default\Scripts\python
 > 既避开引号嵌套，也避开「无 BOM 的 `.ps1` 被 Windows PowerShell 5.1 按 GBK 读」——
 > 后者实测会让脚本里的中文直接变成语法错误。
 
-- `wecom_test` 用 `wecom_webhook`（测试群），`wecom_prod` 用 `wecom_webhook_prod`（班级群）。
-- **`wecom_prod` 会把同学拉进你的运维现场**，除非确实需要否则别用。
+- `wecom_test` 用 `wecom_webhook_test`（测试群），`wecom_prod` 用 `wecom_webhook_prod`（班级群）。
+- **`wecom_prod` 会把同学拉进你的运维现场**，除非确实需要否则别用；
+  而且默认会被**班级群硬闸**拦下（见上一节），真要放开得同时设 `allow_class_group: true`。
 
 ### 什么时候告警
 
