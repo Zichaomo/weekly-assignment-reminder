@@ -56,9 +56,14 @@ if errorlevel 1 goto start_failed
 
 call :find_edge
 if not defined EDGE goto no_edge
-start "" "%EDGE%" --app=%URL% --no-first-run --no-default-browser-check
+rem  --start-maximized: open the app window maximized by default (previously a
+rem  small default-size window). Edge does not always honour this flag for
+rem  --app windows, so we then force it through Win32 (focus_console.py
+rem  --maximize), which also retries while the window title is still loading.
+start "" "%EDGE%" --app=%URL% --start-maximized --no-first-run --no-default-browser-check
+"%PY%" "%FOCUS%" --maximize --wait 8 >nul 2>&1
 echo.
-echo   Console started: %URL%
+echo   Console started: %URL%  (maximized)
 echo   Closing the browser window stops the service. This window will close.
 ping -n 3 127.0.0.1 >nul
 endlocal
@@ -71,7 +76,9 @@ rem  a just-closed window (heartbeat not yet expired) is exactly the case where
 rem  the port is busy but nothing can be raised -> open a new window instead.
 rem ===========================================================================
 :reuse
-"%PY%" "%FOCUS%" >nul 2>&1
+rem  --maximize: 双击 console.bat 的语义统一成"给我一个全屏控制台"，
+rem  所以置前的同时也最大化（旧窗口被拖小过也能回来）。
+"%PY%" "%FOCUS%" --maximize >nul 2>&1
 if not errorlevel 1 goto reuse_ok
 
 echo.
@@ -80,7 +87,8 @@ echo   raised (the previous window was probably closed moments ago).
 echo   Opening a new window...
 call :find_edge
 if not defined EDGE goto reuse_noedge
-start "" "%EDGE%" --app=%URL% --no-first-run --no-default-browser-check
+start "" "%EDGE%" --app=%URL% --start-maximized --no-first-run --no-default-browser-check
+"%PY%" "%FOCUS%" --maximize --wait 8 >nul 2>&1
 ping -n 3 127.0.0.1 >nul
 endlocal
 exit /b 0
