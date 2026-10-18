@@ -4,6 +4,14 @@ data/config.json
 # 登录会话（CAS 票据 TGC / JSESSIONID），能直接进你的北化在线账号
 data/storage_state.json
 
+# ── 截图与录屏：含个人课程表 / 班级群内容 / 同学姓名 ──
+# 2026-10-18 事故：一次 `git add -A` 把「图片/」里的控制台截图一起推到了公开仓库。
+# 那些图里有本机课程名与课程编号，属于个人数据，不该进公开仓库。
+图片/
+截图/
+screenshots/
+*.gif
+
 # ── 运行时数据（本地状态，不是代码）────────────────
 data/hw.json
 data/manual.json
