@@ -11,6 +11,35 @@
 > 按旧逻辑，你每交一门作业，全班同学就少收一门课的提醒（复变函数、大学物理实验都这样丢过）。
 > 所以本工具**默认全量扫描**，且没有关掉它的入口。
 
+---
+
+**🚩 第一次拿到这个仓库？先读「首次部署」那一节。**
+
+仓库里**没有任何人的凭据和名单** —— 下面这些全在 `.gitignore` 里，clone 下来是空的：
+
+| 文件 | 是什么 | 为什么不能入库 |
+| --- | --- | --- |
+| `data/config.json` | 推送渠道（企业微信 webhook / pushplus token） | **webhook 的 key 就是群发口令**，谁拿到都能往群里发消息 |
+| `data/storage_state.json` | 北化在线登录会话 | 等于账号的钥匙 |
+| `data/courses.json` | 你账号下的课程索引 | 个人数据，各人不同 |
+| `data/course_blacklist.json` / `electives.json` | 拉黑 / 选修课取舍 | 个人选择，不该强加给别人 |
+| `data/*.jsonl`、`*-log`、日志与截图 | 运行台账 | 含消息首行与本地路径 |
+
+所以你得自己走一遍（**约 5 分钟**）：
+
+1. `pip install playwright`（**不要** `playwright install`，本项目复用系统 Edge）
+2. `copy data\config.example.json data\config.json`，填**你自己的**群机器人地址
+3. 双击 `login.bat` 登录一次（之后会话过期也能自动续）
+4. 双击 `console.bat` → 「课程黑名单」→ 点「刷新课程表」
+5. （可选）在「选修课名单」里标记只有你上的课，它会只发个人小群、不进班级群
+6. （可选）`python data\task_register.py --time 09:00` 注册每周定时推送
+
+细节与踩坑记录都在 [**首次部署**](#首次部署换机器--刚-clone-下来必做)
+与 [**已知坑**](#已知坑都是实测踩出来的) 两节里。
+**别把 `data/config.json` 发给别人** —— 那是两个群的群发口令。
+
+---
+
 ## 快速开始
 
 ```powershell
