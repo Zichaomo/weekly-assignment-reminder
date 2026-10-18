@@ -34,6 +34,10 @@ data/courses.json
 # 黑名单：你的个人取舍，不该强加给 clone 的人
 data/course_blacklist.json
 data/test_blacklist.json
+# 选修课名单：照抓但不进班级群（各自选修不同，属个人取舍）
+data/electives.json
+# 个人小群那条提醒的正文（含选修课，本地记录）
+data/last_message_personal.txt
 # 推送台账：含消息首行的本地记录
 data/push_log.jsonl
 # 抓取互斥锁（运行时文件）

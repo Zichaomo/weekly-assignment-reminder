@@ -48,6 +48,17 @@ DEFAULT_CONFIG = {
     # 去重窗口（秒）：窗口内若已成功推送过「完全相同」的内容，则跳过并标记 duplicate。
     # 用于防止手滑连点两次「提前发布」造成重复打扰；设为 0 即关闭。
     "dedup_window_sec": 300,
+    # 「个人那条」的推送目标（2026-10-18 新增）：
+    #   班级群那条 = 全部课程 − 选修课；个人这条 = 完整清单（含选修课）。
+    # 典型配置就是一个「选修课小群」的机器人，所以它和班级群的 webhook 必须分开。
+    "personal": {
+        "enabled": True,
+        "channel": "wecom",
+        "wecom_webhook": "",
+        "pushplus_token": "",        # 留空则复用顶层 pushplus_token
+        "pushplus_topic": "",
+        "notify_title": "我的作业提醒（含选修课）",
+    },
 }
 
 PUSH_LOG = ROOT / "push_log.jsonl"
@@ -82,33 +93,44 @@ def _tail_log(minutes: int = 30) -> list:
     return out
 
 
-def dedup_target(channel: str, cfg: dict) -> str:
+def dedup_target(channel: str, cfg: dict, audience: str = "class") -> str:
     """去重作用域：只有「同一个目标」上的重复才跳过。
 
     否则会出现这种误伤：往测试群发过一次，班级群同内容就被判成重复而不发。
+    audience=personal 时按「个人通道」单独算 —— 两条消息发到两个群，
+    绝不能互相判重。
     """
     ch = (channel or "").lower()
+    pcfg = personal_cfg(cfg) if audience == "personal" else {}
+    prefix = "personal:" if audience == "personal" else ""
     if ch == "wecom":
-        return _msg_hash(str(cfg.get("wecom_webhook", "")))
+        hook = (pcfg.get("wecom_webhook") if audience == "personal"
+                else cfg.get("wecom_webhook"))
+        return prefix + _msg_hash(str(hook or ""))
     if ch == "pushplus":
-        return _msg_hash(str(cfg.get("pushplus_token", "")))
+        tok = (pcfg.get("pushplus_token") if audience == "personal"
+               else cfg.get("pushplus_token"))
+        return prefix + _msg_hash(str(tok or ""))
     if ch == "wechat":
-        return "wechat:" + str(cfg.get("wechat_target", ""))
-    return ch or "default"
+        return prefix + "wechat:" + str(cfg.get("wechat_target", ""))
+    return prefix + (ch or "default")
 
 
 def log_push(source: str, channel: str, text: str, ok: bool,
-             note: str = "", target: str = "") -> None:
+             note: str = "", target: str = "", audience: str = "class") -> None:
     """往 push_log.jsonl 追一条记录。
 
     目的：以后再出现「莫名多一条提醒」，能一眼看出是谁、什么时候、发到哪、发了什么。
+    audience 区分「班级群那条（class）」与「个人小群那条（personal）」：
+    两条各自成功/失败都要能单独查，才不会被对方掩盖。
     """
     rec = {
         "ts": time.time(),
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source or "unknown",     # weekly / hub / notify-cli / test
+        "audience": audience or "class",   # class=班级群 / personal=个人小群
         "channel": channel,
-        "target": target or dedup_target(channel, {}),
+        "target": target or dedup_target(channel, {}, audience),
         "ok": bool(ok),
         "note": note,
         "msg_hash": _msg_hash(text),
@@ -152,6 +174,60 @@ def load_config() -> dict:
         except Exception as e:  # noqa: BLE001
             print(f"WARN: config.json 解析失败({e})，用默认配置", file=sys.stderr)
     return cfg
+
+
+# ---------------------------------------------------------------- 个人通道
+def personal_cfg(cfg: dict) -> dict:
+    """取「个人那条」（选修课小群）的配置，并把缺省项补齐。
+
+    为什么要有它：班级群那条必须**删掉**选修课，个人那条必须**保留**选修课。
+    两条发到两个不同的群，配置也必须是两份 —— 绝不能让个人那条退回班级群
+    （那等于把只有你上的课又发给了全班）。
+    """
+    raw = cfg.get("personal") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    merged = {
+        "enabled": bool(raw.get("enabled", True)),
+        "channel": (raw.get("channel") or "wecom").strip().lower(),
+        "wecom_webhook": (raw.get("wecom_webhook") or "").strip(),
+        "pushplus_token": (raw.get("pushplus_token") or
+                           cfg.get("pushplus_token") or "").strip(),
+        "pushplus_topic": (raw.get("pushplus_topic") or "").strip(),
+        "notify_title": (raw.get("notify_title") or
+                         "我的作业提醒（含选修课）").strip(),
+        "wechat_target": (raw.get("wechat_target") or
+                          cfg.get("wechat_target") or "文件传输助手"),
+    }
+    return merged
+
+
+def personal_ready(cfg: dict) -> tuple:
+    """个人通道是否真的能发。返回 (可用, 原因)。
+
+    没配就直接跳过，**不发也不报错**：这是可选功能，不应该因为没配就
+    把班级群那条的正常推送也拖下水。
+    """
+    p = personal_cfg(cfg)
+    if not p["enabled"]:
+        return False, "personal.enabled = false（个人提醒已关闭）"
+    ch = p["channel"]
+    if ch == "wecom":
+        hook = p["wecom_webhook"]
+        if not hook:
+            return False, "personal.wecom_webhook 未配置（个人小群机器人）"
+        main_hook = (cfg.get("wecom_webhook") or "").strip()
+        if main_hook and hook == main_hook:
+            return False, ("personal.wecom_webhook 与班级群的 wecom_webhook 是同一个 key —— "
+                           "那样选修课又会发进班级群，已拒绝")
+        return True, "企业微信个人小群"
+    if ch == "pushplus":
+        if not p["pushplus_token"]:
+            return False, "personal.pushplus_token 未配置"
+        return True, "pushplus 个人"
+    if ch in ("clipboard", "none"):
+        return True, ch
+    return False, f"未知的个人渠道 {ch}"
 
 
 # ---------------------------------------------------------------- 目标群解析
@@ -321,7 +397,11 @@ def send_pushplus(text: str, cfg: dict) -> bool:
 
 # ---------------------------------------------------------------- wecom
 def send_wecom(text: str, cfg: dict) -> bool:
-    hook = (os.environ.get(WECOM_ENV) or "").strip() or (cfg.get("wecom_webhook") or "").strip()
+    # _wecom_webhook_override：给「个人小群」用。环境变量 BUCT_WECOM_WEBHOOK 是
+    # 定时任务用来定向班级群的，个人那条绝不能被它劫持到班级群去。
+    hook = ((cfg.get("_wecom_webhook_override") or "").strip()
+            or (os.environ.get(WECOM_ENV) or "").strip()
+            or (cfg.get("wecom_webhook") or "").strip())
     if not hook:
         print("ERROR: wecom_webhook 为空，请在 config.json 填写。", file=sys.stderr)
         return False
@@ -372,12 +452,24 @@ SENDERS = {
 }
 
 
-def dispatch(text: str, channel: str, cfg: dict) -> bool:
+def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> bool:
+    """发送。audience=personal 时自动套用 personal 段（群/标题/凭据都不共用）。"""
+    eff_cfg = cfg
+    if audience == "personal":
+        p = personal_cfg(cfg)
+        eff_cfg = dict(cfg)
+        eff_cfg.update({
+            "_wecom_webhook_override": p["wecom_webhook"],
+            "pushplus_token": p["pushplus_token"],
+            "pushplus_topic": p["pushplus_topic"],
+            "notify_title": p["notify_title"],
+            "wechat_target": p["wechat_target"],
+        })
     fn = SENDERS.get((channel or "").lower())
     if not fn:
         print(f"ERROR: 未知渠道 {channel}，可选: {', '.join(SENDERS)}", file=sys.stderr)
         return False
-    return fn(text, cfg)
+    return fn(text, eff_cfg)
 
 
 def self_test(cfg: dict) -> int:
@@ -406,6 +498,13 @@ def self_test(cfg: dict) -> int:
         print(f"当前渠道 {cfg['channel']} 缺配置，推送会失败。")
         return 1
     print("当前渠道配置就绪。")
+    pready, pwhy = personal_ready(cfg)
+    print("-" * 40)
+    print(f"个人小群通道：{'[就绪]' if pready else '[未启用]'} {pwhy}")
+    if pready:
+        p = personal_cfg(cfg)
+        hook = p.get("wecom_webhook") or p.get("pushplus_token") or ""
+        print(f"  （{p['channel']} · key 尾 {hook[-8:] if len(hook) > 8 else '（空）'}）")
     return 0
 
 
@@ -414,6 +513,9 @@ def main() -> int:
     ap.add_argument("--file", help="待推送文本文件（utf-8）")
     ap.add_argument("--message", help="直接给文本")
     ap.add_argument("--channel", help="覆盖 config.json 的 channel")
+    ap.add_argument("--audience", choices=["class", "personal"], default="class",
+                    help="class=班级群那条（全部课程−选修课）/ "
+                         "personal=个人小群那条（完整清单，含选修课）")
     ap.add_argument("--self-test", action="store_true", help="检查渠道配置")
     ap.add_argument("--source", default="notify-cli",
                     help="标记谁在推（weekly / hub / notify-cli），写进推送台账")
@@ -434,12 +536,24 @@ def main() -> int:
         print("ERROR: 需要 --file 或 --message", file=sys.stderr)
         return 1
 
-    # 渠道优先级：--channel > 环境变量 > config.json
-    # 环境变量这条是给定时任务用的：一次演练（--dry-run）靠它把渠道切成 none，
-    # 而不必修改 config.json —— 改文件再忘改回来是本项目记过的风险。
-    channel = (args.channel or os.environ.get(CHANNEL_ENV) or ""
-               or cfg.get("channel", "clipboard"))
-    target = dedup_target(channel, cfg)
+    env_ch = (os.environ.get(CHANNEL_ENV) or "").strip()
+    if args.audience == "personal":
+        ready, why = personal_ready(cfg)
+        if not ready:
+            # 可选功能：没配就安静跳过。退 0 = 不把整条流水线判成失败。
+            print(f"跳过个人推送：{why}", file=sys.stderr)
+            print("（班级群那条不受影响，已单独发出）")
+            return 0
+        p = personal_cfg(cfg)
+        # 演练（task_run --dry-run 会把渠道设成 none）必须对两条都生效，
+        # 否则"演练"会真的往选修课小群发一条，那就不叫演练了。
+        channel = args.channel or ("none" if env_ch == "none" else "") or p["channel"]
+    else:
+        # 渠道优先级：--channel > 环境变量 > config.json
+        # 环境变量这条是给定时任务用的：一次演练（--dry-run）靠它把渠道切成 none，
+        # 而不必修改 config.json —— 改文件再忘改回来是本项目记过的风险。
+        channel = (args.channel or env_ch or "" or cfg.get("channel", "clipboard"))
+    target = dedup_target(channel, cfg, args.audience)
 
     # 去重：同一目标上、窗口内推过完全相同的内容就跳过（防止连点两次造成重复打扰）
     if not args.no_dedup:
@@ -449,14 +563,15 @@ def main() -> int:
             print(f"检测到 {window} 秒内已向同一目标推送过完全相同的内容"
                   f"（{dup.get('time')} by {dup.get('source')}），本次跳过。", file=sys.stderr)
             log_push(args.source, channel, text, True,
-                     note="duplicate-skipped", target=target)
+                     note="duplicate-skipped", target=target, audience=args.audience)
             print(f"推送渠道: {channel}（已去重跳过）")
             return 0
 
-    print(f"推送渠道: {channel}")
-    ok = dispatch(text, channel, cfg)
+    label = "个人小群" if args.audience == "personal" else "班级群"
+    print(f"推送渠道: {channel}（{label}）")
+    ok = dispatch(text, channel, cfg, audience=args.audience)
     log_push(args.source, channel, text, ok,
-             note="" if ok else "send-failed", target=target)
+             note="" if ok else "send-failed", target=target, audience=args.audience)
     return 0 if ok else 1
 
 

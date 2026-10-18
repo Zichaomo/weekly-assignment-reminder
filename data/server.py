@@ -443,8 +443,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/blacklist":
             kind = q.get("kind", ["course"])[0]
-            res = (hub.run_blacklist_list() if kind == "course"
-                   else hub.run_test_blacklist_list())
+            if kind == "course":
+                res = hub.run_blacklist_list()
+            elif kind == "test":
+                res = hub.run_test_blacklist_list()
+            else:
+                # kind=elective：选修课独立列表（照抓、只发个人小群）
+                res = hub.run_elective_list()
             return self._send(200, res)
 
         if path.startswith("/api/tasks/"):
@@ -484,8 +489,13 @@ class Handler(BaseHTTPRequestHandler):
             kind = p.get("kind", "course")
             action = p.get("action", "")
             lids = [str(x) for x in (p.get("lids") or [])]
+            if kind == "elective":
+                # 选修课独立入口：apply=加入（可给 lid 或课程名片段）/ remove=取消标记
+                if action == "apply":
+                    return self._send(200, hub.run_blacklist_elective(lids))
+                return self._send(200, hub.run_elective_remove(lids))
             if kind == "course" and action == "elective":
-                # 按「选修课」拉黑：可以传 lid，也可以传课程名的一部分
+                # 兼容旧调用（选修课原本挂在课程黑名单下）
                 return self._send(200, hub.run_blacklist_elective(lids))
             if kind == "course":
                 fn = hub.run_blacklist_apply if action == "apply" else hub.run_blacklist_remove

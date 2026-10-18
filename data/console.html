@@ -76,6 +76,7 @@ td.deadline,td.left{font-variant-numeric:tabular-nums;white-space:nowrap}
 td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badge{display:inline-block;font-size:10.5px;border:1px dashed var(--faint);border-radius:4px;padding:0 4px;color:var(--gray);margin-right:4px;line-height:1.7}
 .badge.test{border-style:solid;border-color:var(--ink);color:var(--ink)}
+.badge.elec{border-style:solid;border-color:var(--accent);color:var(--accent)}
 .st{font-size:12.5px;white-space:nowrap}
 .st-pub{color:var(--ink);font-family:'Lanxi-普惠体中黑'}
 .st-todo{color:var(--faint)}
@@ -147,9 +148,10 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     <label class="chk"><input type="checkbox" id="chkAll">含全部平台作业</label>
     <label class="chk"><input type="checkbox" id="chkTests" checked>抓在线测试</label>
     <span class="spacer"></span>
-    <!-- 「刷新课程表」已移到课程黑名单对话框内（方案 C）：那里才有上下文 -->
+    <!-- 三个入口并列：黑名单=不抓 / 测试黑名单=只跳测试 / 选修课=照抓但只发个人小群 -->
     <button class="btn ghost" id="btnBlCourse">课程黑名单</button>
     <button class="btn ghost" id="btnBlTest">测试黑名单</button>
+    <button class="btn ghost" id="btnElective">选修课</button>
   </div>
   <div class="taskbar" id="taskbar">
     <span class="spin"></span><span id="taskLabel">…</span><span class="elapsed" id="taskElapsed"></span>
@@ -210,7 +212,7 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     </div>
     <footer>
       <button class="btn" id="blApply">加入勾选项（需确认）</button>
-      <button class="btn ghost" id="blElective">标记为选修课</button>
+      <button class="btn" id="blElective">加入选修课（需确认）</button>
       <button class="btn" id="blRemove">移出勾选项（恢复抓取）</button>
       <button class="btn ghost" id="blReload">刷新课程表</button>
     </footer>
@@ -301,7 +303,9 @@ function render() {
   tb.innerHTML = rows.map((r, i) => {
     const isP = r.source === '平台';
     const over = (r.left === '已逾期');
-    const badges = (isP ? '' : '<span class="badge">手动</span>') + (r.kind === 'test' ? '<span class="badge test">在线测试</span>' : '');
+    const badges = (isP ? '' : '<span class="badge">手动</span>')
+      + (r.kind === 'test' ? '<span class="badge test">在线测试</span>' : '')
+      + (r.elective ? '<span class="badge elec">选修</span>' : '');
     const stCls = r.status === '待发布' ? 'st-pub' : (r.status === '逾期' ? 'st-over' : 'st-todo');
     const acts = isP
       ? `${r.hwtid ? `<a class="link" data-act="content" data-i="${i}">内容</a>` : ''}<a class="link" data-act="open" data-i="${i}">打开</a>`
@@ -380,13 +384,30 @@ $('#btnFetch').onclick = () => {
   });
 };
 $('#btnPreview').onclick = () => doPublish(true);
-$('#btnPublish').onclick = () => { if (confirm('确认推送到当前渠道？（300 秒内相同内容会自动去重）')) doPublish(false); };
+$('#btnPublish').onclick = () => {
+  if (confirm('确认推送？\n\n· 班级群那条：已去掉选修课\n· 个人小群那条：完整清单（含选修课）\n\n（300 秒内相同内容会自动去重）')) doPublish(false);
+};
+// 预览区一次显示两条：上面是班级群那条，下面是个人小群那条。
+// 分开显示是刻意的 —— 你要能一眼看出"哪几项没进班级群"。
+function bothMessages(res) {
+  const cls = res.message || '';
+  const per = res.message_personal || '';
+  if (!per || per === cls) return cls;
+  return cls + '\n\n──────── 个人小群（完整清单，含选修课） ────────\n\n' + per;
+}
+function countLine(res) {
+  const base = `班级群 ${res.count | 0} 条`;
+  const per = (res.count_personal === undefined || res.count_personal === null)
+    ? '' : ` · 个人小群 ${res.count_personal} 条`;
+  const el = res.elective_count ? `（选修课 ${res.elective_count} 门只发个人）` : '';
+  return base + per + el;
+}
 function doPublish(noSend) {
   const days = +$('#numDays').value;
   log(`正在${noSend ? '生成预览' : '发布'}（未来 ${days} 天）…`);
   runTask(noSend ? 'preview' : 'publish', { days }, noSend ? '生成推送预览' : '抓取并推送', res => {
     if (res.error) { log(res.error); alert(res.error); return; }
-    if (res.message) showPreview(res.message);
+    if (res.message) showPreview(bothMessages(res));
     if (res.elapsed_human) log(`本次抓取用时 ${res.elapsed_human}`);
     // 数据来源：复用检索结果时不重新抓取（省 1-2 分钟）
     if (res.data_source === 'cache') {
@@ -394,9 +415,15 @@ function doPublish(noSend) {
     } else if (res.data_source === 'fresh') {
       log('本次重新抓取了平台数据（超过 5 分钟或缓存覆盖不足）。');
     }
-    if (noSend) log(`已生成预览（未发送），共 ${res.count} 条。`);
+    if (noSend) log(`已生成预览（未发送）：${countLine(res)}。`);
     else if (res.deduped) { log(res.note); alert(res.note); }
-    else if (res.ok) { log(`已发布(${res.channel})，共 ${res.count} 条。`); alert(`已通过 ${res.channel} 发布，共 ${res.count} 条。`); }
+    else if (res.ok) {
+      const p = res.personal || {};
+      const pTxt = p.skipped ? `；个人小群那条已跳过（${p.note || '未启用'}）`
+        : (p.ok ? `；个人小群已发 ${p.count | 0} 条` : `；个人小群那条**失败**：${p.error || p.note || ''}`);
+      log(`已发布(${res.channel})：${countLine(res)}${pTxt}`);
+      alert(`已通过 ${res.channel} 发布：${countLine(res)}${pTxt}`);
+    }
     else { log('发布失败。'); alert('发布失败，详见日志。'); }
     refreshManual();
   });
@@ -426,7 +453,7 @@ $('#editSave').onclick = () => {
   $('#maskEdit').classList.remove('on');
 };
 
-/* ---------------- 黑名单弹窗 ---------------- */
+/* ---------------- 名单弹窗（课程黑名单 / 测试黑名单 / 选修课） ---------------- */
 async function loadBlacklist() {
   // 刷新要有可见反馈：否则数据没变时，用户会以为按钮没反应
   const btn = $('#blReload');
@@ -437,11 +464,16 @@ async function loadBlacklist() {
     const res = await api('/api/blacklist?kind=' + state.blKind);
     state.blData = res;
     renderBlacklist();
-    const n = (res.candidates || []).length, bl = (res.blacklist || []).length;
+    const kind = state.blKind;
+    const n = kind === 'elective' ? 0 : (res.candidates || []).length;
+    const bl = (res.blacklist || []).length;
     const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const label = kind === 'elective' ? '选修课' : (kind === 'test' ? '已屏蔽测试' : '已拉黑');
     $('#blInfo').insertAdjacentHTML('beforeend',
-      `<br><span style="color:var(--faint)">✓ 已于 ${t} 刷新：候选 ${n} 门 · 已拉黑 ${bl} 门`
-      + (n === 0 ? '（候选为空时列表看起来不变，这是正常的）' : '') + '</span>');
+      `<br><span style="color:var(--faint)">✓ 已于 ${t} 刷新：`
+      + (kind === 'elective' ? `${label} ${bl} 门` : `候选 ${n} 门 · ${label} ${bl} 门`)
+      + (n === 0 && kind === 'course' ? '（候选为空时列表看起来不变，这是正常的）' : '')
+      + '</span>');
   } catch (e) {
     $('#blInfo').insertAdjacentHTML('beforeend',
       `<br><span style="color:var(--red)">✗ 刷新失败：${esc(e.message || e)}</span>`);
@@ -459,6 +491,7 @@ function renderBlacklist() {
     const cands = res.candidates || [], cur = res.blacklist || [];
     const suggested = cands.filter(c => !c.advisory), emptyOnes = cands.filter(c => c.advisory);
     $('#blInfo').innerHTML = `学期起点 <b>${esc(res.semester_start || '?')}</b> · 课程 ${res.total_courses} 门 · 已拉黑 ${cur.length} 门<br>`
+      + `<b>拉黑 = 整门不抓</b>（陈旧 / 进不去作业栏目）。选修课不在这里，见主页「选修课」按钮。<br>`
       + `程序不会自动拉黑：勾选候选 →「加入勾选项」→ 再确认一次才生效。<br>`
       + `本页候选 <b>${suggested.length}</b> 门建议拉黑（陈旧 / 无入口）；另有 <b>${emptyOnes.length}</b> 门「暂无作业」的课，仅供你参考。`;
     const tagOf = c => c.reason === 'stale' ? '陈旧' : (c.reason === 'no-homework-entry' ? '无入口' : '暂无作业');
@@ -472,9 +505,19 @@ function renderBlacklist() {
           + `连续空课轮数：${c.empty_streak ?? 0}`
           + (c.advisory ? '\n\n⚠ 若这门课本学期还有课（有些课只在期末布置一次作业），请勿拉黑。' : '') })),
       ...cur.map(b => ({ key: String(b.lid), cand: false,
-        tag: b.reason === 'elective' ? '已拉黑·选修' : '已拉黑', name: b.name,
-        detail: `课程：${b.name}\n编号：${b.lid}\n状态：已拉黑（不抓取）\n理由：${b.reason || ''}\n说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` })),
+        tag: '已拉黑', name: b.name,
+        detail: `课程：${b.name}\n编号：${b.lid}\n状态：已拉黑（整门不抓）\n理由：${b.reason || ''}\n说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` })),
     ];
+  } else if (kind === 'elective') {
+    const cur = res.blacklist || [];
+    $('#blInfo').innerHTML = `选修课 <b>${cur.length}</b> 门 —— 这些课<b>照常抓取</b>，`
+      + `只是<b>不进班级群那条提醒</b>，进「个人小群（含选修课）」那条。<br>`
+      + `加入方式：点「加入选修课」后填课程编号（如 26543）或课程名片段（如 嵌入式），唯一匹配才生效。<br>`
+      + `勾选后点「移出勾选项」= 取消标记，这门课会重新进班级群提醒。`;
+    items = cur.map(b => ({ key: String(b.lid), cand: false, tag: '只发个人', name: b.name,
+      detail: `课程：${b.name}\n编号：${b.lid}\n`
+        + `状态：照常抓取；班级群那条会删掉它，个人小群那条保留它\n`
+        + `说明：${b.detail || ''}\n确认时间：${b.confirmed_at || ''}` }));
   } else {
     const cur = res.blacklist || [];
     $('#blInfo').innerHTML = `已屏蔽在线测试的课 ${cur.length} 门 —— 这些课的<b>作业仍然照常抓取</b>。<br>加入方式：点「加入勾选项」后在弹窗里填课程编号（如 24206，多个用空格分隔）。`;
@@ -494,13 +537,25 @@ function renderBlacklist() {
 }
 function openBlacklist(kind) {
   state.blKind = kind;
-  $('#blTitle').textContent = kind === 'course' ? '课程黑名单（整门课都不抓）' : '测试黑名单（只跳在线测试）';
+  const titles = {
+    course: '课程黑名单（整门课都不抓）',
+    test: '测试黑名单（只跳在线测试）',
+    elective: '选修课（照常抓 · 只发个人小群）',
+  };
+  $('#blTitle').textContent = titles[kind] || '课程名单';
+  // 按钮按入口切换：黑名单里不该出现"选修课"，反之亦然
+  $('#blApply').style.display = kind === 'course' ? '' : 'none';
+  $('#blElective').style.display = kind === 'elective' ? '' : 'none';
+  $('#blReload').style.display = kind === 'elective' ? 'none' : '';
+  $('#blRemove').textContent = kind === 'elective'
+    ? '移出勾选项（恢复进班级群）' : '移出勾选项（恢复抓取）';
   $('#blDetail').textContent = '点左侧条目看详情';
   $('#maskBl').classList.add('on');
   loadBlacklist();
 }
 $('#btnBlCourse').onclick = () => openBlacklist('course');
 $('#btnBlTest').onclick = () => openBlacklist('test');
+$('#btnElective').onclick = () => openBlacklist('elective');
 $('#blClose').onclick = () => { $('#maskBl').classList.remove('on'); refreshManual(); };
 $('#blReload').onclick = () => {
   // 方案 C：这里真正去平台重扫课程总表（约 10-20 秒），完成后重读候选。
@@ -532,6 +587,7 @@ function checkedKeys(cand) {
   return [...document.querySelectorAll('#blList input:checked')].filter(c => (c.dataset.cand === 'true') === cand).map(c => c.dataset.key);
 }
 $('#blApply').onclick = async () => {
+  if (state.blKind === 'elective') { alert('选修课请用「加入选修课（需确认）」按钮。'); return; }
   let lids;
   if (state.blKind === 'course') {
     lids = checkedKeys(true);
@@ -541,40 +597,51 @@ $('#blApply').onclick = async () => {
     if (!input) return;
     lids = input.split(/\s+/).filter(Boolean);
   }
-  if (!confirm(`确认把这些加入黑名单？\n\n${lids.join('、')}\n\n加入后不再抓取，可用「移出勾选项」恢复。`)) return;
+  if (!confirm(`确认把这些加入${state.blKind === 'test' ? '测试黑名单' : '黑名单'}？\n\n${lids.join('、')}\n\n`
+    + (state.blKind === 'test' ? '加入后只跳过在线测试，作业照抓。' : '加入后不再抓取，可用「移出勾选项」恢复。'))) return;
   const res = await api('/api/blacklist', { kind: state.blKind, action: 'apply', lids });
   if (res.error) { alert(res.error); return; }
-  log(`已加入黑名单 ${lids.length} 门：${lids.join(', ')}`);
+  log(`已加入${state.blKind === 'test' ? '测试黑名单' : '黑名单'} ${lids.length} 门：${lids.join(', ')}`);
   loadBlacklist();
 };
 $('#blElective').onclick = async () => {
-  // 「选修课」与候选拉黑的区别：这不是程序推导出来的证据，而是你声明
-  // 「这门课我们班里只有我（少数人）上，它的作业对全班没意义」。
-  if (state.blKind !== 'course') { alert('「选修课」只对课程黑名单有效。'); return; }
+  // 选修课：**照常抓取**，只是不进班级群那条提醒（改发个人小群那条）。
+  // 它与黑名单是两个入口，不再混在同一个弹窗里。
+  if (state.blKind !== 'elective') { alert('这个按钮只用于「选修课」弹窗。'); return; }
   const input = prompt(
-    '把哪门课标记为「选修课」？\n\n'
+    '把哪门课加入「选修课」？\n\n'
     + '· 填课程编号（如 26543），或课程名的一部分（如 嵌入式）\n'
     + '· 多个用空格分隔\n'
     + '· 唯一匹配才会生效；匹配到多门会提示你写具体些\n\n'
-    + '效果：这门课**作业与在线测试都不再抓取**（扫描时跳过），\n'
-    + '它的作业只对你个人成立，本来就不该进给全班的提醒。');
+    + '效果：这门课照常抓取（作业 + 在线测试都在），\n'
+    + '但班级群那条会删掉它，个人小群那条保留它。');
   if (!input) return;
   const tokens = input.split(/\s+/).filter(Boolean);
   if (!tokens.length) return;
-  if (!confirm(`确认把下面这些标记为「选修课」并停止抓取？\n\n${tokens.join('、')}\n\n可用「移出勾选项」恢复。`)) return;
-  const res = await api('/api/blacklist', { kind: 'course', action: 'elective', lids: tokens });
+  if (!confirm(`确认把下面这些加入「选修课」？\n\n${tokens.join('、')}\n\n`
+    + '它们会：照常抓取 / 不进班级群提醒 / 只发个人小群那条。\n\n'
+    + '可用「移出勾选项」取消标记（重新进班级群）。')) return;
+  const res = await api('/api/blacklist', { kind: 'elective', action: 'apply', lids: tokens });
   if (res.error) { alert(res.error); return; }
   const added = res.added || [], unknown = res.unknown || [];
-  if (added.length) log(`已标记为选修课 ${added.length} 门：` + added.map(a => `${a.name}(${a.lid})`).join('、'));
+  if (added.length) log(`已加入选修课 ${added.length} 门（只发个人）：` + added.map(a => `${a.name}(${a.lid})`).join('、'));
   if (unknown.length) log(`未找到匹配课程：${unknown.join('、')}（可试更具体的名称或直接用编号）`);
   loadBlacklist();
 };
 $('#blRemove').onclick = async () => {
   const lids = checkedKeys(false);
-  if (!lids.length) { alert('没有勾选任何「已拉黑 / 已屏蔽」条目。'); return; }
-  if (!confirm(`确认把 ${lids.length} 门移出黑名单（恢复抓取）？`)) return;
-  const res = await api('/api/blacklist', { kind: state.blKind, action: 'remove', lids });  if (res.error) { alert(res.error); return; }
-  log(`已移出黑名单 ${lids.length} 门：${lids.join(', ')}`);
+  if (!lids.length) { alert('没有勾选任何条目。'); return; }
+  const kind = state.blKind;
+  const words = kind === 'elective' ? '取消选修课标记（恢复进班级群）'
+    : (kind === 'test' ? '恢复抓取在线测试' : '移出黑名单（恢复抓取）');
+  if (!confirm(`确认把 ${lids.length} 门${words}？`)) return;
+  const res = await api('/api/blacklist', { kind, action: 'remove', lids });
+  if (res.error) { alert(res.error); return; }
+  const un = res.elective_removed || [];
+  const rm = res.removed || [];
+  log(`已处理 ${lids.length} 门：${lids.join(', ')}`
+    + (kind === 'elective' ? `（取消选修课标记 ${rm.length} 门）` : '')
+    + (un.length ? `（其中取消选修课标记 ${un.length} 门：${un.map(x => x.name).join('、')}）` : ''));
   loadBlacklist();
 };
 

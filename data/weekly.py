@@ -157,26 +157,37 @@ def merge_and_filter(data: dict, manual: list, days: int):
     return picked
 
 
-def format_message(items: list, days: int) -> str:
+def format_message(items: list, days: int, title: str = None,
+                   elective_lids=None) -> str:
     """推送文案（B 方案：紧迫感分级）。
 
     - 头部一行：覆盖窗口，不带「生成时间」（对同学是噪音）
     - 按「近两天 / 本周稍后」分组，组为空则整组消失
     - 倒计时精度：今天/明天直接说「今天/明天 HH:mm 截止」；
       2 天内带小时，超过 2 天只报天数（没有「0 小时」「5 天 10 小时」这类精度表演）
+
+    title / elective_lids 是 2026-10-18 加的：同一次运行要产出两份文案 ——
+      · 班级群那条：去掉选修课（标题不变）
+      · 个人小群那条：完整清单，选修课带 🎓 标记，标题「我的作业提醒（含选修课）」
     """
     now = datetime.now()
     end = now + timedelta(days=days)
-    lines = [f"📚 作业提醒 · 未来 {days} 天（至 {end:%m-%d}）", ""]
+    head = title or "📚 作业提醒"
+    lines = [f"{head} · 未来 {days} 天（至 {end:%m-%d}）", ""]
     if not items:
         lines.append("✅ 这段时间没有待交作业，安心休息。")
         return "\n".join(lines)
+
+    elec = {str(x) for x in (elective_lids or set())}
 
     def mark_of(it) -> str:
         src = it.get("source") or "platform"
         kind = it.get("kind") or ("manual" if src == "manual" else "homework")
         if src == "manual":
             return " 📌手动"
+        if str(it.get("lid") or "") in elec:
+            # 只会在个人那条里出现（班级那条已经把选修课删掉了）
+            return " 🎓选修" + (" 📝在线测试" if kind == "test" else "")
         return " 📝在线测试" if kind == "test" else ""
 
     def deadline_line(it) -> str:
@@ -298,6 +309,53 @@ def check_freshness() -> int:
     return 2 if fresh else 0
 
 
+def split_items(items: list, elective_lids) -> tuple:
+    """把待办切成两份。
+
+    班级群那条：**删掉选修课**（那门课班里多数人没上，进群就是噪音）
+    个人那条　：**完整清单**（含选修课）—— 你自己要看全部，一条不漏
+
+    只按 lid 判断（课程名会重名，不可靠）。手动条目没有 lid，一律进班级群。
+    """
+    elec = {str(x) for x in (elective_lids or set())}
+    class_items, personal_items = [], []
+    for it in items:
+        personal_items.append(it)
+        if str(it.get("lid") or "") in elec:
+            continue
+        class_items.append(it)
+    return class_items, personal_items
+
+
+def _elective_lids_from_disk(data: dict) -> set:
+    """读 electives.json；读不到就退回抓取结果里带的 electives 字段。"""
+    path = ROOT / "electives.json"
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k) for k in (d.get("courses") or {})}
+    except Exception:  # noqa: BLE001
+        return {str(x) for x in (data.get("electives") or [])}
+
+
+def send_one(text: str, audience: str, source: str = "weekly",
+             channel: str = None) -> tuple:
+    """调用 notify.py 发一条。返回 (退出码, stdout, stderr)。
+
+    audience=class  → 班级群（全部课程 − 选修课）
+    audience=personal → 个人小群（完整清单）；没配通道时 notify 会跳过并退 0
+    """
+    path = ROOT / ("last_message_personal.txt" if audience == "personal"
+                   else "last_message.txt")
+    path.write_text(text, encoding="utf-8")
+    cmd = [PY, str(ROOT / "notify.py"), "--file", str(path),
+           "--source", source, "--audience", audience]
+    if channel:
+        cmd += ["--channel", channel]
+    r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=UTF8_ENV)
+    return r.returncode, r.stdout or "", r.stderr or ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=7, help="统计未来 N 天（默认 7）")
@@ -310,6 +368,14 @@ def main() -> int:
                     help="只检查「自动任务该跑没跑」，不抓取不推送（定时任务的前置检查）")
     ap.add_argument("--alert-if-stale", action="store_true",
                     help="配合 --check-freshness：发现陈旧时发一条告警")
+    # 两条消息各自的开关：定时任务按「今天这条发过没有」精确重试，
+    # 避免一条失败被另一条的成功掩盖（账是按 audience 分开记的）。
+    ap.add_argument("--skip-class", action="store_true",
+                    help="跳过班级群那条（今天已发过时由 task_run 传入）")
+    ap.add_argument("--skip-personal", action="store_true",
+                    help="跳过个人小群那条（今天已发过时由 task_run 传入）")
+    ap.add_argument("--no-personal", action="store_true",
+                    help="完全不发个人小群那条（只想发班级群时用）")
     args = ap.parse_args()
 
     # ---- 前置检查：定时任务到底有没有在工作？（不抓取，秒回）----
@@ -401,25 +467,44 @@ def main() -> int:
     picked = merge_and_filter(data, manual, args.days)
     print(f"未来 {args.days} 天内待交：{len(picked)} 条")
 
-    msg = format_message(picked, args.days)
+    # ---- 两份文案：班级群（去选修课）/ 个人小群（完整清单）----
+    elec = _elective_lids_from_disk(data)
+    class_items, personal_items = split_items(picked, elec)
+    class_msg = format_message(class_items, args.days)
+    personal_msg = format_message(personal_items, args.days,
+                                  title="📚 我的作业提醒（含选修课）",
+                                  elective_lids=elec)
+    if elec:
+        print(f"选修课 {len(elec)} 门：班级群那条剔除 "
+              f"{len(picked) - len(class_items)} 条，个人那条保留全部 {len(personal_items)} 条")
+
     print("-" * 40)
-    print(msg)
+    print("【班级群 · 已去选修课】")
+    print(class_msg)
+    print("-" * 40)
+    print("【个人小群 · 完整清单】")
+    print(personal_msg)
     print("-" * 40)
 
     msg_file = ROOT / "last_message.txt"
-    msg_file.write_text(msg, encoding="utf-8")
+    personal_file = ROOT / "last_message_personal.txt"
+    msg_file.write_text(class_msg, encoding="utf-8")
+    personal_file.write_text(personal_msg, encoding="utf-8")
     print("已落盘:", msg_file)
+    print("已落盘:", personal_file)
 
     # 检索台账：定时任务（本脚本）也要记账，与控制台的 hub-list/publish 口径一致。
     # 这样「这周的推送到底是抓到了什么、有没有失败课程、复用了哪份数据」都有据可查。
     try:
         import fetch_log
+        _note = ("演练模式（未发送）" if args.no_send
+                 else (f"选修课 {len(elec)} 门只发个人" if elec else ""))
         fetch_log.log_fetch(
             "weekly", args.days, mode=("pool" if args.pool else "deadline-only"),
             rows=len(picked), rows_total=len(platform),
             platform=len(platform), tests=tests_n, manual=len(manual),
             elapsed=elapsed, failed_courses=warn.get("failed_courses") or [],
-            notes=("演练模式（未发送）" if args.no_send else ""),
+            notes=_note,
         )
     except Exception as e:  # noqa: BLE001
         print(f"WARN: 写检索台账失败 {e}", file=sys.stderr)
@@ -428,32 +513,53 @@ def main() -> int:
         print("演练模式：未发送。")
         return 0
 
-    cmd = [PY, str(ROOT / "notify.py"), "--file", str(msg_file), "--source", "weekly"]
-    if args.channel:
-        cmd += ["--channel", args.channel]
-    try:
-        r = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", env=UTF8_ENV,
-        )
-    except Exception as e:  # noqa: BLE001
-        text = (f"调用推送脚本时直接异常：{type(e).__name__}\n{e}\n\n"
-                r"提醒正文已生成在 data\last_message.txt，可以先手动复制到群里顶上。")
-        print("推送异常：", e, file=sys.stderr)
-        send_alert("push-crashed", "作业提醒：推送环节异常", text)
-        return 1
+    rc = 0
 
-    print(r.stdout or "", end="")
-    if r.returncode != 0:
-        text = ("推送失败，**群里没有收到本周提醒**：\n"
-                f"notify.py 退出码 {r.returncode}\n"
-                f"stderr：{(r.stderr or '').strip()[-600:] or '（无）'}\n"
-                f"stdout：{(r.stdout or '').strip()[-300:] or '（无）'}\n\n"
-                r"提醒正文在 data\last_message.txt —— 可先手动复制到群里顶上，"
-                "再排查渠道（config.json 里的 webhook / token 是否还有效）。")
-        print("推送失败:", r.stderr or "", file=sys.stderr)
-        send_alert("push-failed", "作业提醒：推送失败，群里没收到", text, level="error")
-    return r.returncode
+    # ---- 第一条：班级群（全部课程 − 选修课）----
+    if args.skip_class:
+        print("按 --skip-class 跳过班级群那条（今天已经发过了）。")
+    else:
+        try:
+            code, out, err = send_one(class_msg, "class", "weekly", args.channel)
+        except Exception as e:  # noqa: BLE001
+            text = (f"调用推送脚本时直接异常：{type(e).__name__}\n{e}\n\n"
+                    r"提醒正文已生成在 data\last_message.txt，可以先手动复制到群里顶上。")
+            print("推送异常：", e, file=sys.stderr)
+            send_alert("push-crashed", "作业提醒：推送环节异常", text)
+            return 1
+        print(out, end="")
+        if code != 0:
+            text = ("推送失败，**班级群没有收到本周提醒**：\n"
+                    f"notify.py 退出码 {code}\n"
+                    f"stderr：{err.strip()[-600:] or '（无）'}\n"
+                    f"stdout：{out.strip()[-300:] or '（无）'}\n\n"
+                    r"提醒正文在 data\last_message.txt —— 可先手动复制到群里顶上，"
+                    "再排查渠道（config.json 里的 webhook / token 是否还有效）。")
+            print("推送失败:", err, file=sys.stderr)
+            send_alert("push-failed", "作业提醒：推送失败，班级群没收到", text, level="error")
+            rc = code
+
+    # ---- 第二条：个人小群（完整清单，含选修课）----
+    if args.no_personal:
+        print("按 --no-personal 跳过个人那条。")
+    elif args.skip_personal:
+        print("按 --skip-personal 跳过个人那条（今天已经发过了）。")
+    else:
+        try:
+            code2, out2, err2 = send_one(personal_msg, "personal", "weekly", None)
+        except Exception as e:  # noqa: BLE001
+            print(f"个人推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+            code2, out2, err2 = 1, "", f"{type(e).__name__}: {e}"
+        print(out2, end="")
+        if code2 != 0:
+            send_alert("personal-push-failed", "作业提醒：个人小群那条没发出去",
+                       "个人（含选修课）那条推送失败，班级群那条不受影响。\n"
+                       f"notify.py 退出码 {code2}\n"
+                       f"stderr：{err2.strip()[-500:] or '（无）'}\n\n"
+                       r"正文在 data\last_message_personal.txt；"
+                       "检查 config.json 的 personal.wecom_webhook。", level="error")
+            rc = rc or code2
+    return rc
 
 
 if __name__ == "__main__":

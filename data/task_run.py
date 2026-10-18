@@ -91,17 +91,34 @@ def mask(hook: str) -> str:
     return ("…" + hook[-8:]) if len(hook) > 8 else "(空)"
 
 
-def already_pushed_today(target_time: str) -> tuple:
-    """今天（日历日）是否已经成功把提醒推到群里。返回 (是否已推, 说明)。"""
+def push_status_today(cfg: dict) -> dict:
+    """今天两条消息各自推成功没有。
+
+    audience=class    → 班级群（全部课程 − 选修课）
+    audience=personal → 个人小群（完整清单，含选修课）
+
+    为什么要分开查：两条是两件事。班级群发成功了不代表个人那条也发成功；
+    只看一条会出现「一条失败被另一条掩盖」—— 重试被幂等闸挡住，
+    缺的那条就永远补不上了。
+    """
+    st = {"class": False, "personal": False, "personal_enabled": False}
     try:
         import alert
+        import notify as _n
+        st["personal_enabled"] = _n.personal_ready(cfg)[0]
+        recs = alert._push_records()
     except Exception as e:  # noqa: BLE001
-        return False, f"无法导入 alert.py（{e}）"
-    try:
-        status, why, _ev = alert.weekly_due(datetime.now(), target_time=target_time)
-    except Exception as e:  # noqa: BLE001
-        return False, f"判定失败（{e}）"
-    return status == "done", why
+        print(f"WARN: 幂等闸判定失败（{e}），本次照常执行", file=sys.stderr)
+        return st
+    today = datetime.now().date()
+    for r in recs:
+        dt = alert._parse_time(r.get("time"))
+        if not dt or dt.date() != today:
+            continue
+        aud = (r.get("audience") or "class").lower()
+        if aud in st:
+            st[aud] = True
+    return st
 
 
 def main() -> int:
@@ -130,22 +147,35 @@ def main() -> int:
 
     cfg = notify.load_config()
 
-    # ---- 幂等闸：今天已经成功推过群，就立刻退出 ----
+    # ---- 幂等闸：今天两条都发过了，才秒退 ----
     # 为什么必须有（2026-10-18 的实际缺口）：
     #   09:00 那一刻电脑可能刚开机、还停在登录界面，交互式任务起不来，
     #   Windows 记成「错过一次」且**不会**在登录后自动补跑 → 整周静默。
     #   对策是把 Weekly 触发器改成「09:00 起每 10 分钟重试，持续 2 小时」，
-    #   代价是同一天会被触发多次。所以真正的第一件事必须是问一句：
-    #   「今天已经发出去了吗？」是 -> 秒退，绝不重复打扰班上同学。
+    #   代价是同一天会被触发多次。所以第一件事必须是问一句：
+    #   「今天已经发出去了吗？」是 -> 秒退，绝不重复打扰群里。
+    #
+    # 2026-10-18 之后多了一条消息（个人小群），所以判定分两半：
+    #   · 班级群已发 + 个人已发（或没启用个人通道）→ 秒退
+    #   · 只缺其中一条 → 照常跑，但让 weekly 跳过已发的那条（--skip-class / --skip-personal）
+    weekly_flags = []
     if not args.dry_run and args.channel == "wecom" and not args.force:
-        done, why = already_pushed_today(args.target_time)
-        if done:
-            log_line("[task_run] 今天已经成功推送过 —— 本次跳过，不重复打扰群。")
-            log_line(f"[task_run] 证据：{why}")
+        st = push_status_today(cfg)
+        personal_ok = st["personal"] or not st["personal_enabled"]
+        if st["class"] and personal_ok:
+            log_line("[task_run] 今天两条都已成功推送 —— 本次跳过，不重复打扰群。")
+            log_line(f"[task_run] 证据：班级群已发={st['class']}，"
+                     f"个人小群已发={st['personal']}（启用={st['personal_enabled']}）")
             log_task(kind=args.kind, ok=True, skipped=True, exit_code=0,
                      elapsed_sec=round(time.time() - t0, 1), wecom=args.wecom,
                      reason="already-pushed-today")
             return 0
+        if st["class"]:
+            log_line("[task_run] 班级群今天已发过；这次只补发「个人小群（含选修课）」那条。")
+            weekly_flags.append("--skip-class")
+        if st["personal"]:
+            log_line("[task_run] 个人小群今天已发过；这次只补发班级群那条。")
+            weekly_flags.append("--skip-personal")
 
     # ---- 决定目标群 ----
     # config（默认）：跟随 config.json 的 wecom_webhook —— 你在那里放哪个群就发哪个群，
@@ -180,6 +210,7 @@ def main() -> int:
     cmd = [sys.executable, str(ROOT / "weekly.py"), "--days", str(args.days)]
     if args.dry_run:
         cmd.append("--no-send")
+    cmd += weekly_flags
     log_line("[task_run] 执行：" + " ".join(cmd))
     r = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy(),
                        capture_output=True, text=True,

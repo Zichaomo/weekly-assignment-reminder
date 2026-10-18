@@ -437,6 +437,66 @@ def blacklisted_lids() -> set:
     return set(load_blacklist().get("courses", {}).keys())
 
 
+# ---------------------------------------------------------------- 选修课
+# 语义（2026-10-18 改写）：选修课**不是**黑名单。
+#   课要照抓（你要交），只是「班级群那条提醒」里删掉它、
+#   「发给你个人 / 选修课小群那条」里保留它。
+# 旧实现沿用黑名单的 reason=elective（等于整门不抓），结果连你自己的提醒
+# 也一起没了 —— 与需求正好相反。所以拆成独立文件：
+#   黑名单 = 不抓；选修课 = 换受众（照抓，但不发给班级群）。
+ELECTIVES_FILE = ROOT / "electives.json"
+
+
+def save_electives(data: dict) -> None:
+    data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    ELECTIVES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _migrate_electives_from_blacklist(elec: dict) -> int:
+    """把旧版写在黑名单里的 reason=elective 条目搬到 electives.json。
+
+    不迁移的话，这些课会继续被黑名单跳过 —— 界面上显示「选修课」，
+    却依然收不到它的任何提醒，症状是「标记了反而更没消息了」。
+    """
+    bl = load_blacklist()
+    courses = bl.get("courses") or {}
+    moved = 0
+    for lid, v in list(courses.items()):
+        if v.get("reason") != "elective":
+            continue
+        elec.setdefault("courses", {}).setdefault(lid, {
+            "name": v.get("name"),
+            "detail": "选修课（照常抓取，只发给个人小群，不进班级群提醒）",
+            "confirmed_at": v.get("confirmed_at"),
+            "confirmed_by": v.get("confirmed_by", "human"),
+        })
+        courses.pop(lid, None)
+        moved += 1
+    if moved:
+        save_blacklist(bl)
+    return moved
+
+
+def load_electives() -> dict:
+    """读选修课名单。结构 {updated_at, courses:{lid:{name,detail,confirmed_at,confirmed_by}}}。"""
+    data = {"updated_at": None, "courses": {}}
+    if ELECTIVES_FILE.exists():
+        try:
+            data = json.loads(ELECTIVES_FILE.read_text(encoding="utf-8"))
+            data.setdefault("courses", {})
+        except Exception:  # noqa: BLE001
+            data = {"updated_at": None, "courses": {}}
+    if _migrate_electives_from_blacklist(data):
+        save_electives(data)
+    return data
+
+
+def elective_lids() -> set:
+    """选修课的 lid 集合：这些课照抓，但只进「个人」那条提醒。"""
+    return set(load_electives().get("courses", {}).keys())
+
+
+
 def load_index_meta() -> dict:
     """读 courses.json 里的每课元数据（失败次数 / 最近作业时间）。"""
     if not COURSES_FILE.exists():
@@ -515,9 +575,11 @@ def update_index_meta(per_course: list, now=None) -> dict:
     # 本次没扫到的课保留原元数据（别丢历史）
     sem_start = _semester_start(now)
     bl = blacklisted_lids()
+    elec = elective_lids()
     candidates = []
     for lid, m in meta.items():
-        if lid in bl:
+        if lid in bl or lid in elec:
+            # 选修课是你明确要跟的课，不该再被列为"建议拉黑"候选（拉黑=连个人提醒也没了）
             continue
         lh = m.get("last_homework")
         lh_dt = None
@@ -959,6 +1021,9 @@ def build_blacklist_candidates(now=None) -> dict:
     now = now or datetime.now()
     sem_start = _semester_start(now)
     meta = load_index_meta()
+    # 先读选修课：它会把旧版写在黑名单里的 reason=elective 迁出去，
+    # 所以必须排在读黑名单之前，否则这里拿到的还是一份「选修课仍在黑名单里」的旧数据。
+    elec = elective_lids()
     bl = load_blacklist().get("courses", {})
     index = load_course_index()
 
@@ -990,13 +1055,14 @@ def build_blacklist_candidates(now=None) -> dict:
             "lid": lid,
             "course": name,
             "blacklisted": lid in bl,
+            "elective": lid in elec,
             "last_homework": lh,
             "fail_streak": max(int(m.get("fail_streak", 0)), int(sc.get("fail_streak", 0))),
             "empty_streak": max(int(m.get("empty_streak", 0)), int(sc.get("empty_streak", 0))),
             "last_error": m.get("last_error") or sc.get("last_error"),
             "from": "scan" if sc else "meta",
         }
-        if lid in bl:
+        if lid in bl or lid in elec:
             continue
         if lh_dt is not None and lh_dt < sem_start:
             entry["reason"] = "stale"
@@ -1021,11 +1087,17 @@ def build_blacklist_candidates(now=None) -> dict:
             candidates.append(entry)
         else:
             kept.append(entry)
+    for c in candidates:
+        if c.get("elective"):
+            # 拉黑 = 完全不抓；选修课标记 = 只发个人。两者叠加会把"个人那条"也一起消掉。
+            c["detail"] = (c.get("detail") or "") + \
+                "；⚠️ 这门课已标记为选修课，拉黑后连「个人小群那条」也不会再有"
     candidates.sort(key=lambda c: (bool(c.get("advisory")), c.get("last_homework") or ""))
     return {
         "semester_start": sem_start.strftime("%Y-%m-%d"),
         "candidates": candidates,
         "blacklist": bl,
+        "electives": elec,
         "total_courses": len(index),
     }
 
@@ -1132,7 +1204,8 @@ def _blacklist_cli(args) -> int:
         suggested = [c for c in cands if not c.get("advisory")]
         advisory = [c for c in cands if c.get("advisory")]
         print(f"学期起点 = {info['semester_start']} | 课程总数 = {info['total_courses']} "
-              f"| 已拉黑 = {len(bl)} | 建议拉黑 {len(suggested)} 门 "
+              f"| 已拉黑 = {len(bl)} | 选修课（只发个人）= {len(info.get('electives') or {})} "
+              f"| 建议拉黑 {len(suggested)} 门 "
               f"| 仅供参考（暂无作业）{len(advisory)} 门")
         print()
         print("【建议拉黑】确认后才会生效（往学期的课 / 进不去作业栏目）：")
@@ -1150,29 +1223,32 @@ def _blacklist_cli(args) -> int:
             print("  （无）")
         print()
         print("【已拉黑】扫描时跳过：")
-        LBL = {"elective": "选修课", "stale": "陈旧", "no-homework-entry": "无入口",
+        LBL = {"stale": "陈旧", "no-homework-entry": "无入口",
                "no-homework-yet": "暂无作业", "manual": "手动"}
-        electives = [(lid, v) for lid, v in bl.items() if v.get("reason") == "elective"]
-        others = [(lid, v) for lid, v in bl.items() if v.get("reason") != "elective"]
-        for lid, v in electives:
-            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} "
-                  f"【选修课】每人选课不同，作业不影响全班")
-        for lid, v in others:
+        for lid, v in bl.items():
             reason = v.get("reason", "")
             print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} "
                   f"{LBL.get(reason, reason):8s} 确认于 {v.get('confirmed_at', '?')}")
+        if not bl:
+            print("  （无）")
+        elec = load_electives().get("courses", {})
+        print()
+        print(f"【选修课】照常抓取，但**只发给个人小群**，不进班级群提醒（{len(elec)} 门）：")
+        for lid, v in elec.items():
+            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} 确认于 {v.get('confirmed_at', '?')}")
+        if not elec:
+            print("  （无）")
         print()
         print("确认：python scrape.py --blacklist-confirm <lid> ...  （或 all-candidates）")
-        print("选修：python scrape.py --blacklist-elective <lid 或 课程名片段> ...")
+        print("选修：python scrape.py --blacklist-elective <lid 或 课程名片段> ...  （只发个人）")
         print("移除：python scrape.py --blacklist-remove <lid> ...  （或 all）")
+        print("退选：python scrape.py --elective-remove <lid> ...  （或 all，恢复进班级群）")
         return 0
 
     if args.blacklist_elective:
-        # 「选修课」：每人选的课不一样，班里多数人根本没上这门课 ——
-        # 它的作业只对你个人成立，放进群提醒就是纯噪音。
-        # 与 stale/no-homework-entry 的区别：那两类是"这课本学期没作业"，
-        # 选修课是"这门课跟我们班无关"，理由不同，界面上也要能分开看。
-        data = load_blacklist()
+        # 「选修课」= 换受众：课照抓，但班级群那条删掉、个人小群那条保留。
+        # 它和黑名单是两个维度，所以写进 electives.json 而不是 course_blacklist.json。
+        data = load_electives()
         added, unknown = [], []
         for token in args.blacklist_elective:
             lid = resolve_lid(token, index)
@@ -1183,24 +1259,50 @@ def _blacklist_cli(args) -> int:
                 continue
             data["courses"][lid] = {
                 "name": index[lid],
-                "reason": "elective",
-                "detail": "选修课（每人选课不同，作业不影响全班）",
-                "last_homework": None,
+                "detail": "选修课（照常抓取，只发给个人小群，不进班级群提醒）",
                 "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "confirmed_by": "human",
             }
             added.append(lid)
-        save_blacklist(data)
+        save_electives(data)
         if added:
-            print(f"已按「选修课」拉黑 {len(added)} 门（扫描时跳过）：")
+            print(f"已标记为选修课 {len(added)} 门（照常抓取；班级群那条会删掉它）：")
             for lid in added:
                 print(f"  [{lid}] {index[lid]}")
         else:
-            print("没有新增（可能已在黑名单里）。")
+            print("没有新增（可能已是选修课）。")
         if unknown:
             print(f"未找到匹配课程：{', '.join(unknown)}", file=sys.stderr)
             print("提示：可以给 lid，也可以给课程名的一部分，例如 --blacklist-elective 嵌入式",
                   file=sys.stderr)
+        return 0
+
+    if getattr(args, "elective_list", False):
+        elec = load_electives().get("courses", {})
+        print(f"【选修课】{len(elec)} 门（照常抓取，只发给个人小群）：")
+        for lid, v in elec.items():
+            print(f"  [{lid}] {v.get('name', index.get(lid, '?')):32s} 确认于 {v.get('confirmed_at', '?')}")
+        if not elec:
+            print("  （无）")
+        return 0
+
+    if getattr(args, "elective_remove", None):
+        data = load_electives()
+        if "all" in args.elective_remove:
+            n = len(data["courses"])
+            data["courses"] = {}
+            save_electives(data)
+            print(f"已清空选修课名单（{n} 门），这些课恢复进班级群提醒。")
+            return 0
+        removed = []
+        for lid in args.elective_remove:
+            lid = str(lid)
+            if lid in data["courses"]:
+                removed.append(f"[{lid}] {data['courses'][lid].get('name', '?')}")
+                data["courses"].pop(lid)
+        save_electives(data)
+        print(f"已取消选修课标记 {len(removed)} 门（恢复进班级群提醒）："
+              + ("；".join(removed) if removed else "（无匹配）"))
         return 0
 
     if args.blacklist_confirm:
@@ -1287,9 +1389,13 @@ def main():
     ap.add_argument("--blacklist-remove", nargs="+", metavar="LID",
                     help="把指定课程移出黑名单（可多个 lid，或用 all）")
     ap.add_argument("--blacklist-elective", nargs="+", metavar="LID_OR_NAME",
-                    help="按「选修课」拉黑：每人选的课不同，这门课的作业对全班没意义。"
-                         "可给 lid 或课程名的一部分（唯一匹配时生效），"
+                    help="标记为「选修课」：课照常抓，但班级群那条提醒里删掉它、"
+                         "个人小群那条保留它。可给 lid 或课程名的一部分（唯一匹配时生效），"
                          "例如 --blacklist-elective 嵌入式")
+    ap.add_argument("--elective-list", action="store_true",
+                    help="列出「选修课」名单（照抓、只发个人；只读）")
+    ap.add_argument("--elective-remove", nargs="+", metavar="LID",
+                    help="取消选修课标记（恢复进班级群提醒，可多个 lid 或用 all）")
     ap.add_argument("--test-blacklist-list", action="store_true",
                     help="列出「仅屏蔽在线测试」的课程（作业仍照常搜）")
     ap.add_argument("--test-blacklist-add", nargs="+", metavar="LID",
@@ -1300,7 +1406,7 @@ def main():
 
     # --- 黑名单命令（纯本地，不需要浏览器）---
     if (args.blacklist_list or args.blacklist_confirm or args.blacklist_remove
-            or args.blacklist_elective
+            or args.blacklist_elective or args.elective_list or args.elective_remove
             or args.test_blacklist_list or args.test_blacklist_add
             or args.test_blacklist_remove):
         return _blacklist_cli(args)
@@ -1397,8 +1503,11 @@ def _run_scan(args):
             bl = blacklisted_lids()
             bl_names = {v.get("name") for v in load_blacklist().get("courses", {}).values()}
             tbl = test_blacklisted_lids() if do_tests else set()
+            # 选修课**不跳过**：课要照抓（你可能要交），只是不进班级群那条提醒。
+            elec = elective_lids()
             print(f"全量扫描开始（课程索引 {len(load_course_index())} 门，"
                   f"黑名单跳过 {len(bl)} 门"
+                  + (f"，选修课 {len(elec)} 门照抓（只发个人）" if elec else "")
                   + (f"，仅屏蔽在线测试 {len(tbl)} 门" if tbl else "") + "）...", file=sys.stderr)
             _t = time.time()
             # 一次进课程页把「课程作业 + 在线测试」都取下来（比两轮扫描省近一半时间）
@@ -1637,6 +1746,9 @@ def _run_scan(args):
             "courses": courses,
             "homeworks": homeworks,
             "tests": tests,
+            # 选修课 lid：让上层（weekly/hub）能把「班级群那条」里的这些课删掉，
+            # 同时保留在「个人小群那条」里。抓取本身不会被它们影响。
+            "electives": sorted(elective_lids()),
             "per_course": [{k: v for k, v in p.items() if not k.startswith("_")} for p in per_course],
             "warnings": {
                 "zero_homework_courses": zero,

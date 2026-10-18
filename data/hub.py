@@ -81,6 +81,7 @@ def build_rows(platform_hw: list, manual_items: list, days: int) -> list:
         rows.append({
             "source": "平台",
             "kind": kind,
+            "lid": hw.get("lid"),
             "course": hw.get("course", ""),
             "title": hw.get("title", ""),
             "deadline": hw.get("deadline", ""),
@@ -164,6 +165,15 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
             error = f"北化在线抓取失败（会话可能过期，请运行 login.py）：{e}"
     manual_items = load_manual_raw()
     rows = build_rows(platform_hw, manual_items, days)
+    # 给每行打上「是不是选修课」：界面据此显示徽标，也据此知道
+    # 这行不会出现在班级群那条提醒里（只出现在个人小群那条）。
+    try:
+        import scrape
+        _elec = scrape.elective_lids()
+    except Exception:  # noqa: BLE001
+        _elec = set()
+    for r in rows:
+        r["elective"] = bool(r.get("lid") and str(r["lid"]) in _elec)
     out = {
         "ok": error is None,
         "error": error,
@@ -268,8 +278,18 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
 
     manual = weekly.load_manual()
     picked = weekly.merge_and_filter(data, manual, days)
-    msg = weekly.format_message(picked, days)
+
+    # 两份文案：班级群（去选修课）/ 个人小群（完整清单）。
+    # 与定时任务走的是同一段逻辑（weekly.split_items / format_message），
+    # 绝不在这里另写一套筛选规则。
+    elec = weekly._elective_lids_from_disk(data)
+    class_items, personal_items = weekly.split_items(picked, elec)
+    msg = weekly.format_message(class_items, days)
+    msg_personal = weekly.format_message(personal_items, days,
+                                         title="📚 我的作业提醒（含选修课）",
+                                         elective_lids=elec)
     (ROOT / "last_message.txt").write_text(msg, encoding="utf-8")
+    (ROOT / "last_message_personal.txt").write_text(msg_personal, encoding="utf-8")
 
     # 检索台账：预览/发布走的是同一段抓取，也要记账（区分是预览还是发布）
     _src = ("hub-preview" if no_send else "hub-publish")
@@ -282,12 +302,17 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
               manual=len(manual), elapsed=_el, cached=_cached,
               data_age=(prefetched_age_sec if _cached else None),
               failed_courses=_fw,
-              notes=("复用缓存" if _cached else "重新抓取"))
+              notes=(("复用缓存" if _cached else "重新抓取")
+                     + (f"；选修课 {len(elec)} 门只发个人" if elec else "")))
 
     if no_send:
         out = {
-            "ok": True, "sent": False, "message": msg,
-            "count": len(picked), "channel": channel or "默认",
+            "ok": True, "sent": False,
+            "message": msg,                    # 班级群那条（已去选修课）
+            "message_personal": msg_personal,  # 个人小群那条（完整清单）
+            "count": len(class_items), "count_personal": len(personal_items),
+            "elective_count": len(elec),
+            "channel": channel or "默认",
         }
         out.update(_data_source_fields(data_source, prefetched_age_sec))
         # 带上本次抓取的原始数据（若为复用则为 None），供 server 写缓存
@@ -310,7 +335,9 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         notify.log_push("hub", ch, msg, True, note="duplicate-skipped", target=target)
         return {
             "ok": True, "sent": False, "deduped": True, "note": note,
-            "message": msg, "count": len(picked), "channel": ch,
+            "message": msg, "message_personal": msg_personal,
+            "count": len(class_items), "count_personal": len(personal_items),
+            "channel": ch,
         }
 
     try:
@@ -321,9 +348,40 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         return {"ok": False, "error": f"推送异常：{e}", "message": msg}
     notify.log_push("hub", ch, msg, sent,
                     note="" if sent else "send-failed", target=target)
+
+    # 个人小群那条：可选通道，失败不影响班级群那条（两者各自记账）
+    personal = {"ok": True, "skipped": True, "note": "未启用"}
+    pready, pwhy = notify.personal_ready(cfg)
+    if pready:
+        p_ch = notify.personal_cfg(cfg)["channel"]
+        p_target = notify.dedup_target(p_ch, cfg, "personal")
+        p_dup = notify.recent_duplicate(msg_personal, window, p_target)
+        if p_dup:
+            personal = {"ok": True, "sent": False, "deduped": True,
+                        "note": f"{window} 秒内已向个人小群推过相同内容，已跳过"}
+        else:
+            try:
+                p_sent = notify.dispatch(msg_personal, p_ch, cfg, audience="personal")
+                notify.log_push("hub", p_ch, msg_personal, p_sent,
+                                note="" if p_sent else "send-failed",
+                                target=p_target, audience="personal")
+                personal = {"ok": p_sent, "sent": p_sent, "channel": p_ch,
+                            "count": len(personal_items),
+                            "note": "" if p_sent else "推送失败"}
+            except Exception as e:  # noqa: BLE001
+                notify.log_push("hub", p_ch, msg_personal, False,
+                                note=f"exception:{type(e).__name__}",
+                                target=p_target, audience="personal")
+                personal = {"ok": False, "sent": False, "error": f"推送异常：{e}"}
+    else:
+        personal = {"ok": True, "skipped": True, "note": pwhy}
+
     out = {
         "ok": sent, "sent": sent, "message": msg,
-        "count": len(picked), "channel": ch,
+        "message_personal": msg_personal,
+        "count": len(class_items), "count_personal": len(personal_items),
+        "elective_count": len(elec),
+        "channel": ch, "personal": personal,
     }
     out.update(_data_source_fields(data_source, prefetched_age_sec))
     out["_payload"] = _reuse_payload
@@ -333,7 +391,12 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
 
 
 def run_blacklist_list():
-    """列出黑名单与建议候选（只读）。"""
+    """列出黑名单、选修课与建议候选（只读）。
+
+    两件事要分开看，否则会互相误导：
+      blacklist —— 不抓（整门课都不再扫描）
+      electives —— 照抓，只是不进班级群那条提醒（发个人小群）
+    """
     import scrape
     info = scrape.build_blacklist_candidates()
     return {
@@ -345,6 +408,11 @@ def run_blacklist_list():
             {"lid": lid, "name": v.get("name"), "reason": v.get("reason"),
              "detail": v.get("detail"), "confirmed_at": v.get("confirmed_at")}
             for lid, v in (info["blacklist"] or {}).items()
+        ],
+        "electives": [
+            {"lid": lid, "name": v.get("name"), "detail": v.get("detail"),
+             "confirmed_at": v.get("confirmed_at")}
+            for lid, v in (scrape.load_electives().get("courses") or {}).items()
         ],
     }
 
@@ -379,17 +447,18 @@ def run_blacklist_apply(lids, reason="manual"):
 
 
 def run_blacklist_elective(tokens):
-    """按「选修课」拉黑：每人选的课不同，这门课的作业对全班没意义。
+    """把课程标记为「选修课」：照常抓取，但**不进班级群提醒**，只发个人小群。
 
-    与候选确认的区别：候选是程序按证据推导的（陈旧 / 无入口 / 暂无作业），
-    而选修课是**用户主观声明**「这门课只有我（少数人）上」，跟作业有没有、早不早无关。
-    所以单独一个入口，reason 记 elective，界面上也能分开看。
+    与黑名单的区别（2026-10-18 改写）：
+      黑名单 = 完全不抓（这门课跟我无关 / 已结课）
+      选修课 = 照抓，只是受众不同（班里多数人没上这门课）
+    所以它写 electives.json，而不是 course_blacklist.json。
 
     tokens 可以是 lid，也可以是课程名的一部分（唯一匹配时才生效）。
     """
     import scrape
     index = scrape.load_course_index()
-    data = scrape.load_blacklist()
+    data = scrape.load_electives()
     added, unknown = [], []
     for token in tokens:
         lid = scrape.resolve_lid(str(token), index)
@@ -400,19 +469,61 @@ def run_blacklist_elective(tokens):
             continue
         data["courses"][lid] = {
             "name": index[lid],
-            "reason": "elective",
-            "detail": "选修课（每人选课不同，作业不影响全班）",
-            "last_homework": None,
+            "detail": "选修课（照常抓取，只发给个人小群，不进班级群提醒）",
             "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "confirmed_by": "human",
         }
         added.append({"lid": lid, "name": index[lid]})
-    scrape.save_blacklist(data)
+    scrape.save_electives(data)
     return {"ok": True, "added": added, "unknown": unknown,
             "total": len(data["courses"])}
 
 
+def run_elective_list():
+    """列出「选修课」（照抓，只发个人小群）。
+
+    独立成一块，不再混进黑名单列表 —— 两者是不同维度：
+    黑名单=不抓，选修课=换受众。混在一起会让人以为"标了选修就等于不抓"。
+    """
+    import scrape
+    elec = scrape.load_electives().get("courses", {})
+    return {
+        "ok": True,
+        "total": len(elec),
+        "electives": [
+            {"lid": lid, "name": v.get("name"), "detail": v.get("detail"),
+             "confirmed_at": v.get("confirmed_at")}
+            for lid, v in elec.items()
+        ],
+        # 兼容前端统一渲染：沿用 blacklist 这个键名
+        "blacklist": [
+            {"lid": lid, "name": v.get("name"), "detail": v.get("detail"),
+             "confirmed_at": v.get("confirmed_at")}
+            for lid, v in elec.items()
+        ],
+    }
+
+
+def run_elective_remove(lids):
+    """取消选修课标记（恢复进班级群提醒）。"""
+    import scrape
+    elec = scrape.load_electives()
+    removed = []
+    for lid in lids:
+        lid = str(lid)
+        if lid in (elec.get("courses") or {}):
+            removed.append({"lid": lid, "name": elec["courses"][lid].get("name")})
+            elec["courses"].pop(lid)
+    scrape.save_electives(elec)
+    return {"ok": True, "removed": removed, "total": len(elec["courses"])}
+
+
 def run_blacklist_remove(lids):
+    """把课程从黑名单移出 —— 若它同时是「选修课」，连那个标记一起取消。
+
+    界面上的「移出勾选项（恢复抓取）」语义是「这门课回到正常状态」，
+    两个名单各留一半只会让人下次更困惑。
+    """
     import scrape
     data = scrape.load_blacklist()
     removed = []
@@ -422,7 +533,18 @@ def run_blacklist_remove(lids):
             removed.append({"lid": lid, "name": data["courses"][lid].get("name")})
             data["courses"].pop(lid)
     scrape.save_blacklist(data)
-    return {"ok": True, "removed": removed, "total": len(data["courses"])}
+
+    elec = scrape.load_electives()
+    unmarked = []
+    for lid in lids:
+        lid = str(lid)
+        if lid in (elec.get("courses") or {}):
+            unmarked.append({"lid": lid, "name": elec["courses"][lid].get("name")})
+            elec["courses"].pop(lid)
+    if unmarked:
+        scrape.save_electives(elec)
+    return {"ok": True, "removed": removed, "elective_removed": unmarked,
+            "total": len(data["courses"])}
 
 
 # ---------------------------------------------------------------- 测试黑名单

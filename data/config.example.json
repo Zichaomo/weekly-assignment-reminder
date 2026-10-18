@@ -24,6 +24,15 @@
   "notify_title": "北化在线作业提醒",
   "_dedup": "去重窗口（秒）：窗口内已向同一目标推过完全相同的内容则跳过，防止连点两次重复打扰。设 0 关闭",
   "dedup_window_sec": 300,
+  "_personal": "【个人那条】班级群那条会删掉选修课；这条是完整清单（含选修课）。典型配置=建一个「选修课小群」机器人，把 webhook 填在下面。留空则只发班级群那条",
+  "personal": {
+    "enabled": true,
+    "channel": "wecom",
+    "wecom_webhook": "",
+    "_pushplus": "channel 改成 pushplus 时用它；留空则复用上面的 pushplus_token",
+    "pushplus_token": "",
+    "notify_title": "我的作业提醒（含选修课）"
+  },
   "_alert": "失败告警：作业提醒是发给同学的，告警是发给你自己的，两者必须分开配。默认 local（本机通知 + 落盘），不打扰任何群",
   "alert": {
     "_channel": "local=本机通知(推荐) / wecom_test=企业微信测试群(用上面的 wecom_webhook) / wecom_prod=正式班级群(慎用) / pushplus / clipboard / none",
