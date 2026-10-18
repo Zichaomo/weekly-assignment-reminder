@@ -441,6 +441,10 @@ class Handler(BaseHTTPRequestHandler):
             days = 9999 if q.get("all", ["0"])[0] == "1" else int(q.get("days", ["7"])[0])
             return self._send(200, capture_json(hub.run_list, days, False))
 
+        if path == "/api/courses":
+            # 课程目录：选修课联想补全 / 全部课程清单 / 黑名单候选都读它
+            return self._send(200, hub.run_courses())
+
         if path == "/api/blacklist":
             kind = q.get("kind", ["course"])[0]
             if kind == "course":

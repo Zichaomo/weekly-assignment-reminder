@@ -390,6 +390,56 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     return out
 
 
+def run_courses():
+    """课程目录：全部课程 + 三个名单状态 + 本学期有无作业。
+
+    用途（2026-10-18）：界面上「临时想不起这门课叫什么」时的唯一数据源 ——
+      选修课弹窗的输入联想（datalist）与「全部课程」清单，
+      黑名单/测试黑名单弹窗的左栏候选，都用它。
+
+    为什么必须带 lid：课程名会重名（「形势与政策（I）」有 3 个 lid、
+    「C语言程序设计」有 2 个），只显示名字必然选错课。
+    """
+    import scrape
+    idx = scrape.load_course_index()
+    bl = set((scrape.load_blacklist().get("courses") or {}).keys())
+    elec = set((scrape.load_electives().get("courses") or {}).keys())
+    tbl = set((scrape.load_test_blacklist().get("courses") or {}).keys())
+    meta = scrape.load_index_meta()
+    try:
+        sem_start = scrape._semester_start().strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        sem_start = ""
+
+    rows = []
+    for lid, name in idx.items():
+        m = meta.get(lid) or {}
+        lh = m.get("last_homework")
+        current = bool(lh and sem_start and lh[:10] >= sem_start)
+        rows.append({
+            "lid": str(lid),
+            "name": name,
+            "last_homework": lh,
+            "current": current,          # 本学期有没有作业记录
+            "blacklisted": str(lid) in bl,
+            "elective": str(lid) in elec,
+            "test_blacklisted": str(lid) in tbl,
+            # 排序用：本学期有作业在前，其次有历史作业，最后是从没抓到过的
+            "_r": 0 if current else (1 if lh else 2),
+        })
+    rows.sort(key=lambda r: (r["_r"], "" if not r["last_homework"] else
+                             "".join(chr(0xFFFF - ord(c)) for c in r["last_homework"]),
+                             r["name"]))
+    for r in rows:
+        r.pop("_r", None)
+    return {
+        "ok": True,
+        "semester_start": sem_start,
+        "total": len(rows),
+        "courses": rows,
+    }
+
+
 def run_blacklist_list():
     """列出黑名单、选修课与建议候选（只读）。
 
