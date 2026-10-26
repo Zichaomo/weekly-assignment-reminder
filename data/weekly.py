@@ -25,6 +25,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import cache_store
+
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
 
@@ -264,6 +266,44 @@ def ensure_login() -> bool:
     return False
 
 
+def load_fresh_publish_cache():
+    """Return (payload, coverage) only for a strict, complete 5-minute cache."""
+    try:
+        import scrape
+        index = scrape.load_course_index()
+        blocked = scrape.blacklisted_lids()
+        expected = [str(lid) for lid in index if str(lid) not in blocked]
+        index_version = cache_store.version_hash(index) if index else ""
+        tests_blocked = scrape.test_blacklisted_lids()
+        settings = cache_store.cache_settings()
+        cov = cache_store.coverage(
+            expected_lids=expected, tests_requested=True,
+            tests_blocked_lids=tests_blocked,
+            current_index_version=index_version,
+            max_age_sec=settings["publish_fresh_sec"])
+        if not cov.get("publishable"):
+            return None, cov
+        items = cache_store.load_items(
+            exclude_lids=blocked,
+            exclude_test_lids=scrape.test_blacklisted_lids())
+        homeworks = [x for x in items if x.get("kind") != "test"]
+        tests = [x for x in items if x.get("kind") == "test"]
+        payload = {
+            "ok": True, "homeworks": homeworks, "tests": tests,
+            "per_course": [],
+            "warnings": {"failed_courses": list(cov.get("failed_courses") or []),
+                         "zero_homework_courses": []},
+            "sweep": {"courses_total": cov.get("expected_courses", 0)},
+            "_from_cache": True, "_cache_age_sec": cov.get("age_sec") or 0,
+            "_cache_updated_at": cov.get("updated_at"),
+            "_elapsed_sec": 0,
+        }
+        return payload, cov
+    except Exception as exc:  # noqa: BLE001
+        return None, {"publishable": False, "publish_block_reasons": [
+            f"读取缓存失败：{type(exc).__name__}: {exc}"]}
+
+
 # ---------------------------------------------------------------- 失败告警
 def send_alert(kind: str, title: str, detail: str, level: str = "error",
                no_dedup: bool = False) -> bool:
@@ -395,28 +435,40 @@ def main() -> int:
     # 这份提醒是发给全班同学的，谁交没交不该决定某门课要不要提醒。
     extra = [] if args.pool else ["--deadline-only"]
 
-    print("抓取中..." + ("（全量扫描所有课程，约 1-3 分钟）" if not args.pool else ""))
-    if not ensure_login():
-        text = ("北化在线登录态已失效，且自动登录未成功"
-                "（可能平台要求验证码，或 Edge 里存的密码已过期）。\n"
-                f"处理：双击 {ROOT.parent / 'login.bat'} 手动登录一次，再重跑作业提醒。\n"
-                "影响：本次没有生成提醒，群里不会收到消息。")
-        print(text)
-        ok = send_alert("login-failed", "北化在线登录失效，自动登录也失败", text)
-        print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
-        return 1
+    cached_payload = None
+    cache_coverage = None
+    if not args.pool:
+        cached_payload, cache_coverage = load_fresh_publish_cache()
+    if cached_payload:
+        data = cached_payload
+        print(f"复用完整新鲜缓存（{cache_coverage.get('age_sec', 0):.0f} 秒前，"
+              f"{cache_coverage.get('expected_courses', 0)} 门课），不再访问平台。")
+    else:
+        if cache_coverage and cache_coverage.get("publish_block_reasons"):
+            print("缓存不可直接发布：" + "；".join(cache_coverage["publish_block_reasons"]),
+                  file=sys.stderr)
+        print("抓取中..." + ("（全量扫描所有课程，约 1-3 分钟）" if not args.pool else ""))
+        if not ensure_login():
+            text = ("北化在线登录态已失效，且自动登录未成功"
+                    "（可能平台要求验证码，或 Edge 里存的密码已过期）。\n"
+                    f"处理：双击 {ROOT.parent / 'login.bat'} 手动登录一次，再重跑作业提醒。\n"
+                    "影响：本次没有生成提醒，群里不会收到消息。")
+            print(text)
+            ok = send_alert("login-failed", "北化在线登录失效，自动登录也失败", text)
+            print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
+            return 1
 
-    # ---- 抓取：这里的失败必须告警，否则就是静默漏报 ----
-    try:
-        data = fetch(extra or None)
-    except Exception as e:  # noqa: BLE001
-        text = (f"抓取阶段直接失败：{type(e).__name__}\n{e}\n\n"
-                "可能原因：登录态失效、平台改版、网络或浏览器异常。\n"
-                r"排查：看 data\server_console.log 与 data\fetch_log.jsonl；"
-                r"必要时双击 login.bat 重新登录后重跑。")
-        print("抓取失败：", e, file=sys.stderr)
-        send_alert("fetch-crashed", "作业提醒：抓取失败", text)
-        return 1
+        # ---- 抓取：这里的失败必须告警，否则就是静默漏报 ----
+        try:
+            data = fetch(extra or None)
+        except Exception as e:  # noqa: BLE001
+            text = (f"抓取阶段直接失败：{type(e).__name__}\n{e}\n\n"
+                    "可能原因：登录态失效、平台改版、网络或浏览器异常。\n"
+                    r"排查：看 data\server_console.log 与 data\fetch_log.jsonl；"
+                    r"必要时双击 login.bat 重新登录后重跑。")
+            print("抓取失败：", e, file=sys.stderr)
+            send_alert("fetch-crashed", "作业提醒：抓取失败", text)
+            return 1
 
     elapsed = data.get("_elapsed_sec")
     platform = data.get("homeworks", [])
@@ -504,6 +556,8 @@ def main() -> int:
             rows=len(picked), rows_total=len(platform),
             platform=len(platform), tests=tests_n, manual=len(manual),
             elapsed=elapsed, failed_courses=warn.get("failed_courses") or [],
+            cached=bool(cached_payload),
+            data_age=(cache_coverage.get("age_sec") if cached_payload else None),
             notes=_note,
         )
     except Exception as e:  # noqa: BLE001

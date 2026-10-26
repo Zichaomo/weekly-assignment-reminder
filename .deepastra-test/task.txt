@@ -1,0 +1,6 @@
+目标：测试 DeepAstra 委派工作流。
+项目路径：D:\项目\每周作业提醒
+请在项目根目录创建 test.txt，UTF-8 编码，内容为：DeepAstra workflow test: created by DeepSeek.
+修改范围：只创建 test.txt，不修改其他项目文件。若 test.txt 已存在，请停止并报告。
+项目规则：本次由主助手委派给 DeepSeek；不得递归委派；不读取、输出或记录凭据；只执行本次要求范围内的本地文件任务。
+验收标准：根目录 test.txt 存在且内容准确；创建后读取该文件确认，并简短报告。

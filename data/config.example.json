@@ -48,5 +48,40 @@
     "_freshness": "「该跑没跑」判定：距上次成功运行超过 interval_days 天 + grace_hours 小时就告警",
     "interval_days": 7,
     "grace_hours": 12
+  },
+  "_account_scope": "账号缓存命名空间，例如 account-a；仅使用英文字母、数字、下划线、点、冒号和连字符。留空时需绑定平台可见身份后才允许发布；换账号推荐另设范围。",
+  "account_scope": "",
+  "_cache": "本地缓存与正文抓取参数（均可省略）。db_path/assets_dir 留空时分别使用 data/cache/homework.sqlite3 与 data/cache/assets。相对路径按启动目录解析。",
+  "cache": {
+    "_db_path": "SQLite 缓存文件；一般留空。可用环境变量 HOMEWORK_CACHE_DB 覆盖",
+    "db_path": "",
+    "_assets_dir": "正文图片缓存目录；一般留空。可用 HOMEWORK_CACHE_ASSETS 覆盖",
+    "assets_dir": ""
+  },
+  "_content": "正文缓存/批次参数。正文不是每次打开都重抓：未过期且未标记更新时直接读缓存。",
+  "content": {
+    "_ttl_seconds": "正文缓存有效期（秒），默认 21600（6 小时）",
+    "ttl_seconds": 21600,
+    "_window_days": "自动补齐正文的截止日期窗口（天），默认 14",
+    "window_days": 14,
+    "_batch_limit": "单次正文任务最多处理多少条；0=本批全部到期项，默认 0",
+    "batch_limit": 0,
+    "_asset_max_bytes": "单张正文图片下载上限（字节），默认 8388608（8 MiB）",
+    "asset_max_bytes": 8388608,
+    "_asset_max_pixels": "单张图片像素上限，默认 40000000；超限会降级而不是显示坏图",
+    "asset_max_pixels": 40000000
+  },
+  "_scan": "扫描节奏与超时。publish_fresh_sec 只控制“缓存是否足够新可用于发布”，不是正文 TTL。",
+  "scan": {
+    "_publish_fresh_sec": "发布前要求扫描缓存的最大年龄（秒），默认 300；过期会拒绝发送",
+    "publish_fresh_sec": 300,
+    "_course_gap_sec": "相邻课程请求间隔（秒），默认 0.3；不要设得过小",
+    "course_gap_sec": 0.3,
+    "_no_tests_review_days": "确认某课没有测试栏目后的复核周期（天），默认 7",
+    "no_tests_review_days": 7,
+    "_step_timeout_sec": "单个页面步骤超时（秒），默认 12",
+    "step_timeout_sec": 12,
+    "_course_timeout_sec": "单门课程扫描超时（秒），默认 90",
+    "course_timeout_sec": 90
   }
 }

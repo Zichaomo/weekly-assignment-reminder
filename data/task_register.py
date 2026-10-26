@@ -61,6 +61,24 @@ def find_python() -> str:
     return sys.executable
 
 
+def windowless_python(python: str) -> str:
+    """换成同目录的 pythonw.exe（无窗口版）；没有就原样返回。
+
+    为什么必须换（2026-10-25 实测，用户反馈「时不时跳出一个命令行弹窗」）：
+      Weekly 任务注册时用的是 `python.exe`（控制台程序），而触发器是
+      「09:00 起每 30 分钟重试、持续 2 小时」—— 一上午会启动好几次，
+      **每次都画一个黑窗口**：09:00 那次正常跑完要 60 秒，窗口就停留 60 秒；
+      其余几次被幂等闸秒退（0.2 秒），窗口一闪而过。
+      幂等闸只拦得住「重复发群」，拦不住「重复弹窗」。换 pythonw 就没有窗口。
+
+    pythonw 安全吗（已实测）：没有控制台时 `sys.stdout is None`，
+    而 CPython 的 `print()` 在这种情况下是**空操作**、不抛异常；
+    日志本来就是脚本自己写文件（task_run.log / task_catchup.log），不依赖 stdout。
+    """
+    pyw = Path(python).with_name("pythonw.exe")
+    return str(pyw) if pyw.exists() else python
+
+
 def run_schtasks(args, capture=True):
     """调 schtasks。注意要传 list，别把带空格的路径拼成字符串。"""
     cmd = ["schtasks"] + args
@@ -99,9 +117,13 @@ def apply_extra_settings(task_name: str) -> tuple:
     return ok, ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
 
 
-def apply_repetition(task_name: str, interval_min: int = 10,
+def apply_repetition(task_name: str, interval_min: int = 30,
                      duration_min: int = 120) -> tuple:
     """给「每周日 09:00」触发器加上「每 N 分钟重试、持续 M 分钟」。
+
+    默认 N=30 / M=120 → 09:00 / 09:30 / 10:00 / 10:30 / 11:00 共 5 次机会。
+    （2026-10-25 从「每 10 分钟」放宽到 30 分钟：09:00 那一刻没登录的情况
+      基本都能被 09:30 那次兜住，没必要一上午触发 13 次。）
 
     为什么需要（2026-10-18 真实漏发，不是理论问题）：
       09:00 那一刻电脑可能刚开机、还停在登录界面。这个任务用的是
@@ -112,7 +134,7 @@ def apply_repetition(task_name: str, interval_min: int = 10,
       实测时间线：08:25 关机 → 08:59:44 开机 → 09:00 触发（停在登录界面）→
       09:00:23 登录 → 什么都没有发生。
 
-    加上重复间隔后，09:10 / 09:20 … 只要人在且已登录，就会真的跑起来。
+    加上重复间隔后，09:30 / 10:00 … 只要人在且已登录，就会真的跑起来。
     重复触发不会重复发消息：task_run.py 开头有「今天已推过就秒退」的幂等闸。
     """
     ps = shutil.which("pwsh") or shutil.which("powershell")
@@ -192,9 +214,8 @@ def register_catchup(args) -> int:
     if not Path(python).exists():
         print(f"ERROR: 解释器不存在：{python}", file=sys.stderr)
         return 1
-    # 优先换成无窗口解释器（同目录的 pythonw.exe）
-    pyw = Path(python).with_name("pythonw.exe")
-    exe = str(pyw) if pyw.exists() else python
+    # 换成无窗口解释器（同目录的 pythonw.exe）——理由见 windowless_python()
+    exe = windowless_python(python)
     if not TASK_CATCHUP.exists():
         print(f"ERROR: 找不到 {TASK_CATCHUP}", file=sys.stderr)
         return 1
@@ -238,7 +259,7 @@ Write-Output ('State   : ' + $t.State)
     print(f"执行脚本　：{TASK_CATCHUP}")
     print(f"参数　　　：--wecom {args.wecom} --days {args.days} "
           f"--delay-min {args.delay_min} --target-time {args.target_time}")
-    print(f"解释器　　：{exe}" + ("（pythonw.exe，无窗口）" if exe != python else "（python.exe）"))
+    print(f"解释器　　：{exe}" + ("（pythonw.exe，无窗口）" if exe != python else "（python.exe，会闪黑框）"))
     print(f"判定逻辑　：仅周日 + 已过计划时间 {args.target_time} + 今天还没推成功 时，"
           f"等到 {args.target_time} 之后 {args.delay_min} 分钟（或开机后 {args.delay_min} 分钟）补推；"
           f"否则秒退")
@@ -297,7 +318,9 @@ def check_target_split(wecom: str) -> tuple:
 
 def register(args) -> int:
     python = find_python()
-    command = task_command(python, args.wecom, args.days, args.time)
+    # 计划任务用它执行：能换成 pythonw.exe 就换，否则每次触发都会闪一个黑框
+    task_py = windowless_python(python)
+    command = task_command(task_py, args.wecom, args.days, args.time)
     cmd_args = build_create_args(args.name, args.time, args.day, command,
                                 once=args.once, date_str=args.date)
 
@@ -308,7 +331,8 @@ def register(args) -> int:
            "prod": "强制正式班级群（wecom_webhook_prod）"}[args.wecom]
     print(f"计划任务名：{args.name}")
     print(f"执行时间　：{when}")
-    print(f"解释器　　：{python}")
+    print(f"解释器　　：{task_py}"
+          + ("（pythonw.exe，无窗口）" if task_py != python else "（python.exe，会闪黑框）"))
     print(f"目标群　　：{tgt}")
     print(f"完整命令　：{command}")
     print(f"schtasks 　：schtasks {' '.join(cmd_args)}")
@@ -357,7 +381,8 @@ def register(args) -> int:
         if rok:
             print(f"重复触发：{args.time} 起每 {args.repeat_min} 分钟重试一次，"
                   f"持续 {args.repeat_hours} 小时 —— {rwhy}")
-            print("  作用：09:00 没跑成（关机 / 还在登录界面）时，后续每 10 分钟还有机会；")
+            print(f"  作用：{args.time} 没跑成（关机 / 还在登录界面）时，"
+                  f"后续每 {args.repeat_min} 分钟还有机会；")
             print("        已推过的会被幂等闸跳过，不会重复打扰群。")
         else:
             print(f"重复触发：未应用（{rwhy}）")
@@ -420,8 +445,9 @@ def main() -> int:
                     help="注册第二部分：登录时触发的「周日开机补推检测」")
     ap.add_argument("--delay-min", type=int, default=15,
                     help="补推前等待分钟数（默认 15，即「开机后约 15 分钟」）")
-    ap.add_argument("--repeat-min", type=int, default=10,
-                    help="09:00 没跑成时，每隔多少分钟再试一次（默认 10；0 效果同 --no-repeat）")
+    ap.add_argument("--repeat-min", type=int, default=30,
+                    help="没跑成时每隔多少分钟再试一次（默认 30，即 09:00/09:30/"
+                         "10:00/10:30/11:00 五个机会；0 效果同 --no-repeat）")
     ap.add_argument("--repeat-hours", type=int, default=2,
                     help="重复触发持续多少小时（默认 2，即 09:00-11:00 之间一直有机会）")
     ap.add_argument("--no-repeat", action="store_true",

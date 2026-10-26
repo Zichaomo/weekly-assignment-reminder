@@ -1,0 +1,6 @@
+目标：验证永久修复后的 DeepAstra 启动器。
+项目路径：D:\项目\每周作业提醒
+只允许创建根目录 test-deepastra-retest.txt，使用 UTF-8 无 BOM，精确内容：DeepAstra permanent fix verified by DeepSeek.
+若文件已存在，停止并报告，不覆盖。不修改 test.txt 或其他文件。
+项目规则：仅执行本次本地测试，不递归委派，不读取、输出或记录任何凭据。
+验收：用文件或 shell 工具创建文件，再读取并确认内容完全一致。不能只给出建议或声明完成。

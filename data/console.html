@@ -77,6 +77,8 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
 .badge{display:inline-block;font-size:10.5px;border:1px dashed var(--faint);border-radius:4px;padding:0 4px;color:var(--gray);margin-right:4px;line-height:1.7}
 .badge.test{border-style:solid;border-color:var(--ink);color:var(--ink)}
 .badge.elec{border-style:solid;border-color:var(--accent);color:var(--accent)}
+.badge.content{border-style:solid;border-color:var(--green);color:var(--green)}
+.badge.content.warn{border-color:var(--accent);color:var(--accent)}
 .st{font-size:12.5px;white-space:nowrap}
 .st-pub{color:var(--ink);font-family:'Lanxi-普惠体中黑'}
 .st-todo{color:var(--faint)}
@@ -85,6 +87,29 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
 .link{background:none;border:none;color:var(--gray);font-size:12.5px;cursor:pointer;padding:4px;font-family:inherit;text-decoration:underline;text-underline-offset:3px}
 .link:hover{color:var(--accent)}
 .empty{padding:34px;text-align:center;color:var(--faint);font-size:12.5px}
+/* ---------- 标题下的图文正文 ---------- */
+td.title{white-space:normal!important}
+.title-line{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.content-brief{margin-top:6px;border-top:1px dashed var(--line);padding-top:6px}
+.content-brief .excerpt{font-size:12px;color:var(--gray);line-height:1.65;max-height:3.3em;overflow:hidden}
+.content-brief .pure-image{font-size:12px;color:var(--green);font-family:'Lanxi-普惠体中黑'}
+.content-brief .thumb-row{display:flex;gap:8px;align-items:flex-start;margin-top:5px;flex-wrap:wrap}
+.content-brief img.thumb{height:66px;max-width:150px;object-fit:cover;border:1px solid var(--line);border-radius:5px;background:#fff;cursor:zoom-in}
+.content-brief .mini{display:flex;gap:8px;flex-wrap:wrap;margin-top:5px}
+.content-brief .mini .link{font-size:11.5px;padding:2px 3px}
+.content-detail{margin-top:8px;border:1px solid var(--line);border-radius:7px;background:#fff;padding:10px 12px;max-height:56vh;overflow:auto}
+.content-state{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--faint);margin-bottom:7px}
+.content-state .bad{color:var(--red)}
+.content-block{margin:0 0 8px}
+.content-block p{white-space:pre-wrap;line-height:1.7}
+.content-block img{max-width:min(100%,680px);height:auto;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:zoom-in}
+.content-block table{border:1px solid var(--line);margin:4px 0}
+.content-block th,.content-block td{padding:5px 8px;font-size:12px}
+.content-block .attach{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:#FAF9F6}
+.content-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.crop-thumbs{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.crop-thumbs canvas{border:1px solid var(--accent);border-radius:5px;max-width:180px;max-height:140px;background:#fff}
+.stale-note{color:var(--accent);font-size:11.5px}
 /* ---------- 预览 / 日志 ---------- */
 .tabs{display:flex;gap:0;border-bottom:2px solid var(--ink)}
 .tab{font-size:12.5px;letter-spacing:.14em;padding:8px 20px;cursor:pointer;color:var(--faint);border:1px solid transparent;border-bottom:none;font-family:'Lanxi-普惠体中黑'}
@@ -119,6 +144,18 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
 .eladd{display:none;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)}
 .eladd .addnote{margin-top:6px}
 .editgrid{display:grid;grid-template-columns:1fr;gap:12px}
+/* ---------- 原图与多矩形裁剪 ---------- */
+.modal.wide{width:min(1120px,96vw)}
+.crop-grid{display:grid;grid-template-columns:minmax(0,1fr) 230px;gap:14px}
+.crop-stage{position:relative;border:1px solid var(--line);border-radius:7px;background:#181715;overflow:auto;max-height:62vh}
+.crop-stage canvas{display:block;max-width:100%;height:auto;cursor:crosshair;touch-action:none}
+.crop-help{font-size:11.5px;color:var(--faint);margin-top:6px}
+.crop-side{display:flex;flex-direction:column;gap:9px}
+.crop-side .smallbox{border:1px solid var(--line);border-radius:7px;background:var(--card);padding:8px}
+.crop-side .smallbox b{display:block;margin-bottom:5px}
+.region-list{max-height:150px;overflow:auto;font-size:11.5px;font-family:Consolas,monospace}
+.region-list div{padding:3px 0;border-bottom:1px dashed var(--line)}
+.crop-preview{display:flex;flex-direction:column;gap:8px;max-height:25vh;overflow:auto}
 /* ---------- 页脚 ---------- */
 .foot{margin-top:24px;text-align:center;font-size:10.5px;letter-spacing:.18em;color:var(--faint)}
 ::-webkit-scrollbar{width:9px;height:9px}
@@ -145,6 +182,7 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
   <div class="sec-label">检 索 与 发 布</div>
   <div class="panel ops">
     <button class="btn accent" id="btnFetch">检索北化在线</button>
+    <button class="btn" id="btnContentDue">补齐正文</button>
     <button class="btn" id="btnPreview">预览</button>
     <button class="btn" id="btnPublish">提前发布</button>
     <span class="sep"></span>
@@ -158,9 +196,11 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
     <button class="btn ghost" id="btnBlCourse">课程黑名单</button>
     <button class="btn ghost" id="btnBlTest">测试黑名单</button>
     <button class="btn ghost" id="btnElective">选修课名单</button>
+    <button class="btn ghost" id="btnExportViews">导出裁剪备份</button>
   </div>
   <div class="taskbar" id="taskbar">
     <span class="spin"></span><span id="taskLabel">…</span><span class="elapsed" id="taskElapsed"></span>
+    <span id="connState" style="color:#9B968A"></span>
   </div>
 </section>
 
@@ -257,15 +297,72 @@ td.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowr
   </div>
 </div>
 
+<!-- 原图 / 多矩形裁剪 -->
+<div class="mask" id="maskCrop">
+  <div class="modal wide">
+    <header><h3 id="cropTitle">原图与裁剪</h3><button class="btn small ghost" id="cropClose">关闭</button></header>
+    <div class="body">
+      <div class="crop-grid">
+        <div>
+          <div class="crop-stage"><canvas id="cropCanvas"></canvas></div>
+          <div class="crop-help" id="cropHelp">在图上拖动可添加多个矩形；每个框保存为归一化 xyxy。</div>
+        </div>
+        <div class="crop-side">
+          <div class="smallbox">
+            <b>区域</b>
+            <div class="region-list" id="cropRegions">（尚未选择）</div>
+            <div class="mini" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <button class="btn small ghost" id="cropUndo">撤销</button>
+              <button class="btn small ghost" id="cropRedo">恢复</button>
+              <button class="btn small ghost" id="cropClear">清空本图</button>
+            </div>
+          </div>
+          <div class="smallbox">
+            <b>原像素裁剪预览</b>
+            <div class="crop-preview" id="cropPreview"></div>
+          </div>
+          <div class="smallbox">
+            <b>版本</b>
+            <div id="cropVersion" class="stale-note">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn ghost" id="cropOriginal">单独打开原图</button>
+      <button class="btn accent" id="cropSave">保存裁剪</button>
+    </footer>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
-const state = { platformRows: [], manualRows: [], blKind: 'course', blData: null,
-                editId: null, courses: null, semesterStart: '' };
+const state = { platformRows: [], manualRows: [], allRows: [], blKind: 'course', blData: null,
+                editId: null, courses: null, semesterStart: '',
+                expanded: new Set(), rowEls: new Map(), rowSigs: new Map(),
+                busyTasks: new Set(), taskTimers: new Set(), lastList: null,
+                lastProgressRefresh: 0, crop: null, connOk: true,
+                autoFilling: false, autoFillRound: 0 };
 
 /* ---------------- 基础 ---------------- */
 async function api(path, opts) {
-  const r = await fetch(path, opts ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(opts) } : undefined);
-  return r.json();
+  try {
+    const r = await fetch(path, opts ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(opts) } : undefined);
+    let data = {};
+    try { data = await r.json(); }
+    catch (e) { data = { ok: false, error: '服务返回了无法解析的内容' }; }
+    data.http_status = r.status;
+    if (!r.ok && data.ok !== false) { data.ok = false; data.error = data.error || ('HTTP ' + r.status); }
+    return data;
+  } catch (e) {
+    setConn(false, '连接中断，重试中');
+    return { ok: false, network: true, error: '无法连接本机服务：' + (e.message || e) };
+  }
+}
+function setConn(ok, text) {
+  state.connOk = ok;
+  const el = $('#connState');
+  if (el) el.textContent = ok ? '' : (text || '连接中断');
 }
 function log(line) {
   const t = new Date().toLocaleTimeString('zh-CN', {hour12: false});
@@ -284,36 +381,115 @@ function switchTab(name) {
 }
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
 
-/* ---------------- 任务轮询 ---------------- */
-let polling = null;
+/* ---------------- 任务轮询：按任务 ID，互不覆盖 ---------------- */
 function runTask(op, params, label, onDone, opts) {
+  opts = opts || {};
+  const inlineOnly = !!opts.inlineOnly;
+  const globalBusy = opts.globalBusy !== false;
   api('/api/tasks', { op, ...params }).then(r => {
-    if (!r.ok) { log('任务创建失败：' + (r.error || '')); return; }
+    if (!r.ok) { log('任务创建失败：' + (r.error || '')); setConn(false, '任务创建失败'); return; }
     const id = r.task_id, t0 = Date.now();
-    // inlineOnly：在对话框等局部发起任务时，不弹外层主页面的黑色任务条，
-    // 只在发起处的按钮上显示进度（否则会同时出现两处提示，用户反馈"多此一举"）
-    const inlineOnly = !!(opts && opts.inlineOnly);
+    try { localStorage.setItem('homeworkActiveTask', JSON.stringify({id, label, started: Date.now()})); } catch (e) {}
+    setConn(true);
+    if (r.deduped) log(`同范围任务已存在，复用任务 ${id}（不会重复抓取）。`);
+    if (globalBusy) { state.busyTasks.add(id); setButtons(false); }
     if (!inlineOnly) {
       $('#taskLabel').textContent = label;
       $('#taskbar').classList.add('on');
+      $('#taskElapsed').textContent = '0s';
     }
-    setButtons(false);
-    clearInterval(polling);
-    polling = setInterval(async () => {
-      $('#taskElapsed').textContent = ((Date.now() - t0) / 1000).toFixed(0) + 's';
+    const watchKey = id + ':' + Math.random().toString(36).slice(2);
+    const tick = async () => {
       const t = await api('/api/tasks/' + id);
-      if (t.status === 'running') return;
-      clearInterval(polling);
-      if (!inlineOnly) $('#taskbar').classList.remove('on');
-      setButtons(true);
-      if (t.status === 'error') { log('任务异常：' + t.error); return; }
-      onDone(t.result || {});
-    }, 1000);
+      if (t.network) {
+        if (!inlineOnly) $('#connState').textContent = '连接中断，自动重试…';
+        return;
+      }
+      setConn(true);
+      if (!inlineOnly) {
+        $('#taskElapsed').textContent = ((Date.now() - t0) / 1000).toFixed(0) + 's';
+        const p = t.progress;
+        $('#taskLabel').textContent = label + (p && p.total
+          ? ` · 课程 ${Math.min(p.done + p.failed, p.total)}/${p.total}（完成 ${p.done}，失败 ${p.failed}）`
+          : '');
+        $('#connState').textContent = '';
+      }
+      if (op === 'fetch' && t.progress && Date.now() - state.lastProgressRefresh > 2000) {
+        state.lastProgressRefresh = Date.now();
+        refreshList({ silent: true });
+      }
+      if (t.status === 'queued' || t.status === 'running') return;
+      clearInterval(timer);
+      state.taskTimers.delete(watchKey);
+      try {
+        const saved = JSON.parse(localStorage.getItem('homeworkActiveTask') || '{}');
+        if (saved.id === id) localStorage.removeItem('homeworkActiveTask');
+      } catch (e) {}
+      if (globalBusy) {
+        state.busyTasks.delete(id);
+        if (!state.busyTasks.size) setButtons(true);
+      }
+      if (!inlineOnly && !state.busyTasks.size) $('#taskbar').classList.remove('on');
+      if (t.status === 'error' || (t.error && t.status !== 'partial')) log('任务异常：' + (t.error || t.status));
+      else if (t.status === 'partial') log('任务部分完成：' + (t.error || '部分范围未成功，旧列表已保留。'));
+      try { onDone(t.result || {}, t); }
+      catch (e) { log('处理任务结果失败：' + (e.message || e)); }
+    };
+    const timer = setInterval(tick, 700);
+    state.taskTimers.add(watchKey);
+    tick();
   });
 }
+async function resumeLastTask() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('homeworkActiveTask') || 'null'); } catch (e) {}
+  if (!saved || !saved.id) return;
+  if (Date.now() - (+saved.started || 0) > 30 * 60 * 1000) {
+    try { localStorage.removeItem('homeworkActiveTask'); } catch (e) {}
+    return;
+  }
+  const t = await api('/api/tasks/' + encodeURIComponent(saved.id));
+  if (!t.ok) {
+    try { localStorage.removeItem('homeworkActiveTask'); } catch (e) {}
+    return;
+  }
+  if (t.status !== 'queued' && t.status !== 'running') {
+    try { localStorage.removeItem('homeworkActiveTask'); } catch (e) {}
+    log(`上次任务 ${saved.id} 已结束（${t.status}），正在重读本地列表。`);
+    refreshList({ silent: true });
+    return;
+  }
+  log(`检测到上次未结束任务 ${saved.id}，已重新连接进度。`);
+  $('#taskbar').classList.add('on');
+  $('#taskLabel').textContent = (saved.label || '任务') + ' · 重新连接';
+  const t0 = Date.now();
+  const timer = setInterval(async () => {
+    const now = await api('/api/tasks/' + encodeURIComponent(saved.id));
+    if (now.network) return;
+    if (!now.ok) {
+      clearInterval(timer);
+      try { localStorage.removeItem('homeworkActiveTask'); } catch (e) {}
+      $('#taskbar').classList.remove('on');
+      return;
+    }
+    $('#taskElapsed').textContent = ((Date.now() - t0) / 1000).toFixed(0) + 's';
+    const p = now.progress;
+    if (p && p.total) {
+      $('#taskLabel').textContent = (saved.label || '任务')
+        + ` · 课程 ${Math.min(p.done + p.failed, p.total)}/${p.total}`;
+    }
+    if (now.status === 'queued' || now.status === 'running') return;
+    clearInterval(timer);
+    try { localStorage.removeItem('homeworkActiveTask'); } catch (e) {}
+    $('#taskbar').classList.remove('on');
+    log(`重连任务结束：${now.status}${now.error ? ' · ' + now.error : ''}`);
+    refreshList({ silent: true });
+    autoFillVisibleContent();
+  }, 900);
+}
 function setButtons(on) {
-  // btnCourses 已移除（刷新课程表移到黑名单对话框内），这里用存在性判断避免报错
-  ['btnFetch','btnPreview','btnPublish','blReload'].forEach(i => {
+  // 正文任务不会调用这里；列表/手动操作在正文补齐时仍可继续使用。
+  ['btnFetch','btnPreview','btnPublish'].forEach(i => {
     const el = $('#' + i);
     if (el) el.disabled = !on;
   });
@@ -321,68 +497,744 @@ function setButtons(on) {
 
 /* ---------------- 列表渲染 ---------------- */
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function rowKey(r) {
+  return r.item_key || (r.manual_id != null ? 'manual:' + r.manual_id
+    : `${r.course}|${r.title}|${r.deadline}|${r.kind || ''}`);
+}
+function rowSignature(r, key) {
+  return JSON.stringify([key, r.title, r.course, r.deadline, r.left, r.status,
+    r.content_status, r.content_revision, r.source_version, r.content_stale,
+    r.content_error, r.content_checked_at, r.content_text,
+    (r.content_blocks || []).map(b => b.id || b.type),
+    (r.view && r.view.updated_at) || '', state.expanded.has(key)]);
+}
 function render() {
   const rows = [...state.platformRows, ...state.manualRows];
+  state.allRows = rows;
   const tb = $('#tbody');
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无条目</td></tr>'; return; }
-  tb.innerHTML = rows.map((r, i) => {
-    const isP = r.source === '平台';
-    const over = (r.left === '已逾期');
-    const badges = (isP ? '' : '<span class="badge">手动</span>')
-      + (r.kind === 'test' ? '<span class="badge test">在线测试</span>' : '')
-      + (r.elective ? '<span class="badge elec">选修</span>' : '');
-    const stCls = r.status === '待发布' ? 'st-pub' : (r.status === '逾期' ? 'st-over' : 'st-todo');
-    const acts = isP
-      ? `${r.hwtid ? `<a class="link" data-act="content" data-i="${i}">内容</a>` : ''}<a class="link" data-act="open" data-i="${i}">打开</a>`
-      : `<a class="link" data-act="edit" data-i="${i}">编辑</a><a class="link" data-act="done" data-i="${i}">完成</a><a class="link" data-act="rm" data-i="${i}">删除</a>`;
-    return `<tr class="${over ? 'overdue' : ''}">
-      <td>${esc(r.source)}</td><td>${esc(r.course)}</td>
-      <td class="title" title="${esc(r.title)}${r.note ? '｜' + esc(r.note) : ''}">${badges}${esc(r.title)}</td>
-      <td class="deadline">${esc(r.deadline)}</td><td class="left">${esc(r.left)}</td>
-      <td class="st ${stCls}">${esc(r.status)}</td><td class="rowact">${acts}</td></tr>`;
-  }).join('');
-  tb.querySelectorAll('a.link').forEach(a => a.onclick = () => rowAction(a.dataset.act, +a.dataset.i));
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="empty">暂无条目 · 冷启动只读本地缓存，点「检索北化在线」才访问平台</td></tr>';
+    state.rowEls.clear(); state.rowSigs.clear();
+    return;
+  }
+  tb.querySelectorAll(':scope > tr:not([data-key])').forEach(tr => tr.remove());
+  const seen = new Set();
+  rows.forEach(r => {
+    const key = rowKey(r), sig = rowSignature(r, key);
+    seen.add(key);
+    let tr = state.rowEls.get(key);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.dataset.key = key;
+      state.rowEls.set(key, tr);
+      tb.appendChild(tr);
+    }
+    if (state.rowSigs.get(key) !== sig) {
+      updateRow(tr, r, key);
+      state.rowSigs.set(key, sig);
+    }
+  });
+  for (const [key, tr] of [...state.rowEls]) {
+    if (!seen.has(key)) { tr.remove(); state.rowEls.delete(key); state.rowSigs.delete(key); }
+  }
+  if (!tb.children.length) tb.innerHTML = '<tr><td colspan="7" class="empty">暂无条目</td></tr>';
 }
-function rowByIndex(i) { return [...state.platformRows, ...state.manualRows][i]; }
-function rowAction(act, i) {
-  const r = rowByIndex(i);
+function updateRow(tr, r, key) {
+  const isP = r.source === '平台';
+  const over = (r.left === '已逾期');
+  const stCls = r.status === '待发布' ? 'st-pub' : (r.status === '逾期' ? 'st-over' : 'st-todo');
+  const acts = isP
+    ? `${r.item_key ? `<a class="link" data-act="content">${state.expanded.has(key) ? '收起' : '内容'}</a>` : ''}`
+      + `${r.item_key ? '<a class="link" data-act="refresh-content">刷新正文</a>' : ''}`
+      + `${r.lid ? '<a class="link" data-act="refresh-course">刷新本课</a>' : ''}`
+      + '<a class="link" data-act="open">打开</a>'
+    : '<a class="link" data-act="edit">编辑</a><a class="link" data-act="done">完成</a><a class="link" data-act="rm">删除</a>';
+  tr.className = over ? 'overdue' : '';
+  tr.innerHTML = `<td>${esc(r.source)}</td><td>${esc(r.course)}</td>`
+    + `<td class="title"></td><td class="deadline">${esc(r.deadline)}</td>`
+    + `<td class="left">${esc(r.left)}</td><td class="st ${stCls}">${esc(r.status)}</td>`
+    + `<td><div class="rowact">${acts}</div></td>`;
+  const cell = tr.children[2];
+  const line = document.createElement('div');
+  line.className = 'title-line';
+  line.title = r.title + (r.note ? '｜' + r.note : '');
+  if (!isP) line.appendChild(badge('手动', ''));
+  if (r.kind === 'test') line.appendChild(badge('在线测试', 'test'));
+  if (r.elective) line.appendChild(badge('选修', 'elec'));
+  const titleText = document.createElement('span');
+  titleText.textContent = r.title || '';
+  line.appendChild(titleText);
+  cell.appendChild(line);
+  if (isP && r.item_key) renderContentBrief(r, cell);
+  else if (!isP && r.note) {
+    const note = document.createElement('div'); note.className = 'excerpt'; note.textContent = r.note;
+    cell.appendChild(note);
+  }
+}
+function badge(text, cls) {
+  const b = document.createElement('span');
+  b.className = 'badge ' + (cls || '');
+  b.textContent = text;
+  return b;
+}
+function rowByKey(key) { return state.allRows.find(r => rowKey(r) === key); }
+function rowAction(act, key) {
+  const r = rowByKey(key);
   if (!r) return;
-  if (act === 'content') viewContent(r);
+  if (act === 'content') {
+    if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
+    state.rowSigs.delete(key);
+    render();
+  }
+  else if (act === 'refresh-content') refreshContentTask([key], true);
+  else if (act === 'refresh-course') refreshCourse(r.lid);
   else if (act === 'open') openRow(r);
   else if (act === 'edit') openEdit(r);
   else if (act === 'done') manualOp({ action: 'done', id: r.manual_id });
   else if (act === 'rm') { if (confirm(`确定删除「${r.course}｜${r.title}」？`)) manualOp({ action: 'rm', id: r.manual_id }); }
 }
+$('#tbody').onclick = e => {
+  const a = e.target.closest('[data-act]');
+  if (!a) return;
+  const tr = a.closest('tr[data-key]');
+  if (tr) rowAction(a.dataset.act, tr.dataset.key);
+};
 
-/* ---------------- 数据动作 ---------------- */
-async function refreshManual() {
+/* ---------------- 本地列表 / 图文正文 ---------------- */
+function fmtAge(sec) {
+  if (sec == null) return '未知';
+  sec = Math.max(0, +sec);
+  return sec >= 60 ? (sec / 60).toFixed(1) + ' 分钟' : sec.toFixed(0) + ' 秒';
+}
+async function refreshList(opts) {
+  opts = opts || {};
   const all = $('#chkAll').checked;
-  const res = await api(`/api/list?days=${+$('#numDays').value}${all ? '&all=1' : ''}`);
-  if (res && res.rows) state.manualRows = res.rows.filter(x => x.source === '手动');
+  const days = Math.max(1, +$('#numDays').value || 7);
+  const res = await api(`/api/list?days=${days}&include_expired=${all ? 1 : 0}`);
+  if (res.network) return;
+  if (!Array.isArray(res.rows)) {
+    log('读取本地列表失败：' + (res.error || '未知错误'));
+    return;
+  }
+  state.lastList = res;
+  state.platformRows = res.rows.filter(x => x.source === '平台');
+  state.manualRows = res.rows.filter(x => x.source === '手动');
   render();
+  renderStats(res);
+  if (res.error) log('本地列表可用，但刷新任务有错误：' + res.error);
+  else if (!opts.silent) {
+    log(`本地列表已显示：平台 ${state.platformRows.length} 条 / 手动 ${state.manualRows.length} 条（${all ? '含全部' : '未来 ' + days + ' 天'}）。`);
+  }
+}
+const refreshManual = () => refreshList({ silent: true });
+function renderStats(res) {
+  const cov = res.cache || {};
+  const checked = state.platformRows.filter(x => x.item_key);
+  const ready = checked.filter(x => x.content_ready).length;
+  const failed = checked.filter(x => x.content_error).length;
+  const failedLids = cov.failed_courses || [];
+  const missing = cov.missing_courses || [];
+  const testMissing = cov.tests_missing_courses || [];
+  const blockers = cov.publish_block_reasons || [];
+  const parts = [
+    `<span>平台 <b>${state.platformRows.length}</b> 条</span>`,
+    `<span>手动 <b>${state.manualRows.length}</b> 条</span>`,
+    `<span>正文 <b>${ready}</b> 已缓存${failed ? ` / <b>${failed}</b> 失败` : ''}</span>`,
+    `<span>数据时间 <b>${esc(cov.updated_at || res.data_fetched_at || '无缓存')}</b>${cov.age_sec != null ? `（${fmtAge(cov.age_sec)}前）` : ''}</span>`,
+  ];
+  if (res.first_screen_ms != null) parts.push(`<span>本机首屏 <b>${res.first_screen_ms.toFixed(1)} ms</b></span>`);
+  if (blockers.length) {
+    parts.push(`<span style="color:var(--red)">正式发布阻断：${blockers.map(esc).join('；')}</span>`);
+  }
+  if (failedLids.length) {
+    const links = failedLids.slice(0, 8).map(lid => {
+      const r = state.platformRows.find(x => String(x.lid) === String(lid));
+      return `<a class="link" data-lid="${esc(lid)}" title="只重试这门课">${esc(r ? r.course : ('课程 ' + lid))}</a>`;
+    });
+    parts.push(`<span>失败课程：${links.join('、')}${failedLids.length > 8 ? '…' : ''}</span>`);
+  }
+  if (missing.length) parts.push(`<span>缺失范围：${missing.length} 门课（旧缓存仍可见）</span>`);
+  if (testMissing.length) parts.push(`<span>测试覆盖缺失：${testMissing.length} 门课</span>`);
+  const el = $('#stats');
+  el.innerHTML = parts.join('');
+  el.querySelectorAll('[data-lid]').forEach(a => a.onclick = () => refreshCourse(a.dataset.lid));
 }
 async function manualOp(p) {
   const res = await api('/api/manual', p);
   log(res.output || res.error || '（无输出）');
   if (!res.ok && res.error) alert(res.error);
-  refreshManual();
-}
-function viewContent(r) {
-  if (r._content) { showPreview(`===== 作业内容（hwtid=${r.hwtid}）=====\n${r._content}`); log('作业内容已显示（缓存）。'); return; }
-  log(`正在获取作业内容（hwtid=${r.hwtid}，约 10 秒）…`);
-  runTask('content', { hwtid: r.hwtid }, `获取作业内容 hwtid=${r.hwtid}`, res => {
-    if (!res.ok) { log('获取失败：' + (res.error || '')); alert(res.error || '获取失败'); return; }
-    const txt = res.content_text || '（该作业没有填写正文）';
-    r._content = txt;
-    showPreview(`===== 作业内容（hwtid=${r.hwtid}）=====\n${txt}\n\n网页：${res.url || ''}`);
-    log('作业内容已显示在预览页。');
-  });
+  refreshList({ silent: true });
 }
 function openRow(r) {
   const url = r.result_url || r.submit_url || r.content_url;
   if (!url) { alert('该作业没有可打开的链接。'); return; }
-  api('/api/open', { url });
+  api('/api/open', { url }).then(res => { if (!res.ok) alert(res.error || '打开失败'); });
   log('已在浏览器打开：' + url);
+}
+function assetUrl(id) { return '/api/assets/' + encodeURIComponent(id); }
+function makeLink(text, fn, title) {
+  const b = document.createElement('button');
+  b.className = 'link'; b.textContent = text; b.title = title || ''; b.onclick = fn;
+  return b;
+}
+function contentStatusText(r) {
+  if (r.content_error) return '正文获取失败：' + r.content_error;
+  if (!r.content_status || r.content_status === 'not_ready') return '正文尚未缓存';
+  if (r.content_stale) return '正文缓存已过期，可刷新';
+  if (r.content_status === 'empty') return '平台正文为空';
+  return '正文已缓存';
+}
+function renderContentBrief(r, cell) {
+  const box = document.createElement('div');
+  box.className = 'content-brief';
+  const blocks = r.content_blocks || [];
+  const text = (r.content_text || '').trim();
+  const images = collectContentImages(blocks);
+  const hasContent = !!text || images.length > 0 || blocks.length > 0;
+  const stateLine = document.createElement('div');
+  stateLine.className = 'content-state';
+  const st = document.createElement('span');
+  st.textContent = contentStatusText(r);
+  if (r.content_error) st.className = 'bad';
+  stateLine.appendChild(st);
+  if (r.content_checked_at) {
+    const t = document.createElement('span'); t.textContent = '检查于 ' + r.content_checked_at; stateLine.appendChild(t);
+  }
+  box.appendChild(stateLine);
+  if (!hasContent) {
+    const hint = document.createElement('div');
+    hint.className = 'excerpt';
+    hint.textContent = r.content_status === 'empty' ? '平台未填写文字或图片正文。'
+      : (r.content_error ? '标题、截止时间和平台入口仍可正常使用。' : '列表已可用，正文将在同一认证上下文内按窗口补齐。');
+    box.appendChild(hint);
+  } else {
+    if (text) {
+      const ex = document.createElement('div'); ex.className = 'excerpt'; ex.textContent = text;
+      box.appendChild(ex);
+    } else if (images.length) {
+      const pi = document.createElement('div'); pi.className = 'pure-image';
+      pi.textContent = `图片作业 · ${images.length} 张图`;
+      box.appendChild(pi);
+    }
+    if (images.length) {
+      const row = document.createElement('div'); row.className = 'thumb-row';
+      images.slice(0, 3).forEach(im => {
+        if (!im.asset_id) return;
+        const img = document.createElement('img');
+        img.className = 'thumb'; img.src = assetUrl(im.asset_id); img.alt = im.alt || '作业图片';
+        img.loading = 'lazy';
+        if (im.crop_safe !== false) img.onclick = () => openCrop(r, im.asset_id);
+        row.appendChild(img);
+      });
+      box.appendChild(row);
+    }
+  }
+  const mini = document.createElement('div'); mini.className = 'mini';
+  const key = r.item_key;
+  if (hasContent || r.content_status) {
+    mini.appendChild(makeLink(state.expanded.has(key) ? '收起' : '展开图文', () => {
+      if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
+      state.rowSigs.delete(key); render();
+    }));
+  }
+  mini.appendChild(makeLink('刷新正文', () => refreshContentTask([key], true), '强制重取这条正文'));
+  if (images[0] && images[0].asset_id) {
+    mini.appendChild(makeLink('原图', () => window.open(assetUrl(images[0].asset_id), '_blank')));
+    if (images[0].crop_safe !== false)
+      mini.appendChild(makeLink('调整裁剪', () => openCrop(r, images[0].asset_id)));
+    else mini.appendChild(makeLink('未安装 Pillow：仅原图', () => {}, '无法校验方向，已安全禁用裁剪'));
+  }
+  box.appendChild(mini);
+  if (state.expanded.has(key)) {
+    const detail = document.createElement('div'); detail.className = 'content-detail';
+    renderContentDetail(r, detail);
+    box.appendChild(detail);
+  }
+  cell.appendChild(box);
+}
+function collectContentImages(blocks) {
+  const out = [];
+  const visit = list => (list || []).forEach(b => {
+    if (!b || typeof b !== 'object') return;
+    if (b.type === 'image') out.push(b);
+    (b.segments || []).forEach(s => { if (s && s.type === 'image') out.push(s); });
+    (b.items || []).forEach(it => visit(it.blocks || []));
+    (b.cells || []).forEach(row => (row || []).forEach(c => visit((c && c.blocks) || [])));
+  });
+  visit(blocks);
+  return out;
+}
+function renderContentDetail(r, box) {
+  const line = document.createElement('div'); line.className = 'content-state';
+  const s = document.createElement('span'); s.textContent = contentStatusText(r); line.appendChild(s);
+  if (r.content_stale) { const w = document.createElement('span'); w.className = 'bad'; w.textContent = '过期'; line.appendChild(w); }
+  box.appendChild(line);
+  const actions = document.createElement('div'); actions.className = 'content-actions';
+  actions.appendChild(makeLink('刷新这条正文', () => refreshContentTask([r.item_key], true)));
+  if (r.content_url) actions.appendChild(makeLink('平台原文入口', () => openRow(r)));
+  box.appendChild(actions);
+  const blocks = r.content_blocks || [];
+  if (!blocks.length && r.content_text) {
+    const p = document.createElement('p'); p.textContent = r.content_text; box.appendChild(p);
+  }
+  blocks.forEach(b => renderBlock(r, b, box));
+  if (r.stale_view) {
+    const n = document.createElement('div'); n.className = 'stale-note';
+    n.textContent = `旧裁剪基于版本 ${r.stale_view.source_version || '?'}，正文已更新，需复核；不会自动套用到新版本。`;
+    box.appendChild(n);
+  }
+}
+function renderBlock(r, b, box) {
+  if (!b || typeof b !== 'object') return;
+  if (b.type === 'paragraph') {
+    const p = document.createElement('p');
+    if (b.pre) p.style.whiteSpace = 'pre-wrap';
+    if (Array.isArray(b.segments) && b.segments.length) renderSegments(r, b.segments, p);
+    else p.textContent = b.text || '';
+    box.appendChild(p); return;
+  }
+  if (b.type === 'list') {
+    const wrap = document.createElement('div'); wrap.className = 'content-block';
+    const list = document.createElement(b.ordered ? 'ol' : 'ul');
+    if (b.ordered && Number.isFinite(+b.start)) list.start = +b.start;
+    (b.items || []).forEach(item => {
+      const li = document.createElement('li');
+      if (b.ordered && Number.isFinite(+item.value)) li.value = +item.value;
+      (item.blocks || []).forEach(child => renderBlock(r, child, li));
+      if (!(item.blocks || []).length) li.textContent = item.text || '';
+      list.appendChild(li);
+    });
+    wrap.appendChild(list); box.appendChild(wrap); return;
+  }
+  if (b.type === 'table') {
+    const t = document.createElement('table');
+    const structured = Array.isArray(b.cells) ? b.cells : [];
+    (structured.length ? structured : (b.rows || [])).forEach((row, ri) => {
+      const tr = document.createElement('tr');
+      (row || []).forEach(cellValue => {
+        const isObj = cellValue && typeof cellValue === 'object';
+        const c = document.createElement(isObj ? (cellValue.header ? 'th' : 'td') : (ri === 0 ? 'th' : 'td'));
+        if (isObj) {
+          const cellBlocks = cellValue.blocks || [];
+          if (cellBlocks.length) cellBlocks.forEach(child => renderBlock(r, child, c));
+          else c.textContent = cellValue.text || '';
+        } else c.textContent = cellValue;
+        tr.appendChild(c);
+      });
+      t.appendChild(tr);
+    });
+    const wrap = document.createElement('div'); wrap.className = 'content-block'; wrap.appendChild(t); box.appendChild(wrap); return;
+  }
+  if (b.type === 'attachment') {
+    const wrap = document.createElement('div'); wrap.className = 'content-block';
+    const a = document.createElement('div'); a.className = 'attach';
+    const name = document.createElement('span'); name.textContent = b.text || '附件'; a.appendChild(name);
+    a.appendChild(makeLink('打开附件', () => {
+      if (!b.url) return;
+      api('/api/open', { url: b.url }).then(res => { if (!res.ok) alert(res.error || '附件链接不安全或无法打开'); });
+    }));
+    wrap.appendChild(a); box.appendChild(wrap); return;
+  }
+  if (b.type === 'image') {
+    const wrap = document.createElement('div'); wrap.className = 'content-block';
+    if (b.asset_id && b.status === 'ready') {
+      const img = document.createElement('img'); img.src = assetUrl(b.asset_id); img.alt = b.alt || '作业图片';
+      img.loading = 'lazy';
+      if (b.crop_safe !== false) img.onclick = () => openCrop(r, b.asset_id);
+      wrap.appendChild(img);
+      const acts = document.createElement('div'); acts.className = 'mini';
+      acts.appendChild(makeLink('原图', () => window.open(assetUrl(b.asset_id), '_blank')));
+      if (b.crop_safe !== false) acts.appendChild(makeLink('调整裁剪', () => openCrop(r, b.asset_id)));
+      else acts.appendChild(makeLink('未安装 Pillow：仅原图', () => {}, '无法校验方向，已安全禁用裁剪'));
+      wrap.appendChild(acts);
+      renderSavedCrops(r, b.asset_id, wrap);
+    } else {
+      const err = document.createElement('div'); err.className = 'stale-note';
+      err.textContent = '图片未缓存：' + (b.error || b.status || '未知原因');
+      wrap.appendChild(err);
+    }
+    box.appendChild(wrap); return;
+  }
+  if (b.type === 'divider') {
+    const hr = document.createElement('hr'); box.appendChild(hr); return;
+  }
+  if (b.text) { const p = document.createElement('p'); p.textContent = b.text; box.appendChild(p); }
+}
+function openSafeLink(url) {
+  if (!url) return;
+  api('/api/open', { url }).then(res => {
+    if (!res.ok) alert(res.error || '链接不安全或无法打开');
+  });
+}
+function renderSegments(r, segments, parent) {
+  segments.forEach(seg => {
+    if (!seg || typeof seg !== 'object') return;
+    if (seg.type === 'text') {
+      parent.appendChild(document.createTextNode(seg.text || ''));
+    } else if (seg.type === 'image') {
+      if (seg.asset_id && seg.status === 'ready') {
+        const img = document.createElement('img');
+        img.src = assetUrl(seg.asset_id); img.alt = seg.alt || '作业图片';
+        img.loading = 'lazy'; img.style.maxWidth = '100%'; img.style.verticalAlign = 'top';
+        if (seg.crop_safe !== false) img.onclick = () => openCrop(r, seg.asset_id);
+        parent.appendChild(img);
+      } else {
+        const s = document.createElement('span'); s.className = 'stale-note';
+        s.textContent = '［图片未缓存：' + (seg.error || seg.status || '未知原因') + '］';
+        parent.appendChild(s);
+      }
+    } else if (seg.type === 'attachment') {
+      parent.appendChild(makeLink('附件：' + (seg.text || '下载'), () => openSafeLink(seg.url)));
+    } else if (seg.type === 'link') {
+      parent.appendChild(makeLink(seg.text || seg.url || '打开链接', () => openSafeLink(seg.url)));
+    }
+  });
+}
+function renderSavedCrops(r, assetId, box) {
+  const view = r.view;
+  if (!view || !Array.isArray(view.regions)) return;
+  const regions = view.regions.filter(x => x.asset_id === assetId);
+  if (!regions.length) return;
+  const wrap = document.createElement('div'); wrap.className = 'crop-thumbs';
+  const img = new Image();
+  img.onload = () => regions.forEach(reg => {
+    const c = document.createElement('canvas');
+    drawRegionToCanvas(c, img, reg.box);
+    c.title = '已保存裁剪';
+    wrap.appendChild(c);
+  });
+  img.src = assetUrl(assetId);
+  box.appendChild(wrap);
+}
+function drawRegionToCanvas(canvas, img, box) {
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  const x1 = Math.max(0, Math.min(1, box[0])) * iw;
+  const y1 = Math.max(0, Math.min(1, box[1])) * ih;
+  const x2 = Math.max(0, Math.min(1, box[2])) * iw;
+  const y2 = Math.max(0, Math.min(1, box[3])) * ih;
+  const sw = Math.max(1, x2 - x1), sh = Math.max(1, y2 - y1);
+  const scale = Math.min(1, 1600 / sw, 1200 / sh);
+  canvas.width = Math.max(1, Math.round(sw * scale));
+  canvas.height = Math.max(1, Math.round(sh * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, x1, y1, sw, sh, 0, 0, canvas.width, canvas.height);
+}
+
+/* ---------------- 原图 / 多矩形裁剪 ---------------- */
+function cropCloneRegions(regions) {
+  return (regions || []).map(x => ({ asset_id: x.asset_id, box: x.box.slice(0, 4),
+                                     origin: x.origin || 'manual' }));
+}
+function cropFormatBox(box) {
+  return box.map(x => (+x).toFixed(3)).join(', ');
+}
+function cropNormalize(x1, y1, x2, y2) {
+  const clamp = x => Math.max(0, Math.min(1, x));
+  const box = [clamp(Math.min(x1, x2)), clamp(Math.min(y1, y2)),
+               clamp(Math.max(x1, x2)), clamp(Math.max(y1, y2))];
+  return box;
+}
+function cropDraw() {
+  const c = state.crop;
+  if (!c) return;
+  const canvas = $('#cropCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(c.img, 0, 0, canvas.width, canvas.height);
+  const drawBox = (box, current) => {
+    const x = box[0] * canvas.width, y = box[1] * canvas.height;
+    const w = (box[2] - box[0]) * canvas.width, h = (box[3] - box[1]) * canvas.height;
+    ctx.fillStyle = current ? 'rgba(181,79,43,.18)' : 'rgba(181,79,43,.28)';
+    ctx.strokeStyle = '#b54f2b';
+    ctx.lineWidth = Math.max(2, Math.round(canvas.width / 500));
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  };
+  c.regions.forEach(reg => drawBox(reg.box, false));
+  if (c.draft) drawBox(c.draft, true);
+}
+function cropRenderSide() {
+  const c = state.crop;
+  if (!c) return;
+  const list = $('#cropRegions');
+  list.textContent = '';
+  if (!c.regions.length) {
+    list.textContent = '（尚未选择）';
+  } else {
+    c.regions.forEach((reg, i) => {
+      const row = document.createElement('div');
+      row.textContent = `#${i + 1}  xyxy ${cropFormatBox(reg.box)}`;
+      list.appendChild(row);
+    });
+  }
+  const preview = $('#cropPreview');
+  preview.textContent = '';
+  if (!c.regions.length) {
+    const none = document.createElement('div'); none.className = 'stale-note';
+    none.textContent = '拖出矩形后会在这里显示原像素预览。'; preview.appendChild(none);
+  } else {
+    c.regions.forEach((reg, i) => {
+      const canvas = document.createElement('canvas');
+      drawRegionToCanvas(canvas, c.img, reg.box);
+      canvas.title = `区域 #${i + 1}`;
+      preview.appendChild(canvas);
+    });
+  }
+  $('#cropUndo').disabled = c.historyIndex <= 0;
+  $('#cropRedo').disabled = c.historyIndex >= c.history.length - 1;
+  $('#cropClear').disabled = !c.regions.length;
+}
+function cropResetHistory() {
+  const c = state.crop;
+  if (!c) return;
+  c.history = [cropCloneRegions(c.regions)];
+  c.historyIndex = 0;
+}
+function cropCommitHistory() {
+  const c = state.crop;
+  if (!c) return;
+  c.history = c.history.slice(0, c.historyIndex + 1);
+  c.history.push(cropCloneRegions(c.regions));
+  c.historyIndex = c.history.length - 1;
+}
+function cropPoint(ev) {
+  const canvas = $('#cropCanvas');
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return [Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width)),
+          Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height))];
+}
+function openCrop(r, assetId) {
+  if (!r || !assetId) return;
+  const meta = collectContentImages(r.content_blocks).find(x => x.asset_id === assetId);
+  if (meta && meta.crop_safe === false) {
+    alert('这张图未经 Pillow 解码/方向校验，无法安全裁剪。\n原图仍可查看；安装 Pillow 并刷新正文后可裁剪。');
+    return;
+  }
+  const key = rowKey(r);
+  const img = new Image();
+  const requestToken = {};
+  state.cropRequest = requestToken;
+  img.onload = () => {
+    if (state.cropRequest !== requestToken) return;
+    const saved = (r.view && Array.isArray(r.view.regions)) ? r.view.regions : [];
+    const mine = saved.filter(x => x.asset_id === assetId);
+    const others = saved.filter(x => x.asset_id !== assetId);
+    state.crop = {
+      key, r, assetId, img, others,
+      sourceVersion: r.source_version || (r.view && r.view.source_version) || '',
+      regions: cropCloneRegions(mine),
+      history: [], historyIndex: 0, draft: null, pointerStart: null, saving: false,
+    };
+    const canvas = $('#cropCanvas');
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    $('#cropTitle').textContent = `${r.course || '作业'}｜${r.title || '图片'}`;
+    const version = state.crop.sourceVersion;
+    $('#cropVersion').textContent = version
+      ? `保存时会校验正文版本 ${version}；若期间正文或图片更新，服务端返回 409，旧裁剪不会覆盖新版本。`
+      : '缺少正文版本，无法保存；请先刷新正文。';
+    $('#cropSave').disabled = !version;
+    cropResetHistory();
+    cropDraw();
+    cropRenderSide();
+    $('#maskCrop').classList.add('on');
+  };
+  img.onerror = () => {
+    if (state.cropRequest !== requestToken) return;
+    alert('原图无法加载。列表仍可正常使用，请稍后刷新正文。');
+    log('原图加载失败：' + assetId);
+  };
+  img.src = assetUrl(assetId);
+}
+function closeCrop() {
+  state.cropRequest = null;
+  $('#maskCrop').classList.remove('on');
+  state.crop = null;
+}
+$('#cropCanvas').addEventListener('pointerdown', ev => {
+  const c = state.crop;
+  if (!c || c.saving) return;
+  const p = cropPoint(ev);
+  if (!p) return;
+  ev.preventDefault();
+  ev.currentTarget.setPointerCapture(ev.pointerId);
+  c.pointerStart = p;
+  c.draft = [p[0], p[1], p[0], p[1]];
+  cropDraw();
+});
+$('#cropCanvas').addEventListener('pointermove', ev => {
+  const c = state.crop;
+  if (!c || !c.pointerStart || c.saving) return;
+  const p = cropPoint(ev);
+  if (!p) return;
+  c.draft = cropNormalize(c.pointerStart[0], c.pointerStart[1], p[0], p[1]);
+  cropDraw();
+});
+$('#cropCanvas').addEventListener('pointerup', ev => {
+  const c = state.crop;
+  if (!c || !c.pointerStart || c.saving) return;
+  const p = cropPoint(ev) || c.pointerStart;
+  const box = cropNormalize(c.pointerStart[0], c.pointerStart[1], p[0], p[1]);
+  c.pointerStart = null;
+  c.draft = null;
+  if (box[2] - box[0] >= 0.003 && box[3] - box[1] >= 0.003) {
+    c.regions.push({ asset_id: c.assetId, box, origin: 'manual' });
+    cropCommitHistory();
+  }
+  cropDraw();
+  cropRenderSide();
+});
+$('#cropCanvas').addEventListener('pointercancel', () => {
+  const c = state.crop;
+  if (!c) return;
+  c.pointerStart = null; c.draft = null; cropDraw();
+});
+$('#cropUndo').onclick = () => {
+  const c = state.crop;
+  if (!c || c.historyIndex <= 0) return;
+  c.historyIndex -= 1;
+  c.regions = cropCloneRegions(c.history[c.historyIndex]);
+  cropDraw(); cropRenderSide();
+};
+$('#cropRedo').onclick = () => {
+  const c = state.crop;
+  if (!c || c.historyIndex >= c.history.length - 1) return;
+  c.historyIndex += 1;
+  c.regions = cropCloneRegions(c.history[c.historyIndex]);
+  cropDraw(); cropRenderSide();
+};
+$('#cropClear').onclick = () => {
+  const c = state.crop;
+  if (!c || !c.regions.length) return;
+  c.regions = [];
+  cropCommitHistory();
+  cropDraw(); cropRenderSide();
+};
+$('#cropOriginal').onclick = () => {
+  const c = state.crop;
+  if (c) window.open(assetUrl(c.assetId), '_blank', 'noopener');
+};
+$('#cropClose').onclick = closeCrop;
+$('#maskCrop').onclick = ev => { if (ev.target === ev.currentTarget) closeCrop(); };
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && $('#maskCrop').classList.contains('on')) closeCrop();
+});
+$('#cropSave').onclick = async () => {
+  const c = state.crop;
+  if (!c || c.saving) return;
+  if (!c.sourceVersion) { alert('缺少正文版本，请先刷新正文后再裁剪。'); return; }
+  c.saving = true;
+  $('#cropSave').disabled = true;
+  $('#cropVersion').textContent = '正在保存并做版本校验…';
+  const regions = [...c.others, ...c.regions];
+  const res = await api('/api/assignments/' + encodeURIComponent(c.key) + '/view', {
+    expected_version: c.sourceVersion,
+    regions,
+    folded_block_ids: (c.r.view && c.r.view.folded_block_ids) || [],
+    summary: (c.r.view && c.r.view.summary) || '',
+    review_status: 'ok',
+  });
+  c.saving = false;
+  if (res.ok) {
+    c.r.view = {
+      source_version: res.source_version,
+      regions: res.regions || regions,
+      folded_block_ids: res.folded_block_ids || [],
+      summary: res.summary || '', review_status: res.review_status || 'ok',
+      updated_at: res.updated_at,
+    };
+    c.r.stale_view = null;
+    state.rowSigs.delete(c.key);
+    log(`裁剪已保存：${regions.length} 个区域。`);
+    closeCrop();
+    render();
+    return;
+  }
+  $('#cropSave').disabled = false;
+  if (res.http_status === 409 || res.code === 'version_conflict') {
+    $('#cropVersion').textContent = '正文版本已更新，本次裁剪未保存。正在重新读取最新正文…';
+    alert('正文在编辑期间已更新，旧裁剪没有覆盖新版本。页面将重新加载，请在新版本上重新裁剪。');
+    await loadContentItem(c.key);
+    closeCrop();
+    return;
+  }
+  $('#cropVersion').textContent = '保存失败：' + (res.error || '未知错误');
+  alert('裁剪保存失败：' + (res.error || '未知错误'));
+};
+
+async function loadContentItem(key) {
+  const c = await api('/api/assignments/' + encodeURIComponent(key) + '/content');
+  if (!c.ok) {
+    if (c.network) return null;
+    log('读取正文失败：' + (c.error || '未知错误'));
+    return null;
+  }
+  const r = rowByKey(key);
+  if (r) {
+    r.content_status = c.status; r.content_ready = !!c.ready; r.content_stale = !!c.stale;
+    r.content_error = c.error; r.content_checked_at = c.checked_at;
+    r.source_version = c.source_version; r.content_revision = c.revision;
+    r.content_blocks = c.blocks || []; r.content_text = c.text || '';
+    r.asset_ids = c.asset_ids || []; r.view = c.view; r.stale_view = c.stale_view;
+    state.rowSigs.delete(key); render();
+  }
+  return c;
+}
+function refreshContentTask(keys, force) {
+  keys = (keys || []).filter(Boolean);
+  if (!keys.length) { log('没有可刷新的正文条目。'); return; }
+  log(`正在${force ? '强制刷新' : '补齐'}正文：${keys.length} 条（不阻塞列表操作）…`);
+  runTask('content', { item_keys: keys, force: !!force },
+    force ? '刷新作业正文' : '补齐作业正文', async res => {
+      if (res.error) log(res.error);
+      for (const it of (res.items || [])) if (it.item_key) await loadContentItem(it.item_key);
+      await refreshList({ silent: true });
+      log(`正文任务完成：成功 ${res.ok_count || 0} / 失败 ${res.failed || 0}；列表保持可用。`);
+    }, { globalBusy: false });
+}
+function autoFillVisibleContent() {
+  if (state.autoFilling) return;
+  state.autoFilling = true;
+  state.autoFillRound = 0;
+  const next = () => {
+    if (state.autoFillRound >= 200) {
+      state.autoFilling = false;
+      log('正文自动补齐已暂停：本轮批次达到上限，可点「补齐窗口内正文」继续。');
+      return;
+    }
+    state.autoFillRound += 1;
+    log(`自动补齐正文第 ${state.autoFillRound} 批（每批最多 12 条，列表仍可操作）…`);
+    runTask('content', { force: false, limit: 12 }, '补齐窗口内正文', async res => {
+      for (const it of (res.items || [])) if (it.item_key) await loadContentItem(it.item_key);
+      await refreshList({ silent: true });
+      if (res.network || (!res.ok && !res.failed)) {
+        state.autoFilling = false;
+        log('正文自动补齐停止：任务未成功，列表保持可用。');
+        return;
+      }
+      if (res.failed) log(`本批 ${res.failed} 条失败，不会自动无限重试；可在行内手动「刷新正文」。`);
+      if (!res.remaining) {
+        state.autoFilling = false;
+        log('正文自动补齐完成：当前窗口内可补条目已处理。');
+        return;
+      }
+      log(`正文队列剩余 ${res.remaining} 条，继续下一批…`);
+      setTimeout(next, 250);
+    }, { globalBusy: false, inlineOnly: true });
+  };
+  setTimeout(next, 300);
+}
+function refreshCourse(lid) {
+  if (!lid) return;
+  const days = Math.max(1, +$('#numDays').value || 7);
+  const all = $('#chkAll').checked, tests = $('#chkTests').checked;
+  log(`只重试课程 ${lid}（其余课程旧缓存保留）…`);
+  runTask('fetch', { days, all, tests, lids: [String(lid)] },
+    `重试课程 ${lid}`, async res => {
+      if (res.error) log('单课刷新失败：' + res.error);
+      await refreshList({ silent: true });
+    });
 }
 
 /* ---------------- 顶部按钮 ---------------- */
@@ -390,10 +1242,10 @@ $('#btnFetch').onclick = () => {
   const days = +$('#numDays').value, all = $('#chkAll').checked, tests = $('#chkTests').checked;
   log(`正在检索北化在线（全量扫描，约 1–2 分钟${tests ? '' : '，不抓在线测试'}）…`);
   runTask('fetch', { days, all, tests }, '全量扫描北化在线课程', res => {
-    if (res.error) { log(res.error); alert(res.error); return; }
-    state.platformRows = (res.rows || []).filter(x => x.source === '平台');
+    if (res.error) log(res.error);
+    refreshList({ silent: true });
     const scope = all ? '全部，含已过期' : `未来 ${days} 天`;
-    log(`已检索：平台作业 ${state.platformRows.length} 条（${scope}，按截止日期·全量）。`);
+    log(`检索任务结束：${scope}，列表从 SQLite 读取；失败课程旧数据仍保留。`);
     if (res.sweep && res.sweep.missed_from_pool && res.sweep.missed_from_pool.length)
       log(`提示：首页视图漏掉 ${res.sweep.missed_from_pool.length} 门有作业的课（全量已兜住）。`);
     if (res.warnings && res.warnings.failed_courses && res.warnings.failed_courses.length)
@@ -404,13 +1256,34 @@ $('#btnFetch').onclick = () => {
         ? `本次抓取用时 ${res.elapsed_human} —— 登录 ${t.login | 0}s / 作业 ${t.homework | 0}s / 在线测试 ${t.test | 0}s`
         : `本次抓取用时 ${res.elapsed_human}`);
     }
-    $('#stats').innerHTML = `<span>平台 <b>${state.platformRows.length}</b> 条</span><span>手动 <b>${state.manualRows.length}</b> 条</span><span>${res.elapsed_human ? '上次抓取 <b>' + res.elapsed_human + '</b>' : ''}</span>`;
-    render();
+    autoFillVisibleContent();
   });
+};
+$('#btnContentDue').onclick = () => {
+  log('正在补齐窗口内正文（同一认证上下文批量执行；不抓测试题，不阻塞列表）…');
+  runTask('content', { force: false }, '补齐窗口内作业正文', async res => {
+    if (res.error) log(res.error);
+    await refreshList({ silent: true });
+    log(`正文补齐：请求 ${res.requested || 0} 条，成功 ${res.ok_count || 0}，失败 ${res.failed || 0}` +
+      (res.remaining ? `，剩余 ${res.remaining} 条可继续` : '') + '。');
+  }, { globalBusy: false });
 };
 $('#btnPreview').onclick = () => doPublish(true);
 $('#btnPublish').onclick = () => {
   if (confirm('确认推送？\n\n· 班级群那条：已去掉选修课\n· 个人小群那条：完整清单（含选修课）\n\n（300 秒内相同内容会自动去重）')) doPublish(false);
+};
+$('#btnExportViews').onclick = async () => {
+  try {
+    const r = await fetch('/api/views/export');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `作业裁剪备份-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    log('已导出裁剪/折叠/摘要备份。');
+  } catch (e) { alert('导出失败：' + (e.message || e)); }
 };
 // 预览区一次显示两条：上面是班级群那条，下面是个人小群那条。
 // 分开显示是刻意的 —— 你要能一眼看出"哪几项没进班级群"。
@@ -431,14 +1304,24 @@ function doPublish(noSend) {
   const days = +$('#numDays').value;
   log(`正在${noSend ? '生成预览' : '发布'}（未来 ${days} 天）…`);
   runTask(noSend ? 'preview' : 'publish', { days }, noSend ? '生成推送预览' : '抓取并推送', res => {
-    if (res.error) { log(res.error); alert(res.error); return; }
+    if (res.cache_blocked) {
+      const why = ((res.coverage || {}).publish_block_reasons || [res.error]).filter(Boolean).join('；');
+      log('正式发布被阻断：' + why);
+      if (!noSend) alert('发布已拒绝：列表缓存不完整或不新鲜。\n\n' + why + '\n\n请先完成一次完整检索；旧列表和预览不会被清空。');
+    }
+    if (res.error && !noSend) log(res.error);
     if (res.message) showPreview(bothMessages(res));
     if (res.elapsed_human) log(`本次抓取用时 ${res.elapsed_human}`);
     // 数据来源：复用检索结果时不重新抓取（省 1-2 分钟）
     if (res.data_source === 'cache') {
       log(`ⓘ ${res.data_note}（点击「检索北化在线」可强制刷新数据）`);
+    } else if (res.data_source === 'stale-cache') {
+      log('ⓘ ' + res.data_note + '；这次只生成预览，没有发送，也没有访问平台。');
     } else if (res.data_source === 'fresh') {
       log('本次重新抓取了平台数据（超过 5 分钟或缓存覆盖不足）。');
+    }
+    if (res.cache_blocked && noSend) {
+      log('ⓘ 当前缓存不满足正式发布条件；预览文字只代表本地旧快照。');
     }
     if (noSend) log(`已生成预览（未发送）：${countLine(res)}。`);
     else if (res.deduped) { log(res.note); alert(res.note); }
@@ -808,6 +1691,9 @@ $('#btnShutdown').onclick = async () => {
   $('#taskLabel').textContent = '服务已停止';
 };
 
+$('#numDays').addEventListener('change', () => refreshList({ silent: true }));
+$('#chkAll').addEventListener('change', () => refreshList({ silent: true }));
+
 /* ---------------- 启动 ---------------- */
 (async function init() {
   $('#today').textContent = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
@@ -817,6 +1703,7 @@ $('#btnShutdown').onclick = async () => {
   log('这份提醒是发给全班的：你交没交，不影响这门课该不该提醒全班。');
   log('平台行：「内容」读题目要求 /「打开」进平台页面（已交=查看结果，未交=提交作业）。');
   refreshManual();
+  resumeLastTask();
   // 心跳：让服务端知道"这个页面还在用"。服务靠「浏览器进程消失 + 心跳停止」
   // 两个条件判断是否可以退出 —— 因为 Edge 已有实例时会把 --app 转交给它，
   // 我们启动的进程会立刻退出，只看进程号会误判成"窗口已关"而关掉服务。

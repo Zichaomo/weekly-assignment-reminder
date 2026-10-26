@@ -26,6 +26,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from platform_lock import FetchLock, LockTimeout
+
 # Windows 下子进程 stdout 默认 GBK，父进程按 utf-8 读会乱码，统一强制 utf-8
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -651,14 +653,18 @@ def main() -> int:
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.check:
-        ok = _logged_in_via_state()
-        print("LOGGED_IN" if ok else "NEED_LOGIN")
-        return 0 if ok else 1
-
-    if args.manual:
-        return run_manual(headless=args.headless)
-    return run_auto(headless=args.headless, no_wait=args.no_wait)
+    try:
+        with FetchLock(wait_sec=120):
+            if args.check:
+                ok = _logged_in_via_state()
+                print("LOGGED_IN" if ok else "NEED_LOGIN")
+                return 0 if ok else 1
+            if args.manual:
+                return run_manual(headless=args.headless)
+            return run_auto(headless=args.headless, no_wait=args.no_wait)
+    except LockTimeout as exc:
+        print(f"NEED_LOGIN: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

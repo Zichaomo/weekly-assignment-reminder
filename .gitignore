@@ -22,6 +22,7 @@ data/_notify_payload.txt
 
 # ── 调试产物 ──────────────────────────────────────
 data/debug/
+tests/artifacts/
 
 # ── WorkBuddy 会话数据（含项目记忆 / 账号信息，属本地私有）──
 .workbuddy/
@@ -50,6 +51,8 @@ data/last_message_personal.txt
 data/push_log.jsonl
 # 抓取互斥锁（运行时文件）
 data/scrape.lock
+# 所有平台访问锁/任务运行锁（实际默认 data/platform.lock；兼容历史命名）
+data/*.lock
 
 # ── 本机权限修复产物（沙箱/ACL 诊断的备份与报告）────────
 # 含本机 SID、绝对路径与逐文件清单，只对这台机器有意义
@@ -84,3 +87,9 @@ data/task_log.jsonl
 data/task_run.log
 # 补推检测日志（登录触发，每次登录都会留下一次判定记录）
 data/task_catchup.log
+
+# Local delegation logs and homework cache
+.deepastra-work/
+data/cache/
+data/platform.lock
+data/platform-access.lock

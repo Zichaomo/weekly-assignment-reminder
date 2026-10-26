@@ -1,0 +1,46 @@
+{
+  "run_id": "20261025T013853Z-445af132",
+  "model": "deepseek-flash",
+  "provider": "deepseek",
+  "reasoning_effort_requested": "high",
+  "harness": "Codex CLI",
+  "wire_api": "responses",
+  "apps_and_plugins_enabled": false,
+  "skills_catalog_token_budget": 1000,
+  "codex_version": "codex-cli 0.163.0",
+  "started_at": "2026-10-25T01:38:53.476381+00:00",
+  "state": "completed",
+  "timeout_seconds": 120,
+  "accounting": "Codex usage events; no per-call dollar receipt exposed by CLI",
+  "exit_code": 0,
+  "seconds": 16.42,
+  "usage": {
+    "input_tokens": 32167,
+    "cached_input_tokens": 24064,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 1186,
+    "reasoning_output_tokens": 657
+  },
+  "tool_events": [],
+  "tool_event_count": 0,
+  "provider_error_seen": false,
+  "cost_usd": null,
+  "cost_note": "Unavailable: no isolated per-run provider dollar receipt captured. Do not interpret as zero.",
+  "estimated_cost_usd": 0.00199924,
+  "estimated_cost_range_usd": [
+    0.00199924,
+    0.00399848
+  ],
+  "cost_estimate_basis": {
+    "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "rates_verified": "2026-09-12",
+    "usage_source": "Codex turn.completed",
+    "pricing_window": "off-peak",
+    "offpeak_per_million_usd": {
+      "uncached_input": 0.15,
+      "cached_input": 0.003,
+      "output_including_reasoning": 0.6
+    },
+    "note": "Token-based estimate, not an API dollar receipt; excludes unreported failed-call billing and supervising Astra."
+  }
+}

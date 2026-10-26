@@ -6,17 +6,17 @@
   - 静态托管 console.html 与字体文件
   - 把 hub.py / manual.py 的既有函数包成 HTTP JSON API
   - 长任务（检索/发布/取正文/刷新课程表）放后台线程，前端轮询进度
-
-红线：scrape.py / weekly.py / notify.py / manual.py 的业务逻辑一行不改；
-抓取参数组装仍由 hub.py 完成，本文件只传界面上的开关（天数/含全部/抓不抓测试）。
+  - 列表与正文以 SQLite 缓存为主路径；冷打开不访问学校平台
 
 用法：双击 console.bat（或手动 `python server.py`），浏览器打开 http://127.0.0.1:8277
 端口被占用时直接退出（视为已有实例在跑，console.bat 会继续打开浏览器）。
 """
 import argparse
+import hashlib
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -28,7 +28,7 @@ from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -41,14 +41,15 @@ for _s in (sys.stdout, sys.stderr):
 
 import hub      # noqa: E402  控制台后端：列表/发布/黑名单/正文/课程表
 import manual   # noqa: E402  手动条目增删改查（cmd_* 函数直接复用）
+import cache_store  # noqa: E402
+import content_pipeline  # noqa: E402
 
-PORT = 8277
+PORT = int(os.environ.get("HOMEWORK_CONSOLE_PORT", "8277"))
 PAGE_FILE = ROOT / "console.html"
 
 # Playwright 会话不能并发（共享 storage_state / 课程上下文），长任务串行执行
 EXEC = ThreadPoolExecutor(max_workers=1)
 TASKS = {}          # id -> {status, op, started, finished, result, error}
-_CACHE_SIDE = {}    # id -> 该任务的原始抓取数据（内部用，不出网）
 _LAST_HEARTBEAT = [0.0]   # 页面最后一次心跳时间（列表以便闭包内修改）
 HEARTBEAT_GAP = 30.0      # 超过这么久没有心跳 = 页面已关
 STARTUP_GRACE = 180.0     # 页面从未连上时的宽限期（避免刚启动就误判）
@@ -134,55 +135,29 @@ def load_channel():
         return "未知"
 
 
-# ---------------------------------------------------------------- 检索结果缓存
-# 为什么需要：检索一次全量扫描要 1-2 分钟。若「预览/提前发布」再独立抓一遍，
-# 用户就要为同一份数据等两次。所以把最近一次检索的原始结果缓存下来复用。
-CACHE_TTL = 300          # 秒；5 分钟内直接复用
-_FETCH_CACHE = {"payload": None, "at": 0.0, "days": 0}
-
-
-def cache_put(payload, days):
-    _FETCH_CACHE.update(payload=payload, at=time.time(), days=int(days or 0))
-
-
-def cache_reject_reason(res):
-    """返回「不允许缓存」的原因；可以缓存则返回 None。
-
-    只有各项都健康才允许把结果留在缓存里给「预览/提前发布」用：
-      · ok 为真
-      · 平台条数 > 0
-      · 失败课程数不到总数的一半
-    """
-    if not isinstance(res, dict):
-        return "返回格式异常"
-    if not res.get("ok"):
-        return f"抓取未成功：{res.get('error') or '未知错误'}"
-    if int(res.get("platform_count") or 0) <= 0:
-        return "平台 0 条（可能是登录态失效或平台异常），不缓存以免把失败伪装成成功"
-    sweep = res.get("sweep") or {}
-    total = int(sweep.get("courses_total") or 0)
-    failed = len(res.get("warnings", {}).get("failed_courses") or [])
-    if total and failed >= max(1, total // 2):
-        return f"{failed}/{total} 门课抓取失败（大面积失败），不缓存"
-    return None
-
-
-def cache_get(need_days):
-    """命中则返回 (payload, age_sec)，否则 (None, None)。
-
-    两个条件都要满足：
-      · 距上次检索不超过 CACHE_TTL
-      · 上次检索覆盖的天数 >= 本次需要的天数（否则可能漏掉较远的作业）
-    """
-    p, at, days = _FETCH_CACHE["payload"], _FETCH_CACHE["at"], _FETCH_CACHE["days"]
-    if not p or not at:
-        return None, None
-    age = time.time() - at
-    if age > CACHE_TTL:
-        return None, None
-    if days < int(need_days or 0):
-        return None, None
-    return p, age
+# ---------------------------------------------------------------- 缓存状态
+def cache_state():
+    """Return local coverage/counts without touching the platform."""
+    try:
+        import scrape
+        index = scrape.load_course_index()
+        blocked = scrape.blacklisted_lids()
+        expected = [str(x) for x in index if str(x) not in blocked]
+        state = cache_store.latest_state()
+        tests_requested = bool((state.get("scan") or {}).get("tests_requested", True))
+        cov = cache_store.coverage(
+            expected_lids=expected, tests_requested=tests_requested,
+            tests_blocked_lids=scrape.test_blacklisted_lids(),
+            current_index_version=cache_store.version_hash(index) if index else "",
+            max_age_sec=cache_store.cache_settings()["publish_fresh_sec"])
+        items = cache_store.load_items()
+        return {"available": bool(items), "item_count": len(items),
+                "content_ready": sum(1 for x in items if x.get("content_ready")),
+                "content_failed": sum(1 for x in items if x.get("content_error")),
+                "coverage": cov}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "item_count": 0,
+                "error": f"{type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------- 长任务
@@ -211,112 +186,115 @@ def sanitize_result(obj):
         return str(obj)
 
 
-def _cache_from_result(res, cache_days):
-    """统一写缓存：fetch / preview / publish 三条路径共用。
-
-    缓存天数由各路径给出：
-      · fetch（检索）    -> 用户选的窗口天数
-      · preview/publish  -> 9999（它们内部是 --deadline-only 全量抓取，
-                             覆盖任意窗口，否则用户改天数就会重抓）
-
-    注意：健康检查必须基于 **payload 本身**，不能依赖调用方返回值的字段。
-    run_list 返回 platform_count / sweep / warnings，而 run_publish 不返回 ——
-    曾经因此把 preview/publish 的结果一律判成「平台 0 条」而拒绝缓存，
-    导致「预览后点发布」永远重新抓取。
-    """
-    payload = res.get("_payload") if isinstance(res, dict) else None
-    if payload:
-        # 用 payload 的真实数据构造一份等价视图供守卫判断
-        view = {
-            "ok": True,
-            "platform_count": len(payload.get("homeworks") or []) + len(payload.get("tests") or []),
-            "sweep": payload.get("sweep") or {},
-            "warnings": payload.get("warnings") or {},
-        }
-    else:
-        view = res
-    reason = cache_reject_reason(view)
-    if payload and not reason:
-        cache_put(payload, cache_days)
-        res["cached_for_reuse"] = True
-        res["cache_days"] = cache_days
-    else:
-        if not payload:
-            # 本次是"复用"而非新抓，不清掉已有缓存
-            res["cached_for_reuse"] = False
-            res["cache_reject_reason"] = reason or "本次未抓取（复用了缓存）"
-            return
-        _FETCH_CACHE.update(payload=None, at=0.0, days=0)
-        res["cached_for_reuse"] = False
-        res["cache_reject_reason"] = reason or "没有可复用的数据"
-
-
-# 供自检：查看当前缓存状态
-def cache_state():
-    p, at, days = _FETCH_CACHE["payload"], _FETCH_CACHE["at"], _FETCH_CACHE["days"]
-    return {
-        "has_payload": bool(p),
-        "age_sec": (round(time.time() - at, 1) if at else None),
-        "cache_days": days,
-        "ttl": CACHE_TTL,
-        "homeworks": (len(p.get("homeworks", [])) if p else 0),
-        "tests": (len(p.get("tests", [])) if p else 0),
-    }
-
-
 def run_task(op, params):
     """长任务统一入口，全部走 hub.py 既有函数，串行执行。"""
     if op == "fetch":
         days = 9999 if params.get("all") else int(params.get("days", 7))
-        res = capture_json(hub.run_list, days, True, False, False, False,
-                           no_tests=not params.get("tests", True))
-        # 只有「真的抓到数据」才允许复用。
-        # 教训（2026-10-13 实测）：一次全量扫描失败（0 条 + 18 门课全失败）曾被缓存，
-        # 之后点「预览」会飞速复用它 —— 把一次失败伪装成成功，比慢更糟。
-        _cache_from_result(res, days)
-        return res
+        return capture_json(
+            hub.run_list, days, True, False, False, False,
+            no_tests=not params.get("tests", True),
+            include_expired=bool(params.get("all")), lids=params.get("lids") or None,
+            scan_id=params.get("_task_id"))
 
     if op in ("preview", "publish"):
         days = int(params.get("days", 7))
-        payload, age = cache_get(days)
-        res = hub.run_publish(days, op == "preview", None,
-                              prefetched=payload, prefetched_age_sec=age)
-        # 关键修复：预览/发布自己抓的数据也要入缓存，
-        # 否则「预览 -> 5 分钟内发布」会再抓一遍。
-        # 天数传 9999：run_publish 内部是全量抓取，可覆盖任意窗口。
-        _cache_from_result(res, 9999)
-        return res
+        return hub.run_publish(days, op == "preview", None)
     if op == "content":
-        return hub.run_content(str(params.get("hwtid", "")))
+        return hub.run_content(
+            str(params.get("hwtid", "")),
+            item_keys=params.get("item_keys") or None,
+            hwtids=params.get("hwtids") or None,
+            force=bool(params.get("force")),
+            limit=params.get("limit"))
     if op == "refresh-courses":
         return hub.run_refresh_courses()
     return {"ok": False, "error": f"未知任务：{op}"}
 
 
+def _task_signature(op, params):
+    norm = {}
+    if op == "fetch":
+        norm = {"days": int(params.get("days", 7)), "all": bool(params.get("all")),
+                "tests": bool(params.get("tests", True)),
+                "lids": sorted(str(x) for x in (params.get("lids") or []))}
+    elif op in ("preview", "publish"):
+        norm = {"days": int(params.get("days", 7))}
+    elif op == "content":
+        norm = {"item_keys": sorted(str(x) for x in (params.get("item_keys") or [])),
+                "hwtids": sorted(str(x) for x in (params.get("hwtids") or [])),
+                "hwtid": str(params.get("hwtid") or ""),
+                "force": bool(params.get("force"))}
+    else:
+        norm = {str(k): v for k, v in params.items() if not str(k).startswith("_")}
+    return f"{cache_store.account_scope()}|{op}|{cache_store.version_hash(norm)}"
+
+
+def _task_status(result):
+    if not isinstance(result, dict):
+        return "error"
+    if result.get("ok"):
+        cov = result.get("coverage") or {}
+        if (cov and not cov.get("publishable")) or result.get("failed") or result.get("partial"):
+            return "partial"
+        return "done"
+    if result.get("failed") or result.get("cache_blocked"):
+        return "partial" if result.get("failed") else "error"
+    return "error"
+
+
 def _task_worker(task_id, op, params):
     try:
+        with TASKS_LOCK:
+            if task_id in TASKS:
+                TASKS[task_id]["status"] = "running"
+        cache_store.update_task(task_id, "running",
+                                scan_id=(task_id if op == "fetch" else None))
         result = run_task(op, params)
-        status = "done"
-        error = None
+        status = _task_status(result)
+        error = (result.get("error") if isinstance(result, dict) else None)
     except Exception as e:  # noqa: BLE001
         result, status, error = None, "error", f"{type(e).__name__}: {e}"
-    # 把内部抓取数据留在服务端（供缓存用），不随 result 出网
-    if isinstance(result, dict) and "_payload" in result:
-        _CACHE_SIDE[task_id] = result.get("_payload")
-        result = {k: v for k, v in result.items() if k != "_payload"}
+    scan_id = None
+    if isinstance(result, dict):
+        scan_id = result.get("scan_id")
+        if not scan_id:
+            scan_id = ((result.get("coverage") or {}).get("scan") or {}).get("scan_id")
+    try:
+        cache_store.update_task(task_id, status,
+                                result_summary={"scan_id": scan_id, "status": status},
+                                scan_id=scan_id)
+    except Exception:  # noqa: BLE001
+        pass
     with TASKS_LOCK:
         TASKS[task_id].update(status=status, result=result, error=error,
-                              finished=time.time())
+                              finished=time.time(), scan_id=scan_id)
 
 
 def submit_task(op, params):
-    task_id = uuid.uuid4().hex[:8]
+    task_id = uuid.uuid4().hex[:12]
+    params = dict(params or {})
+    params["_task_id"] = task_id
+    signature = _task_signature(op, params)
+    task_id, deduped = cache_store.register_task(task_id, signature, op, params)
+    if deduped:
+        return task_id, True
     with TASKS_LOCK:
-        TASKS[task_id] = {"status": "running", "op": op,
+        TASKS[task_id] = {"status": "queued", "op": op, "params": params,
+                          "signature": signature,
+                          "scan_id": task_id if op == "fetch" else None,
                           "started": time.time(), "finished": None,
                           "result": None, "error": None}
     EXEC.submit(_task_worker, task_id, op, params)
-    return task_id
+    return task_id, False
+
+
+def task_progress(task: dict) -> dict | None:
+    """Progress may only come from this task's own scan id."""
+    scan_id = task.get("scan_id")
+    if not scan_id:
+        return None
+    progress = cache_store.scan_progress(scan_id)
+    return None if progress.get("status") == "none" else progress
 
 
 # ---------------------------------------------------------------- 手动条目
@@ -359,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     # ---- 响应辅助
-    def _send(self, code, body, mime="application/json; charset=utf-8", raw=None):
+    def _send(self, code, body, mime="application/json; charset=utf-8", raw=None,
+              headers=None):
         if raw is not None:
             data = raw
         else:
@@ -375,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(str(key), str(value))
         self.end_headers()
         self.wfile.write(data)
 
@@ -382,6 +363,8 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         if n <= 0:
             return {}
+        if n > 2_000_000:
+            raise ValueError("请求体过大")
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception:  # noqa: BLE001
@@ -404,8 +387,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             return self._do_GET()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self._log_exc("GET")
+            try:
+                self._send(500, {"ok": False, "error": f"服务端错误：{type(exc).__name__}"})
+            except Exception:  # noqa: BLE001
+                pass
 
     def _do_GET(self):
         u = urlparse(self.path)
@@ -434,12 +421,62 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             return self._send(200, {"ok": True, "channel": load_channel(),
-                                    "port": PORT})
+                                    "port": PORT,
+                                    "content_ttl_sec": cache_store.cache_settings()["content_ttl_sec"],
+                                    "publish_fresh_sec": cache_store.cache_settings()["publish_fresh_sec"]})
 
         if path == "/api/list":
-            # 不抓平台，只按当前窗口出手动条目（对应旧控制台的 Refresh-View）
-            days = 9999 if q.get("all", ["0"])[0] == "1" else int(q.get("days", ["7"])[0])
-            return self._send(200, capture_json(hub.run_list, days, False))
+            # Local-only: this route must never touch the platform, even cold.
+            try:
+                days = max(1, min(9999, int(q.get("days", ["7"])[0])))
+            except (TypeError, ValueError):
+                days = 7
+            include_expired = (q.get("all", ["0"])[0] == "1"
+                               or q.get("include_expired", ["0"])[0] == "1")
+            t0 = time.perf_counter()
+            res = capture_json(hub.run_list, days, False,
+                               include_expired=include_expired)
+            res["first_screen_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+            return self._send(200, res)
+
+        if path.startswith("/api/assignments/") and path.endswith("/content"):
+            key = unquote(path[len("/api/assignments/"):-len("/content")])
+            item = cache_store.get_item(key)
+            if not item:
+                return self._send(404, {"ok": False, "error": "作业条目不存在"})
+            return self._send(200, {
+                "ok": True, "item_key": item["item_key"],
+                "status": item.get("content_status") or "not_ready",
+                "ready": bool(item.get("content_ready")),
+                "stale": bool(item.get("content_stale")),
+                "error": item.get("content_error"),
+                "checked_at": item.get("content_checked_at"),
+                "source_version": item.get("source_version"),
+                "revision": item.get("content_revision"),
+                "blocks": item.get("content_blocks") or [],
+                "asset_ids": item.get("asset_ids") or [],
+                "text": item.get("content_text") or "",
+                "view": item.get("view"), "stale_view": item.get("stale_view"),
+            })
+
+        if path.startswith("/api/assets/"):
+            asset_id = path.rsplit("/", 1)[-1].lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", asset_id):
+                return self._send(400, {"ok": False, "error": "非法资产 ID"})
+            found = content_pipeline.asset_path(asset_id)
+            if not found:
+                return self._send(404, {"ok": False, "error": "资产不存在"})
+            fp, record = found
+            mime = str(record.get("mime") or "")
+            if mime not in content_pipeline.IMAGE_MIME:
+                return self._send(415, {"ok": False, "error": "资产类型不允许"})
+            return self._send(200, None, mime, raw=fp.read_bytes(), headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'",
+            })
+
+        if path == "/api/views/export":
+            return self._send(200, cache_store.export_views())
 
         if path == "/api/courses":
             # 课程目录：选修课联想补全 / 全部课程清单 / 黑名单候选都读它
@@ -459,13 +496,21 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             with TASKS_LOCK:
-                t = TASKS.get(task_id)
+                t = dict(TASKS[task_id]) if task_id in TASKS else None
             if not t:
-                return self._send(404, {"ok": False, "error": "任务不存在"})
+                rec = cache_store.task_record(task_id)
+                if not rec:
+                    return self._send(404, {"ok": False, "error": "任务不存在"})
+                t = {"status": rec["status"], "op": rec["op"],
+                     "started": rec["created_at"], "finished": rec["finished_at"],
+                     "scan_id": rec.get("scan_id"),
+                     "result": None, "error": rec.get("result_summary")}
+            progress = task_progress(t)
             # 内部字段（_payload 等）必须剥掉：它含 datetime，直接序列化会抛错断连
             return self._send(200, {"ok": True,
                                     **{k: v for k, v in t.items() if k != "result"},
-                                    "result": sanitize_result(t.get("result"))})
+                                    "result": sanitize_result(t.get("result")),
+                                    "progress": progress})
 
         return self._send(404, {"ok": False, "error": "not found"})
 
@@ -473,8 +518,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             return self._do_POST()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self._log_exc("POST")
+            try:
+                self._send(400 if isinstance(exc, ValueError) else 500,
+                           {"ok": False, "error": str(exc) if isinstance(exc, ValueError)
+                            else f"服务端错误：{type(exc).__name__}"})
+            except Exception:  # noqa: BLE001
+                pass
 
     def _do_POST(self):
         u = urlparse(self.path)
@@ -484,7 +535,34 @@ class Handler(BaseHTTPRequestHandler):
             op = p.get("op", "")
             if op not in ("fetch", "preview", "publish", "content", "refresh-courses"):
                 return self._send(400, {"ok": False, "error": f"未知任务：{op}"})
-            return self._send(200, {"ok": True, "task_id": submit_task(op, p)})
+            keys = p.get("item_keys") or []
+            ids = p.get("hwtids") or []
+            if not isinstance(keys, list) or not isinstance(ids, list) \
+                    or len(keys) > 100 or len(ids) > 100:
+                return self._send(400, {"ok": False, "error": "批量正文参数过多或格式错误"})
+            task_id, deduped = submit_task(op, p)
+            return self._send(200, {"ok": True, "task_id": task_id,
+                                    "deduped": deduped,
+                                    "status": "already-active" if deduped else "queued"})
+
+        if u.path.startswith("/api/assignments/") and u.path.endswith("/view"):
+            key = unquote(u.path[len("/api/assignments/"):-len("/view")])
+            expected = str(p.get("expected_version") or "")
+            if not expected:
+                return self._send(400, {"ok": False, "error": "缺少 expected_version"})
+            try:
+                res = cache_store.save_view(
+                    key, expected_version=expected,
+                    regions=p.get("regions") or [],
+                    folded_block_ids=p.get("folded_block_ids") or [],
+                    summary=str(p.get("summary") or ""),
+                    review_status=str(p.get("review_status") or "ok"))
+            except cache_store.VersionConflict as exc:
+                return self._send(409, {"ok": False, "error": str(exc),
+                                        "code": "version_conflict"})
+            except ValueError as exc:
+                return self._send(400, {"ok": False, "error": str(exc)})
+            return self._send(200, {"ok": True, **res})
 
         if u.path == "/api/manual":
             return self._send(200, manual_action(p.get("action", ""), p))
@@ -513,7 +591,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/open":
             url = str(p.get("url", ""))
-            if not url.startswith("http"):
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") \
+                    or not content_pipeline.host_allowed(url):
                 return self._send(400, {"ok": False, "error": "非法链接"})
             os.startfile(url)  # noqa: S606 本机控制台，用系统默认浏览器打开平台页
             return self._send(200, {"ok": True})
@@ -590,6 +670,11 @@ def main():
         threading.Thread(target=_watch_browser, args=(args.watch_pid,),
                          daemon=True).start()
 
+    try:
+        cache_store.init_db()
+        cache_store.recover_orphan_tasks()
+    except Exception as exc:  # noqa: BLE001
+        print(f"警告：任务注册表恢复失败：{type(exc).__name__}: {exc}")
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"作业提醒 Web 控制台已启动： http://127.0.0.1:{PORT}")
     if args.watch_pid:

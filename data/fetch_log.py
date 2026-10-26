@@ -31,7 +31,10 @@ def log_fetch(source: str, days, *, mode: str = "", rows: int = None,
               rows_total: int = None, platform: int = None, tests: int = None,
               manual: int = None, elapsed: float = None, cached: bool = False,
               data_age: float = None, ok: bool = True, error: str = "",
-              failed_courses: list = None, notes: str = "") -> None:
+              failed_courses: list = None, notes: str = "",
+              cache_hit: bool = None, first_screen_ms: float = None,
+              content_requested: int = None, content_ok: int = None,
+              content_failed: int = None, task_id: str = "") -> None:
     """追加一条检索记录。
 
     source      调用来源：hub-list（检索按钮）/ hub-preview / hub-publish / weekly
@@ -57,6 +60,13 @@ def log_fetch(source: str, days, *, mode: str = "", rows: int = None,
         "elapsed_sec": (round(elapsed, 1) if isinstance(elapsed, (int, float)) else None),
         "cached": bool(cached),
         "data_age_sec": (round(data_age, 1) if isinstance(data_age, (int, float)) else None),
+        "cache_hit": (bool(cached) if cache_hit is None else bool(cache_hit)),
+        "first_screen_ms": (round(first_screen_ms, 1)
+                            if isinstance(first_screen_ms, (int, float)) else None),
+        "content_requested": content_requested,
+        "content_ok": content_ok,
+        "content_failed": content_failed,
+        "task_id": (task_id or "")[:32],
         "failed_count": (len(failed_courses) if failed_courses else 0),
         "failed_courses": (list(failed_courses)[:12] if failed_courses else []),
         "notes": (notes or "")[:200],

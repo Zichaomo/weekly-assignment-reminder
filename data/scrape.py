@@ -26,14 +26,19 @@
     python scrape.py --days 7       # 只输出未来 7 天内截止的（默认全部）
 """
 import argparse
-import html
 import json
 import os
 import re
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urljoin, urlsplit
+
+import cache_store
+import content_pipeline
+from platform_lock import FetchLock, LockTimeout
 
 # Windows 下子进程 stdout 默认按 GBK(cp936) 编码，父进程用 utf-8 读会 UnicodeDecodeError。
 # 强制本进程以 utf-8 输出，保证被 weekly.py 调用时解码一致。
@@ -66,66 +71,8 @@ def need_browser():
         return False
     return True
 
-# ---------------------------------------------------------------- 抓取互斥锁
-# 两个抓取进程并发会共用会话上下文并互相搞乱页面，导致「全部课程都抓不到」的假故障。
-# 实测（2026-10-13）：并发时 18 门课全报「课程页未出现课程作业入口」，耗时 22 分钟、结果 0 条。
-LOCK_FILE = None      # 在 STATE_FILE 定义之后赋值（见下）
-LOCK_STALE_SEC = 600  # 超过这个时间的锁视为陈旧（上次崩溃遗留），自动清理
-LOCK_WAIT_SEC = 120   # 拿不到锁时最多等这么久
-
-
-class FetchLock:
-    """极简文件锁：O_EXCL 创建，跨进程互斥。
-
-    with FetchLock():
-        ...抓取...
-    拿不到锁会等，超时则打印警告继续（宁可慢/乱，也不要让用户点了没反应）。
-    """
-
-    def __init__(self, path: Path, wait_sec: int = LOCK_WAIT_SEC):
-        self.path = Path(path)
-        self.wait_sec = wait_sec
-        self.acquired = False
-
-    def __enter__(self):
-        deadline = time.time() + self.wait_sec
-        warned = False
-        while True:
-            try:
-                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                              .encode("utf-8"))
-                os.close(fd)
-                self.acquired = True
-                return self
-            except FileExistsError:
-                # 陈旧锁？清掉重试
-                try:
-                    age = time.time() - self.path.stat().st_mtime
-                    if age > LOCK_STALE_SEC:
-                        print(f"WARN: 发现陈旧抓取锁（{age:.0f} 秒前），已清理",
-                              file=sys.stderr)
-                        self.path.unlink(missing_ok=True)
-                        continue
-                except OSError:
-                    pass
-                if time.time() >= deadline:
-                    print("WARN: 已有另一个抓取在运行（定时任务或另一个窗口？），"
-                          "本次可能与其互相干扰，结果或许不准。", file=sys.stderr)
-                    return self
-                if not warned:
-                    warned = True
-                    print("注意：已有另一个抓取在运行，正在等它结束（最多 "
-                          f"{self.wait_sec} 秒）...", file=sys.stderr)
-                time.sleep(2)
-
-    def __exit__(self, *exc):
-        if self.acquired:
-            try:
-                self.path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return False
+# 平台互斥由 platform_lock.FetchLock 统一负责：所有入口共用一把锁，超时失败。
+LOCK_WAIT_SEC = 120
 
 
 BASE = "https://course.buct.edu.cn"
@@ -134,6 +81,10 @@ ROOT = Path(__file__).resolve().parent
 PROFILE_DIR = Path.home() / ".workbuddy" / "profiles" / "buct-course-edge"
 STATE_FILE = ROOT / "storage_state.json"
 DEBUG_DIR = ROOT / "debug"
+
+# A single THEOL list is expected to fit comfortably in this bound.  Exceeding
+# it is a hard failure, never a partial success.
+MAX_LIST_PAGES = 30
 
 # 平台有两套时间写法，都要认：
 #   作业表：2026年11月26日21:13:00（偶尔出现残缺秒 9:04:0）
@@ -277,86 +228,104 @@ def collect_all_courses(page) -> dict:
     return out
 
 
+def _budget_ms(deadline: float, cap_ms: int = 60000) -> int:
+    return max(1, min(int(cap_ms), int((deadline - time.monotonic()) * 1000)))
+
+
+def _ensure_budget(deadline: float, step: str) -> None:
+    if time.monotonic() >= deadline:
+        raise RuntimeError(f"课程时间预算已耗尽（{step}）")
+
+
 def fetch_course_both(ctx, page, lid: str, name: str, debug: bool = False,
                       want_homework: bool = True, want_tests: bool = False,
-                      empty_retries: int = 2):
-    """一次进课程页，把「课程作业」和「在线测试」两个栏目都取下来。
+                      empty_retries: int = 2, return_status: bool = False):
+    """Fetch both columns in one course context without treating empty as failure.
 
-    提速要点（2026-10-13 实测，每门课 ~2 秒）：
-      1. **复用同一个 page 直接 goto enter_course.jsp**，不再为每门课开新窗口
-         （旧写法靠 `ctx.expect_page()` 抓 window.open 出来的新窗口，
-          既慢又依赖主页面一直停在 SSO 首页，主页面一旦被导航就整轮失效）。
-      2. **进一次课程页就把两个栏目链接都取下来**，不要跳完作业页再跑回来取测试链接
-         （那次多余往返实测约 0.7 秒/门）。
-      3. **找不到「在线测试」栏目时快速放弃**：这类课（实测 高等数学A（I））
-         会让「等文字出现」白等满超时 —— 曾经一门课就吃掉 42 秒。
-
-    ⚠️ 空表必须重试（2026-10-13 教训）：
-      平台偶发「作业页已跳过去但表格没渲染 / 跳错页」，此时解析出 0 条。
-      而 0 条本身是合法结果（有的课确实没作业），若不重试就会**静默丢数据**。
-      实测普通物理(Ⅱ) 出现过一次 0 条 + 15.9 秒（白等超时）。
-      所以：看起来是「加载失败」时重试 empty_retries 次；重试后仍 0 条才接受，
-      并在 notes 里标记 empty-verified 供上层告警。
-
-    返回 (homeworks, tests, notes)。某一栏目不存在不算失败，只记 note。
+    Only an *invalid/unknown* empty page is retried, and only that column is
+    revisited.  A valid empty table is accepted immediately.  Explicit
+    ``want_tests=False`` never touches the test column.
     """
-    hw_rows, test_rows = [], []
-    notes = []
+    notes: list[str] = []
+    statuses = {"homework": "invalid", "tests": "disabled" if not want_tests else "invalid"}
+    evidence: dict[str, str] = {}
     course_url = f"{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw"
-    last_error = None
+    settings = cache_store.cache_settings()
+    deadline = time.monotonic() + max(5.0, float(settings["course_timeout_sec"]))
 
-    for attempt in range(max(1, empty_retries + 1)):
-        try:
-            # 进课程页（这一跳就把服务端会话的「当前课程」切过来了），同时取两个栏目链接
-            page.goto(course_url, wait_until="domcontentloaded", timeout=60000)
-            if not wait_text(page, "课程作业", timeout=25):
-                last_error = "课程页未出现「课程作业」入口"
-                continue
-            hw_href = get_column_href(page, "课程作业", timeout=15) if want_homework else None
-            test_href = (get_column_href(page, "在线测试", timeout=4, retries=2)
-                         if want_tests else None)
+    page.goto(course_url, wait_until="domcontentloaded", timeout=_budget_ms(deadline))
+    if page_is_login(page):
+        raise RuntimeError("认证上下文失效：课程入口跳到了登录页")
+    if not wait_text(page, "课程作业", timeout=min(12.0, max(0.1, deadline - time.monotonic()))):
+        raise RuntimeError("课程页未出现「课程作业」入口")
+    ok, why = validate_course_context(page, lid, name)
+    if not ok:
+        raise RuntimeError(why)
+    _ensure_budget(deadline, "进入课程页")
 
-            if want_homework and not hw_href:
-                last_error = "取不到「课程作业」链接"
-                continue
-            if want_tests and not test_href:
-                notes = [n for n in notes if n != "no-test-link"] + ["no-test-link"]
+    hw_href = (get_column_href(page, "课程作业", timeout=min(10.0, max(0.1, deadline - time.monotonic())))
+               if want_homework else None)
+    test_href = (get_column_href(page, "在线测试", timeout=min(1.2, max(0.1, deadline - time.monotonic())), retries=2)
+                 if want_tests else None)
+    if want_homework and not hw_href:
+        raise RuntimeError("取不到「课程作业」链接")
+    if want_tests and not test_href:
+        notes.append("no-test-link")
 
-            got_hw = None
-            if hw_href:
-                page.goto(hw_href, wait_until="domcontentloaded", timeout=60000)
-                wait_text(page, "截止时间", timeout=15)
-                time.sleep(0.3)
-                dump(page, f"sweep_{lid}", debug)
-                got_hw = parse_hw_table(page)
+    landed_first: dict[str, str] = {}
 
-            got_tests = []
-            if test_href:
-                page.goto(test_href, wait_until="domcontentloaded", timeout=60000)
-                wait_text(page, "截止时间", timeout=15)
-                time.sleep(0.3)
-                dump(page, f"sweeptest_{lid}", debug)
-                got_tests = parse_test_table(page)
+    def load_column(href: str, kind: str) -> tuple[list[dict], str, str]:
+        last_status, last_why = "invalid", "未加载"
+        attempts = max(1, int(empty_retries) + 1)
+        for attempt in range(attempts):
+            _ensure_budget(deadline, f"{kind} 列表")
+            source = href if attempt == 0 else landed_first.get(kind)
+            if not source:
+                return [], "incomplete", (f"{last_why}；首次列表地址未落地，"
+                                          "拒绝重放一次性栏目入口")
+            rows, status, why, landed = _collect_list_pages(
+                page, kind, source, lid, deadline, debug,
+                f"sweep_{lid}" if kind == "homework" else f"sweeptest_{lid}")
+            if landed and kind not in landed_first:
+                landed_first[kind] = landed
+            last_status, last_why = status, why
+            if status in ("ok", "empty"):
+                return rows, status, why
+            if status == "auth":
+                return [], status, why
+            if attempt + 1 < attempts:
+                if time.monotonic() >= deadline:
+                    last_status, last_why = "incomplete", "课程时间预算耗尽"
+                    break
+                retry_url = landed_first.get(kind)
+                if not _retry_list_url_usable(retry_url):
+                    last_status, last_why = (
+                        "incomplete", f"{why}；落地列表地址不可安全重试")
+                    break
+                print(f"    {name}: {kind} 页面未确认（{why}），从落地列表地址只重试该栏目 "
+                      f"{attempt + 1}/{attempts - 1}", file=sys.stderr)
+        return [], last_status, last_why
 
-            # 空表可疑 -> 重试（这是本函数最关键的一处保护）
-            if got_hw is not None and not got_hw and attempt < empty_retries:
-                last_error = "作业表为空（疑似页面未加载），重试"
-                print(f"    {name}: 作业表为空，疑似加载失败，重试 {attempt + 1}/{empty_retries}",
-                      file=sys.stderr)
-                continue
+    hw_rows: list[dict] = []
+    if hw_href:
+        hw_rows, statuses["homework"], evidence["homework"] = load_column(hw_href, "homework")
+        if statuses["homework"] == "empty":
+            notes.append("homework-empty-verified")
+        if statuses["homework"] in ("invalid", "incomplete", "auth"):
+            raise RuntimeError(f"作业列表未确认完整：{evidence['homework']}")
 
-            if got_hw is not None and not got_hw:
-                notes.append("empty-verified")     # 重试后仍空 -> 大概率真没作业
-            if got_hw is not None:
-                hw_rows = got_hw
-            test_rows = got_tests
-            return hw_rows, test_rows, notes
-        except Exception as e:  # noqa: BLE001
-            last_error = f"{type(e).__name__}: {e}"
-            continue
+    test_rows: list[dict] = []
+    if want_tests and test_href:
+        test_rows, statuses["tests"], evidence["tests"] = load_column(test_href, "test")
+        if statuses["tests"] == "empty":
+            notes.append("tests-empty-verified")
+        if statuses["tests"] in ("invalid", "incomplete", "auth"):
+            notes.append("tests-invalid")
+    elif want_tests:
+        statuses["tests"] = "no_entry"
 
-    if last_error:
-        raise RuntimeError(last_error)
+    if return_status:
+        return hw_rows, test_rows, notes, statuses
     return hw_rows, test_rows, notes
 
 
@@ -401,11 +370,27 @@ def test_blacklisted_lids() -> set:
     2. 自动识别：连续 >=2 次找不到「在线测试」栏目的课 —— 这些课每次都会白等一遍超时，
        而它们本来就没有测试可抓。只影响「要不要去找测试栏目」，不会漏掉任何作业。
     """
-    lids = set(load_test_blacklist().get("courses", {}).keys())
-    for lid, m in load_index_meta().items():
-        if int(m.get("no_test_streak", 0)) >= 2:
-            lids.add(lid)
-    return lids
+    return set(load_test_blacklist().get("courses", {}).keys())
+
+
+def has_test_entry(page, timeout: float = 1.2) -> bool:
+    return bool(get_column_href(page, "在线测试", timeout=timeout, retries=2))
+
+
+def no_test_skip_is_fresh(m: dict, now=None) -> bool:
+    """Auto-skip a confirmed missing test column only inside its review period."""
+    now = now or datetime.now()
+    if int(m.get("no_test_streak", 0)) < 2:
+        return False
+    raw = m.get("no_test_checked_at")
+    if not raw:
+        return False
+    try:
+        last = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+    review_days = cache_store.cache_settings()["no_tests_review_days"]
+    return (now - last).total_seconds() < review_days * 86400
 
 
 def _semester_start(now=None) -> datetime:
@@ -621,8 +606,10 @@ def update_index_meta(per_course: list, now=None) -> dict:
     return {"meta": meta, "candidates": candidates, "semester_start": sem_start.strftime("%Y-%m-%d")}
 
 
-def sweep_all_courses(ctx, page, debug=False, delay=1.0, skip_lids=None,
-                      want_tests=False, test_skip_lids=None) -> tuple:
+def sweep_all_courses(ctx, page, debug=False, delay=None, skip_lids=None,
+                      want_tests=False, test_skip_lids=None,
+                      scan_id: str | None = None, scope: str | None = None,
+                      index_version: str = "", only_lids=None) -> tuple:
     """逐门课抓「课程作业」（可选「在线测试」），一次进课程页把两个栏目都取下来。
 
     skip_lids:      整体拉黑的课，直接跳过（不算失败、不重试）
@@ -630,7 +617,12 @@ def sweep_all_courses(ctx, page, debug=False, delay=1.0, skip_lids=None,
     want_tests:     是否同时抓在线测试
     返回 (homeworks, tests, per_course, errors, skipped, test_notes)
     """
+    if delay is None:
+        delay = cache_store.cache_settings()["course_gap_sec"]
     index = load_course_index()
+    if only_lids:
+        wanted = {str(x) for x in only_lids}
+        index = {lid: name for lid, name in index.items() if lid in wanted}
     if not index:
         return ([], [], [],
                 ["课程索引为空：请先跑 scrape.py --refresh-courses 或用控制台「刷新课程表」"],
@@ -638,24 +630,34 @@ def sweep_all_courses(ctx, page, debug=False, delay=1.0, skip_lids=None,
 
     skip_lids = set(skip_lids or ())
     test_skip_lids = set(test_skip_lids or ())
-    auto_test_skip = set()      # 连续找不到测试栏目 -> 下次直接跳过（见 update_index_meta）
+    auto_test_skip = set()
     skipped = [{"lid": k, "course": index.get(k, "?")} for k in skip_lids if k in index]
     homeworks, tests, per_course, errors = [], [], [], []
     # 手工名单与「自动判定无测试栏目」分开记，避免报告里混成一类
     manual_test_skip = set(load_test_blacklist().get("courses", {}).keys())
-    test_notes = {"skipped": [], "manual_skipped": [], "no_entry": []}
+    test_notes = {"skipped": [], "manual_skipped": [], "no_entry": [],
+                  "auto_skipped": [], "errors": []}
+    meta = load_index_meta()
+    now_dt = datetime.now()
+    for lid in index:
+        if no_test_skip_is_fresh(meta.get(lid) or {}, now_dt):
+            auto_test_skip.add(lid)
     prev_ids = None      # 兜底：连续两门课内容完全相同 => 疑似没切课
     for lid, name in index.items():
         if lid in skip_lids:
             continue
-        want_t = bool(want_tests) and lid not in test_skip_lids
+        want_t = (bool(want_tests) and lid not in test_skip_lids
+                  and lid not in auto_test_skip)
         if want_tests and lid in test_skip_lids:
             test_notes["skipped"].append(name)
             if lid in manual_test_skip:
                 test_notes["manual_skipped"].append(name)
+        if want_tests and lid in auto_test_skip:
+            test_notes["auto_skipped"].append(name)
         try:
-            rows, trows, notes = fetch_course_both(
-                ctx, page, lid, name, debug, want_homework=True, want_tests=want_t)
+            rows, trows, notes, statuses = fetch_course_both(
+                ctx, page, lid, name, debug, want_homework=True,
+                want_tests=want_t, return_status=True)
             if "no-test-link" in notes:
                 auto_test_skip.add(lid)
             ids = tuple(sorted(str(r.get("hwtid")) for r in rows))
@@ -671,40 +673,88 @@ def sweep_all_courses(ctx, page, debug=False, delay=1.0, skip_lids=None,
                 t["course"] = name
                 t["lid"] = lid
                 t.setdefault("kind", "test")
+            if not want_tests:
+                tests_status = "disabled"
+            elif lid in test_skip_lids:
+                tests_status = "blocked"
+            elif lid in auto_test_skip:
+                tests_status = "no_entry"
+            else:
+                tests_status = statuses.get("tests", "invalid")
+            if tests_status in ("no_entry", "empty"):
+                test_notes["no_entry"].append(name)
+            if tests_status in ("invalid", "incomplete", "auth", "error"):
+                test_notes["errors"].append(name)
             homeworks.extend(rows)
             tests.extend(trows)
-            if "no-test-link" in notes or "test-entry-missing" in notes:
-                test_notes["no_entry"].append(name)
             per_course.append({
                 "lid": lid, "course": name, "total": len(rows),
                 "unsubmitted": len(unsub), "error": None,
                 "tests": len(trows),
+                "homework_status": statuses.get("homework"),
+                "tests_status": tests_status,
                 "notes": notes,
                 "_deadlines": [r.get("deadline") for r in rows if r.get("deadline")],
             })
+            if tests_status == "auth":
+                cache_store.invalidate_scope_scans("认证上下文失效：测试栏目返回登录页", scope=scope)
+                break
+            if scan_id:
+                cache_store.commit_course_scan(
+                    scan_id, lid=lid, course=name, homeworks=rows, tests=trows,
+                    homework_status=statuses.get("homework", "invalid"),
+                    tests_status=tests_status, notes=notes,
+                    index_version=index_version, scope=scope)
+            # Record the test-column discovery result for its review period.
+            m = meta.get(lid) or {}
+            m["course"] = name
+            if want_tests and lid not in test_skip_lids:
+                m["no_test_checked_at"] = now_dt.strftime("%Y-%m-%d %H:%M")
+                if tests_status == "no_entry":
+                    m["no_test_streak"] = int(m.get("no_test_streak", 0)) + 1
+                    if m["no_test_streak"] >= 2:
+                        m["no_test_reason"] = "连续找不到「在线测试」栏目，复查周期内自动跳过（作业不受影响）"
+                elif tests_status in ("ok", "empty"):
+                    m["no_test_streak"] = 0
+                    m.pop("no_test_reason", None)
+            meta[lid] = m
             if unsub or trows:
                 extra = f"，测试 {len(trows)} 条" if want_t and trows else ""
                 print(f"  {name}: 作业 {len(rows)} 条（未交 {len(unsub)}）{extra}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
+            hw_status = "error"
+            tests_status = ("error" if want_tests and lid not in test_skip_lids
+                            else "blocked" if want_tests else "disabled")
             per_course.append({
                 "lid": lid, "course": name, "total": 0,
                 "unsubmitted": 0, "error": f"{type(e).__name__}: {e}",
+                "homework_status": hw_status, "tests_status": tests_status,
                 "_deadlines": [],
             })
             errors.append(f"{name}({lid}): {type(e).__name__}: {e}")
+            if scan_id:
+                try:
+                    cache_store.commit_course_scan(
+                        scan_id, lid=lid, course=name, homeworks=None, tests=None,
+                        homework_status=hw_status, tests_status=tests_status,
+                        homework_error=str(e)[:400], tests_error=str(e)[:400],
+                        notes=[f"scan-error:{type(e).__name__}"],
+                        index_version=index_version, scope=scope)
+                except Exception as cache_exc:  # noqa: BLE001
+                    print(f"  {name}: 写入缓存失败 {cache_exc}", file=sys.stderr)
             print(f"  {name}: 抓取失败 {type(e).__name__}: {e}", file=sys.stderr)
+            # Once authentication is gone, every following course would produce
+            # the same false failure.  Stop instead of burning the whole scan.
+            if "认证上下文失效" in str(e) or page_is_login(page):
+                cache_store.invalidate_scope_scans("认证上下文失效：课程扫描中断", scope=scope)
+                print("  认证上下文已失效，停止本轮扫描。", file=sys.stderr)
+                break
         time.sleep(delay)
     # 记住「没有测试栏目」的课，下次不再为它白等一遍
-    if auto_test_skip:
-        meta = load_index_meta()
-        for lid in auto_test_skip:
-            m = meta.get(lid) or {}
-            m["no_test_streak"] = int(m.get("no_test_streak", 0)) + 1
-            if m["no_test_streak"] >= 2:
-                m["no_test_reason"] = "连续找不到「在线测试」栏目，已自动跳过（不影响作业）"
-            meta[lid] = m
+    if meta:
         save_index_meta(meta)
-        test_notes["auto_skip"] = [index.get(k, "?") for k in auto_test_skip]
+    if test_notes["auto_skipped"]:
+        test_notes["auto_skip"] = sorted(set(test_notes["auto_skipped"]))
     # 落一份扫描快照：候选推导依赖它，且它不会被「刷新课程表」覆盖
     save_scan_snapshot(per_course)
     return homeworks, tests, per_course, errors, skipped, test_notes
@@ -722,7 +772,7 @@ TEST_START_RE = re.compile(r"gotostart\(\s*'?(\d+)'?")
 TEST_URL = BASE + "/meol/common/question/test/student/testpaper.jsp?testId={tid}&strStyle=new03&tagbug=client"
 
 
-def get_column_href(child, label: str, timeout: int = 30, retries: int = None):
+def get_column_href(child, label: str, timeout: float = 30, retries: int = None):
     """通用：取课程页左侧菜单里某个栏目（如「在线测试」）的 href。
 
     用 textContent 匹配（隐藏元素的 innerText 为空）。
@@ -731,8 +781,9 @@ def get_column_href(child, label: str, timeout: int = 30, retries: int = None):
     「这门课没有该栏目」快速返回，不必白等满超时
     （实测 高等数学A（I） 没有「在线测试」栏目，曾经一门课白等 40 秒）。
     """
-    tries = timeout if retries is None else retries
-    for _ in range(max(1, tries)):
+    budget = float(timeout) if retries is None else max(0.0, float(retries) * 0.2)
+    deadline = time.monotonic() + budget
+    while True:
         href = child.evaluate(
             """(label) => {
                 const a = [...document.querySelectorAll('a')].find(x =>
@@ -743,8 +794,9 @@ def get_column_href(child, label: str, timeout: int = 30, retries: int = None):
         )
         if href:
             return href
-        time.sleep(1)
-    return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.15)
 
 
 def parse_test_table(page):
@@ -791,20 +843,275 @@ def parse_test_table(page):
     return out
 
 
-def wait_text(page, keyword: str, timeout: int = 30) -> bool:
-    for _ in range(timeout):
-        try:
-            if keyword in (page.inner_text("body", timeout=1500) or ""):
-                return True
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(1)
+LOGIN_PAGE_MARKERS = ("统一身份认证登录", "用户名密码", "忘记/修改密码", "涉密不上网")
+EMPTY_PAGE_MARKERS = ("暂无作业", "没有作业", "暂无数据", "没有数据", "暂无测试",
+                      "没有测试", "暂无记录", "列表为空")
+
+
+def _body_text(page) -> str:
+    try:
+        return page.inner_text("body", timeout=1500) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def page_is_login(page) -> bool:
+    try:
+        parts = urlsplit(str(getattr(page, "url", "") or ""))
+        path = parts.path.lower().rstrip("/")
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return True
+    # Match the destination path, not a return URL embedded in its query.
+    if (path.endswith("/login") or "sso_login" in path
+            or "experimental-auth-endpoint" in path):
+        return True
+    try:
+        if page.eval_on_selector(
+                "input[type='password']",
+                "el => !!(el.getClientRects().length && "
+                "getComputedStyle(el).visibility !== 'hidden' && !el.disabled)"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    text = _body_text(page)
+    # THEOL's authenticated personal page retains a login/switch-account link.
+    # Only its two specific account statistics override that incidental text;
+    # generic course/logout words must not override an actual login page.
+    personal_evidence = (host == "course.buct.edu.cn"
+                         and path == "/meol/personal.do"
+                         and "在线总时长" in text and "登录时间" in text)
+    if personal_evidence:
+        return False
+    return any(marker in text for marker in LOGIN_PAGE_MARKERS)
+
+
+def _table_evidence(page) -> dict:
+    try:
+        tables = page.eval_on_selector_all(
+            "table",
+            """tables => tables.map(table => {
+                const rows = [...table.querySelectorAll('tr')].map(tr =>
+                    [...tr.querySelectorAll('td,th')].map(x =>
+                        (x.textContent||'').trim().replace(/\\s+/g,' '))
+                        .filter(Boolean)).filter(r => r.length);
+                return rows;
+            }).filter(rows => rows.length)""")
+    except Exception:  # noqa: BLE001
+        tables = []
+    return {"tables": tables}
+
+
+def pagination_uncertain(page) -> bool:
+    """True when a next/more-page control proves we have not seen everything."""
+    text = _body_text(page)
+    m = re.search(r"共\s*(\d+)\s*页", text)
+    if m and int(m.group(1)) > 1:
+        return True
+    try:
+        anchors = page.eval_on_selector_all(
+            "a,button,input", """els => els.map(a => ({
+                text:((a.textContent||a.value||'')+'').trim(),
+                href:a.getAttribute('href')||'', onclick:a.getAttribute('onclick')||'',
+                disabled:a.hasAttribute('disabled') || a.disabled === true}))""")
+    except Exception:  # noqa: BLE001
+        anchors = []
+    for a in anchors or []:
+        label = str(a.get("text") or "")
+        if any(x in label for x in ("下一页", "下页", "尾页")) and not a.get("disabled"):
+            # JavaScript handlers and bare anchors are just as capable of
+            # loading page 2 as a normal href.
+            return True
     return False
 
 
-def get_hw_href(child, timeout: int = 30):
+def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
+    """Return (status, evidence): ok/empty/invalid/incomplete/auth.
+
+    An empty table with valid headers and no pagination is a legitimate empty
+    snapshot.  A blank/broken/login page is never promoted to "empty".
+    """
+    if page_is_login(page):
+        return "auth", "页面跳到了登录/认证页"
+    evidence = _table_evidence(page)
+    target = None
+    for table in evidence["tables"]:
+        header = " ".join(str(x) for x in (table[0] if table else []))
+        if "标题" in header and "截止时间" in header:
+            target = table
+            break
+    text = _body_text(page)
+    header_ok = target is not None
+    explicit_empty = any(marker in text for marker in EMPTY_PAGE_MARKERS)
+    if pagination_uncertain(page):
+        return "incomplete", "页面存在下一页/多页标记，未确认完整"
+    if not header_ok:
+        if evidence["tables"] or rows:
+            return "invalid", "未找到带「标题/截止时间」的目标表格"
+        return "invalid", "列表结构或空态证据不足"
+    data_rows = max(0, len(target) - 1)
+    if data_rows == 0:
+        if explicit_empty:
+            return "empty", "目标表头有效且页面明确显示空态"
+        return "invalid", "只有目标表头，没有数据行或明确空态证据"
+    if not rows:
+        return "incomplete", f"目标表有 {data_rows} 个数据行，但一条也未解析"
+    if len(rows) < data_rows:
+        return "incomplete", f"仅解析 {len(rows)}/{data_rows} 行，禁止覆盖旧缓存"
+    if explicit_empty:
+        return "invalid", "页面同时出现数据行和空态标记，结构不一致"
+    if kind == "test" and not any(str(r.get("test_id") or "") for r in rows):
+        return "incomplete", "测试数据行缺少测试 ID"
+    if kind == "homework" and not any(str(r.get("hwtid") or "") for r in rows):
+        return "incomplete", "作业数据行缺少作业 ID"
+    if rows:
+        return "ok", f"{len(rows)} 行，目标表头有效"
+    if explicit_empty:
+        return "empty", "页面明确显示空态"
+    return "invalid", "列表结构或空态证据不足"
+
+
+def validate_course_context(page, lid: str, course_name: str = "") -> tuple[bool, str]:
+    """Reject login/foreign pages and require positive evidence for *this* course."""
+    url = str(getattr(page, "url", "") or "")
+    if page_is_login(page):
+        return False, "认证上下文失效"
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower().rstrip(".")
+    except Exception:  # noqa: BLE001
+        parts = None
+        host = ""
+    host_ok = (host == "buct.edu.cn" or host.endswith(".buct.edu.cn")
+               or host in ("127.0.0.1", "localhost", "::1"))
+    if not host or not host_ok:
+        return False, f"课程上下文域名异常：{host}"
+    lid = str(lid)
+    query = parse_qs(parts.query if parts else "")
+    ids = set(query.get("lid", [])) | set(query.get("courseId", []))
+    page_path = (parts.path if parts else "").lower()
+    if lid in ids:
+        # The course entry URL itself is authoritative only when it is a known
+        # course page; unrelated pages can carry a decorative lid parameter.
+        if ("enter_course" in page_path or "course_index" in page_path
+                or "course_column" in page_path or "hwtask" in page_path
+                or page_path == "/meol/jpk/course/layout/newpage/index.jsp"):
+            return True, ""
+    try:
+        body = page.inner_text("body", timeout=1500) or ""
+    except Exception:  # noqa: BLE001
+        body = ""
+    try:
+        links = page.eval_on_selector_all(
+            "a", "els => els.map(a => (a.getAttribute('href')||'') + ' ' + "
+                 "(a.getAttribute('onclick')||''))")
+    except Exception:  # noqa: BLE001
+        links = []
+    needle = re.compile(rf"(?:lid|courseId)={re.escape(lid)}(?:\D|$)")
+    # A foreign page can contain a link to this course.  Require the page to be
+    # a course/hwtask page and, when a name is supplied, show that course name.
+    context_path = any(x in page_path for x in
+                       ("enter_course", "course_index", "course_column", "hwtask"))
+    name_ok = bool(course_name and course_name in body)
+    if context_path and name_ok and any(needle.search(str(x)) for x in links or []):
+        return True, ""
+    return False, f"页面没有课程 {lid} 的上下文证据（可能串课或未切换成功）"
+
+
+def wait_text(page, keyword: str, timeout: float = 30) -> bool:
+    """Wait up to *timeout seconds* on a monotonic clock (not loop count)."""
+    budget = max(0.0, float(timeout))
+    deadline = time.monotonic() + budget
+    while True:
+        left = max(0.05, deadline - time.monotonic())
+        try:
+            if keyword in (page.inner_text("body", timeout=min(1500, int(left * 1000))) or ""):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.12, max(0.02, deadline - time.monotonic())))
+
+
+def wait_authenticated(page, ctx, timeout: float = 12) -> bool:
+    """Wait for positive evidence in the *page*, never for cookies alone."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            if page_authenticated(page):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+AUTH_PAGE_MARKERS = ("我的课程", "课程作业", "在线总时长", "登录时间",
+                     "个人中心", "注销", "退出")
+
+
+def page_authenticated(page) -> bool:
+    """Positive page evidence for an authenticated platform session."""
+    if page_is_login(page):
+        return False
+    try:
+        parts = urlsplit(str(getattr(page, "url", "") or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+    except Exception:  # noqa: BLE001
+        return False
+    if not (host == "buct.edu.cn" or host.endswith(".buct.edu.cn")
+            or host in ("127.0.0.1", "localhost", "::1")):
+        return False
+    text = _body_text(page)
+    if any(marker in text for marker in AUTH_PAGE_MARKERS):
+        return True
+    # Course pages sometimes expose the personal header only through a stable
+    # element rather than body text.
+    try:
+        return bool(page.eval_on_selector(
+            "#userName,.userName,.user-name,.user-info,.userInfo",
+            "el => (el.textContent||'').trim().length > 0"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def platform_identity(page) -> str | None:
+    """Return a non-credential visible account marker, or None if unavailable."""
+    try:
+        value = page.eval_on_selector(
+            "#userName,.userName,.user-name,.user-info,.userInfo,.personal-info",
+            """el => (el.textContent||el.getAttribute('title')||'')
+                .replace(/\\s+/g,' ').trim()""")
+    except Exception:  # noqa: BLE001
+        value = ""
+    if value:
+        return str(value)[:120]
+    text = _body_text(page)
+    m = re.search(r"(?:学号|姓名|用户名)\s*[:：]\s*([^\s|]{1,40})", text)
+    return m.group(1).strip() if m else None
+
+
+def bind_page_identity(page, scope: str | None = None):
+    """Bind the visible account marker on every authenticated entry point."""
+    marker = platform_identity(page)
+    if not marker:
+        return None
+    return cache_store.bind_identity(marker, scope=scope)
+
+
+def resolve_want_tests(explicit: bool | None, deadline_only: bool) -> bool:
+    """Explicit --no-tests/--with-tests wins; only unspecified follows mode."""
+    if explicit is not None:
+        return bool(explicit)
+    return bool(deadline_only)
+
+
+def get_hw_href(child, timeout: float = 30):
     """轮询取「课程作业」的绝对 URL（子菜单默认隐藏，textContent 才可靠）。"""
-    for _ in range(timeout):
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
         href = child.evaluate("""() => {
             const a = [...document.querySelectorAll('a')].find(x =>
                 (x.textContent||'').replace(/\\s+/g,'') === '课程作业');
@@ -812,8 +1119,9 @@ def get_hw_href(child, timeout: int = 30):
         }""")
         if href:
             return href
-        time.sleep(1)
-    return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
 
 
 def parse_hw_table(page):
@@ -880,34 +1188,63 @@ def fetch_course(ctx, page, lid: str, debug: bool):
 
 
 def html_to_text(s: str) -> str:
-    """把作业正文的 HTML 转成可读多行文本。"""
-    s = html.unescape(s)
-    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
-    s = re.sub(r"</(p|li|div|tr|h[1-6])>", "\n", s, flags=re.I)
-    s = re.sub(r"<[^>]+>", "", s)
-    s = s.replace("\u00a0", " ")
-    lines = [ln.strip() for ln in s.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+    """Convert already-decoded HTML once through the structured parser."""
+    return content_pipeline.flatten_blocks_text(
+        content_pipeline.parse_blocks(s or "", BASE))
 
 
-def get_hw_content(ctx, hwtid: str, debug: bool = False) -> dict:
+def get_hw_content(ctx, hwtid: str, debug: bool = False,
+                   lid: str | None = None, course_name: str = "") -> dict:
     """抓取某条作业的详情正文。
 
     平台把正文放在隐藏域 `<input type="hidden" name="N_content" value="实体编码的HTML">`，
     与 ueditor iframe 同步，无需进 iframe 即可拿到，解码后即为作业题目/要求。
     """
+    if not lid:
+        return {"ok": False, "hwtid": hwtid,
+                "error": "缺少所属课程 lid，不能在明确课程上下文中读取正文"}
     url = BASE + f"/meol/common/hw/student/hwtask.view.jsp?hwtid={hwtid}"
+    course_url = f"{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw"
     page = ctx.new_page()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(1.5)
+        course_deadline = time.monotonic() + max(
+            5.0, float(cache_store.cache_settings()["course_timeout_sec"]))
+        page.goto(course_url, wait_until="domcontentloaded", timeout=_budget_ms(course_deadline))
+        if page_is_login(page):
+            cache_store.invalidate_scope_scans("认证上下文失效：正文课程入口返回登录页")
+            return {"ok": False, "hwtid": hwtid,
+                    "error": "认证上下文失效：进入所属课程时跳到了登录页", "url": course_url}
+        if not wait_text(page, "课程作业",
+                         timeout=min(12.0, max(0.1, course_deadline - time.monotonic()))):
+            return {"ok": False, "hwtid": hwtid,
+                    "error": "进入所属课程失败：课程页未就绪", "url": course_url}
+        valid, why = validate_course_context(page, str(lid), course_name)
+        if not valid:
+            return {"ok": False, "hwtid": hwtid,
+                    "error": f"进入所属课程失败：{why}", "url": course_url}
+        try:
+            bind_page_identity(page)
+        except cache_store.AccountIdentityConflict as exc:
+            cache_store.invalidate_scope_scans(str(exc))
+            return {"ok": False, "hwtid": hwtid, "error": str(exc), "url": course_url}
+        _ensure_budget(course_deadline, "进入正文所属课程")
+        page.goto(url, wait_until="domcontentloaded", timeout=_budget_ms(course_deadline))
         dump(page, f"content_{hwtid}", debug)
-        src = page.content()
-        m = re.search(r'name="\d+_content"[^>]*value="([^"]*)"', src)
-        if not m:
+        inner = None
+        deadline = time.monotonic() + 6.0
+        while True:
+            src = page.content()
+            inner = content_pipeline.extract_hidden_content(src)
+            if inner is not None or time.monotonic() >= deadline:
+                break
+            if page_is_login(page):
+                cache_store.invalidate_scope_scans("认证上下文失效：正文页返回登录页")
+                return {"ok": False, "hwtid": hwtid,
+                        "error": "认证上下文失效：作业正文页跳到了登录页", "url": url}
+            time.sleep(0.2)
+        if inner is None:
             return {"ok": False, "hwtid": hwtid,
                     "error": "未找到作业正文（页面结构可能变化，或会话已失效需重新登录）", "url": url}
-        inner = html.unescape(m.group(1))
         return {
             "ok": True, "hwtid": hwtid, "url": url,
             "content_html": inner, "content_text": html_to_text(inner),
@@ -917,6 +1254,77 @@ def get_hw_content(ctx, hwtid: str, debug: bool = False) -> dict:
             page.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def fetch_content_for_item(ctx, item: dict, *, force: bool = False,
+                           debug: bool = False) -> dict:
+    """Load one homework body and cache structured blocks + safe images."""
+    item_key = item.get("item_key")
+    if not item_key:
+        return {"ok": False, "error": "缓存条目缺少 item_key"}
+    if (not force and item.get("content_ready") and not item.get("content_stale")
+            and not item.get("content_error")):
+        return {"ok": True, "cached": True, "item_key": item_key}
+    hwtid = str(item.get("hwtid") or "")
+    if not hwtid:
+        return {"ok": False, "error": "该条没有 hwtid"}
+    try:
+        raw = get_hw_content(ctx, hwtid, debug,
+                             lid=str(item.get("lid") or ""),
+                             course_name=str(item.get("course") or ""))
+        if not raw.get("ok"):
+            cache_store.record_content_error(
+                item_key, raw.get("error") or "正文获取失败",
+                source_url=raw.get("url"), scope=item.get("account_scope"),
+                expected_identity_generation=item.get("identity_generation"))
+            return {"ok": False, "item_key": item_key,
+                    "error": raw.get("error") or "正文获取失败"}
+        base_url = raw.get("url") or item.get("content_url") or BASE
+        result = content_pipeline.ingest_html(
+            raw.get("content_html") or "", base_url,
+            session=content_pipeline.PlaywrightAssetSession(ctx))
+        saved = cache_store.save_content(
+            item_key, result, scope=item.get("account_scope"),
+            expected_identity_generation=item.get("identity_generation"))
+        return {"ok": True, "item_key": item_key,
+                "source_version": saved.get("source_version"),
+                "blocks": len(result.get("blocks") or []),
+                "assets": len(result.get("assets") or [])}
+    except Exception as exc:  # noqa: BLE001
+        cache_store.record_content_error(
+            item_key, f"{type(exc).__name__}: {exc}",
+            source_url=item.get("content_url"), scope=item.get("account_scope"),
+            expected_identity_generation=item.get("identity_generation"))
+        return {"ok": False, "item_key": item_key,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+def populate_content_after_scan(ctx, *, limit: int | None = None,
+                                window_days: int | None = None,
+                                force: bool = False, debug: bool = False,
+                                item_keys=None) -> dict:
+    """Fill due bodies using the already authenticated context (never tests)."""
+    settings = cache_store.cache_settings()
+    limit = (settings["content_limit"] if limit is None
+             else (None if int(limit) <= 0 else int(limit)))
+    window_days = (settings["content_window_days"] if window_days is None
+                   else max(0, int(window_days)))
+    items = cache_store.content_due(
+        days=window_days, limit=limit, force=force, item_keys=item_keys,
+        exclude_lids=blacklisted_lids(),
+        exclude_test_lids=test_blacklisted_lids())
+    ok = failed = cached = 0
+    for item in items:
+        result = fetch_content_for_item(ctx, item, force=force, debug=debug)
+        if result.get("ok"):
+            ok += 1
+            cached += 1 if result.get("cached") else 0
+        else:
+            failed += 1
+        print(f"  正文 {item.get('course', '?')}｜{item.get('title', '?')}: "
+              f"{'OK' if result.get('ok') else '失败 ' + str(result.get('error', ''))[:120]}",
+              file=sys.stderr)
+    return {"requested": len(items), "ok": ok, "failed": failed, "cached": cached}
 
 
 SCAN_SNAPSHOT_FILE = COURSES_FILE.with_name("courses.scan.json")
@@ -1370,16 +1778,27 @@ def main():
                     help="只刷新本地课程索引 courses.json（从我的课程总表取全部课程），不抓作业")
     ap.add_argument("--sweep", action="store_true",
                     help="全量扫描：逐门课直取 hwtask.jsp，兜住首页「待提交作业」视图漏掉的课（约 1-2 分钟）")
-    ap.add_argument("--sweep-delay", type=float, default=1.0, help="全量扫描时每门课之间的间隔秒数")
+    ap.add_argument("--sweep-delay", type=float, default=None,
+                    help="全量扫描时每门课之间的间隔秒数（默认读配置，0.3）")
     ap.add_argument("--deadline-only", action="store_true",
                     help="【推荐】按截止日期取作业，不看是否已提交：列出所有截止时间落在窗口内的作业"
                          "（本工具是给全班发待办的，已提交与否不影响该不该提醒）")
     ap.add_argument("--only-unsubmitted", action="store_true",
                     help="只保留未提交的作业（旧行为；与 --deadline-only 互斥）")
-    ap.add_argument("--with-tests", dest="with_tests", action="store_true", default=False,
-                    help="同时抓「在线测试」（截止规则与作业一致）")
-    ap.add_argument("--no-tests", dest="with_tests", action="store_false",
-                    help="不抓在线测试（默认在 --deadline-only 模式下会抓）")
+    ap.add_argument("--with-tests", dest="with_tests", action="store_const", const=True,
+                    default=None, help="同时抓「在线测试」")
+    ap.add_argument("--no-tests", dest="with_tests", action="store_const", const=False,
+                    help="明确不抓在线测试（优先于截止日期模式的默认值）")
+    ap.add_argument("--lids", nargs="+", metavar="LID",
+                    help="只刷新指定课程（用于单课/失败课重试）")
+    ap.add_argument("--content-after-scan", action="store_true",
+                    help="列表写缓存后，用同一认证上下文补齐窗口内作业正文")
+    ap.add_argument("--content-limit", type=int, default=None,
+                    help="本次自动补齐正文的最大条数")
+    ap.add_argument("--content-window-days", type=int, default=None,
+                    help="自动补齐正文的未来天数窗口")
+    ap.add_argument("--scan-id", default=None,
+                    help="内部使用：绑定到发起本次扫描的任务 ID，保证进度不串任务")
     ap.add_argument("--blacklist-list", action="store_true",
                     help="列出课程黑名单与「建议拉黑」候选（只读，不改动）")
     ap.add_argument("--blacklist-confirm", nargs="+", metavar="LID",
@@ -1403,6 +1822,9 @@ def main():
     ap.add_argument("--test-blacklist-remove", nargs="+", metavar="LID",
                     help="把指定课程移出「仅屏蔽在线测试」（可多个 lid，或用 all）")
     args = ap.parse_args()
+    # Explicit no-tests wins even if a caller supplied both switches.
+    if "--no-tests" in sys.argv:
+        args.with_tests = False
 
     # --- 黑名单命令（纯本地，不需要浏览器）---
     if (args.blacklist_list or args.blacklist_confirm or args.blacklist_remove
@@ -1414,45 +1836,93 @@ def main():
     if args.content:
         if not need_browser():
             return 1
-        with sync_playwright() as p:
-            ctx = make_context(p, headless=True)
-            page = ctx.pages[0] if getattr(ctx, "pages", None) else ctx.new_page()
-            page.goto(SSO_LOGIN, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(4)
-            if not logged_in(page, ctx):
-                print(json.dumps({"ok": False, "error": "未登录或会话已过期，请运行 login.py"}, ensure_ascii=False))
-                return 1
-            res = get_hw_content(ctx, args.content, args.debug)
-            try:
-                ctx.close()
-            except Exception:  # noqa: BLE001
-                pass
-            print(json.dumps(res, ensure_ascii=False, indent=2))
-            return 0
+        try:
+            with FetchLock(wait_sec=LOCK_WAIT_SEC):
+                with sync_playwright() as p:
+                    ctx = make_context(p, headless=True)
+                    page = ctx.pages[0] if getattr(ctx, "pages", None) else ctx.new_page()
+                    page.goto(SSO_LOGIN, wait_until="domcontentloaded", timeout=60000)
+                    if not wait_authenticated(page, ctx, timeout=12):
+                        cache_store.invalidate_scope_scans("认证失败：正文 CLI 登录态失效")
+                        print(json.dumps({"ok": False, "error": "未登录或会话已过期，请运行 login.py"}, ensure_ascii=False))
+                        return 1
+                    cached = next((x for x in cache_store.load_items(include_inactive=True)
+                                   if str(x.get("hwtid")) == str(args.content)), None)
+                    if not cached:
+                        print(json.dumps({"ok": False,
+                                          "error": "该 hwtid 不在本地课程索引中，无法确定所属课程上下文"},
+                                         ensure_ascii=False))
+                        return 1
+                    res = get_hw_content(ctx, args.content, args.debug,
+                                         lid=cached.get("lid"), course_name=cached.get("course"))
+                    try:
+                        ctx.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print(json.dumps(res, ensure_ascii=False, indent=2))
+                    return 0
+        except LockTimeout as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
 
     if not need_browser():
         return 1
 
-    # 整个抓取过程持锁：避免与定时任务/另一个窗口并发搞乱会话
-    with FetchLock(STATE_FILE.with_name("scrape.lock")):
-        return _run_scan(args)
+    # 整个抓取过程持锁；超时直接失败，绝不无锁继续。
+    try:
+        with FetchLock(wait_sec=LOCK_WAIT_SEC):
+            return _run_scan(args)
+    except LockTimeout as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print(json.dumps({"ok": False, "error": str(exc), "homeworks": []},
+                         ensure_ascii=False))
+        return 1
 
 
 def _run_scan(args):
     T_START = time.time()
     T = {"login": 0.0, "pool": 0.0, "homework": 0.0, "test": 0.0, "content": 0.0, "save": 0.0}
+    run_scan_id = str(args.scan_id or uuid.uuid4().hex[:12])
 
     with sync_playwright() as p:
         ctx = make_context(p, headless=True)
         page = ctx.pages[0] if getattr(ctx, "pages", None) else ctx.new_page()
         _t = time.time()
         page.goto(SSO_LOGIN, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(4)
         dump(page, "home", args.debug)
 
-        if not logged_in(page, ctx):
+        if not wait_authenticated(page, ctx, timeout=12):
+            cache_store.invalidate_scope_scans("认证失败：列表扫描登录态失效")
             print("ERROR: 未登录或会话已过期，请运行: python login.py", file=sys.stderr)
-            print(json.dumps({"ok": False, "homeworks": []}, ensure_ascii=False))
+            try:
+                index_now = load_course_index()
+                expected_now = [lid for lid in index_now if lid not in blacklisted_lids()]
+                cache_store.begin_scan(
+                    run_scan_id, mode=("deadline-only" if args.deadline_only else "pool"),
+                    expected_lids=expected_now, requested_lids=expected_now,
+                    tests_requested=resolve_want_tests(args.with_tests, args.deadline_only),
+                    course_index_version=cache_store.version_hash(index_now),
+                    scope=cache_store.account_scope())
+                cache_store.update_scan(
+                    run_scan_id, status="error", finished_at=time.time(),
+                    error="authentication failed before list scan")
+            except Exception as cache_exc:  # noqa: BLE001
+                print(f"写入认证失败扫描记录失败：{cache_exc}", file=sys.stderr)
+            print(json.dumps({"ok": False, "homeworks": [], "scan_id": run_scan_id},
+                             ensure_ascii=False))
+            return 1
+        try:
+            marker = platform_identity(page)
+            if marker:
+                cache_store.bind_identity(marker, scope=cache_store.account_scope())
+            else:
+                print("提示：未能从页面取得非凭据账号身份标记；默认范围将只允许离线查看，"
+                      "正式发布保持阻断。", file=sys.stderr)
+        except cache_store.AccountIdentityConflict as exc:
+            cache_store.invalidate_scope_scans(str(exc))
+            print(f"ERROR: {exc}", file=sys.stderr)
+            print(json.dumps({"ok": False, "homeworks": [], "error": str(exc)},
+                             ensure_ascii=False))
             return 1
         T["login"] = time.time() - _t
         print("已登录", file=sys.stderr)
@@ -1493,27 +1963,55 @@ def _run_scan(args):
         use_sweep = args.sweep or args.deadline_only
         if args.deadline_only and not args.sweep:
             print("模式：按截止日期取作业（不看是否已提交）-> 自动启用全量课程扫描", file=sys.stderr)
-        # 在线测试与作业同规则：--deadline-only 模式下默认一起抓
-        do_tests = args.with_tests or args.deadline_only
+        # 三态：未指定时由模式决定；显式 --no-tests / --with-tests 优先。
+        do_tests = resolve_want_tests(args.with_tests, args.deadline_only)
 
         sweep_meta = None
         tests = []
         test_meta = None
+        scan_id = None
+        scan_status = "not-started"
+        scope = cache_store.account_scope()
         if use_sweep:
+            scan_id = run_scan_id
             bl = blacklisted_lids()
             bl_names = {v.get("name") for v in load_blacklist().get("courses", {}).values()}
             tbl = test_blacklisted_lids() if do_tests else set()
             # 选修课**不跳过**：课要照抓（你可能要交），只是不进班级群那条提醒。
             elec = elective_lids()
+            index_now = load_course_index()
+            full_expected = [lid for lid in index_now if lid not in bl]
+            selected = [str(x) for x in (args.lids or []) if str(x) in index_now
+                        and str(x) not in bl]
+            if args.lids and not selected:
+                print(json.dumps({"ok": False, "homeworks": [],
+                                  "error": "指定的课程不在当前课程索引中，或已被整门拉黑"},
+                                 ensure_ascii=False))
+                return 1
+            expected_lids = selected or full_expected
+            cache_store.begin_scan(
+                scan_id, mode="deadline-only" if args.deadline_only else "pool",
+                expected_lids=expected_lids, requested_lids=expected_lids,
+                tests_requested=do_tests,
+                course_index_version=cache_store.version_hash(index_now),
+                scope=scope)
             print(f"全量扫描开始（课程索引 {len(load_course_index())} 门，"
                   f"黑名单跳过 {len(bl)} 门"
                   + (f"，选修课 {len(elec)} 门照抓（只发个人）" if elec else "")
                   + (f"，仅屏蔽在线测试 {len(tbl)} 门" if tbl else "") + "）...", file=sys.stderr)
             _t = time.time()
             # 一次进课程页把「课程作业 + 在线测试」都取下来（比两轮扫描省近一半时间）
-            homeworks, tests, per_course, sweep_errors, skipped, test_notes = sweep_all_courses(
-                ctx, page, args.debug, args.sweep_delay,
-                skip_lids=bl, want_tests=do_tests, test_skip_lids=tbl)
+            try:
+                homeworks, tests, per_course, sweep_errors, skipped, test_notes = sweep_all_courses(
+                    ctx, page, args.debug, args.sweep_delay,
+                    skip_lids=bl, want_tests=do_tests, test_skip_lids=tbl,
+                    scan_id=scan_id, scope=scope,
+                    index_version=cache_store.version_hash(index_now),
+                    only_lids=selected or None)
+            except Exception as exc:
+                cache_store.update_scan(scan_id, status="error", finished_at=time.time(),
+                                        error=f"{type(exc).__name__}: {exc}")
+                raise
             T["homework"] = time.time() - _t
             if args.only_unsubmitted:
                 homeworks = [h for h in homeworks if h.get("submit_url")]
@@ -1526,14 +2024,14 @@ def _run_scan(args):
                 # 一旦进了自动跳过名单，它就不再产生 no-test-link，于是统计里反而消失）
                 meta_now = load_index_meta()
                 auto_skipped = [m.get("course", "?") for m in meta_now.values()
-                                if int(m.get("no_test_streak", 0)) >= 2]
+                                if no_test_skip_is_fresh(m)]
                 no_entry = sorted(set(test_notes.get("no_entry", [])) | set(auto_skipped))
                 test_meta = {
                     "courses_with_tests": len(t_ok),
                     "no_test_entry": no_entry,
                     "auto_skipped_no_test": sorted(set(test_notes.get("auto_skip", []))),
                     "skipped_by_test_blacklist": test_notes.get("manual_skipped", []),
-                    "errors": [],
+                    "errors": test_notes.get("errors", []),
                     "total": len(tests),
                 }
                 print(f"在线测试抓取完成：{len(tests)} 条，"
@@ -1543,6 +2041,18 @@ def _run_scan(args):
                          if test_meta['skipped_by_test_blacklist'] else "")
                       + (f"，本轮新判定 {len(test_meta['auto_skipped_no_test'])} 门"
                          if test_meta['auto_skipped_no_test'] else ""), file=sys.stderr)
+            scan_ok = (not sweep_errors and not test_notes.get("errors")
+                       and not selected and len(per_course) == len(full_expected))
+            scan_status = "complete" if scan_ok else "partial"
+            cache_store.update_scan(
+                scan_id, status=scan_status, finished_at=time.time(),
+                coverage_json={
+                    "courses_total": len(per_course),
+                    "expected_total": len(full_expected),
+                    "subset_refresh": bool(selected),
+                    "failed_courses": sweep_errors,
+                    "test_errors": test_notes.get("errors", []),
+                })
             # 首页没列、但该课确实有作业 -> 说明首页视图漏了这门课（黑名单命中名字也算漏）
             missed = [p for p in per_course
                       if p["total"] > 0
@@ -1657,21 +2167,32 @@ def _run_scan(args):
                 print(f"⚠️ {len(bad)} 条截止时间无法解析，已跳过（见 warnings）：{bad[:3]}",
                       file=sys.stderr)
 
-        # 逐条抓正文：列表里的 title 只是标题，真正的内容（题目/要求）在 hwtask.view.jsp 里
-        if args.with_content:
-            for hw in homeworks:
-                hwtid = hw.get("hwtid")
-                if not hwtid:
-                    continue
-                try:
-                    r = get_hw_content(ctx, hwtid, args.debug)
-                except Exception as e:  # noqa: BLE001
-                    r = {"ok": False, "error": str(e)}
-                hw["content"] = r.get("content_text", "") if r.get("ok") else ""
-                hw["content_ok"] = bool(r.get("ok"))
-                if not r.get("ok"):
-                    hw["content_error"] = r.get("error", "")
-                print(f"  正文 hwtid={hwtid}: {'OK' if r.get('ok') else '失败'}", file=sys.stderr)
+        # 正文阶段：列表已按课程写入缓存；这里复用同一认证上下文按窗口补齐。
+        content_stats = None
+        if args.with_content or args.content_after_scan:
+            _t = time.time()
+            if args.with_content:
+                cached_by_hwtid = {
+                    str(x.get("hwtid")): x for x in cache_store.load_items(scope)
+                    if x.get("kind") == "homework" and x.get("hwtid")}
+                ok = failed_n = 0
+                for hw in homeworks:
+                    item = cached_by_hwtid.get(str(hw.get("hwtid") or ""))
+                    if not item:
+                        continue
+                    result = fetch_content_for_item(ctx, item, debug=args.debug)
+                    if result.get("ok"):
+                        ok += 1
+                    else:
+                        failed_n += 1
+                    hw["content_ok"] = bool(result.get("ok"))
+                    hw["content_error"] = result.get("error")
+                content_stats = {"requested": ok + failed_n, "ok": ok, "failed": failed_n}
+            else:
+                content_stats = populate_content_after_scan(
+                    ctx, limit=args.content_limit,
+                    window_days=args.content_window_days, debug=args.debug)
+            T["content"] = time.time() - _t
 
         # 标记每条（作业 / 在线测试）的完成状态（仅供查看/排版，不参与筛选）：
         #   submit_url/start_url 有 -> 还能做（未做，或已做但允许重做）
@@ -1749,6 +2270,7 @@ def _run_scan(args):
             # 选修课 lid：让上层（weekly/hub）能把「班级群那条」里的这些课删掉，
             # 同时保留在「个人小群那条」里。抓取本身不会被它们影响。
             "electives": sorted(elective_lids()),
+            "tests_requested": bool(do_tests),
             "per_course": [{k: v for k, v in p.items() if not k.startswith("_")} for p in per_course],
             "warnings": {
                 "zero_homework_courses": zero,
@@ -1760,6 +2282,12 @@ def _run_scan(args):
             out["sweep"] = sweep_meta
         if test_meta:
             out["test_meta"] = test_meta
+        if scan_id:
+            out["scan_id"] = scan_id
+            out["scan_status"] = scan_status
+            out["cache_progress"] = cache_store.scan_progress(scan_id, scope)
+        if content_stats:
+            out["content_stats"] = content_stats
         print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 

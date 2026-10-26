@@ -155,6 +155,12 @@ def resolve_channel(name: str, raw: dict):
 #      （实测：那份 .ps1 里的中文直接让脚本语法报错）。
 BALLOON_TIMEOUT = 12
 
+# 无窗口启动子进程用的 creationflags（2026-10-25 加）。
+# 计划任务现在用 pythonw.exe 跑（无控制台），这时再拉一个控制台程序（pwsh /
+# powershell）就会**新开一个控制台窗口**闪一下 —— 告警本来只想弹托盘气泡，
+# 不该顺带弹黑框。CREATE_NO_WINDOW 让子进程不建控制台窗口，输出照旧走管道。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+
 
 def _ps_escape(s: str) -> str:
     """按 PowerShell 单引号字符串规则转义（单引号翻倍）。"""
@@ -167,6 +173,9 @@ def _run_ps(script: str, timeout: int = 30):
     优先 pwsh（PowerShell 7）：WinRT 类型虽然没了，但 WinForms 通知更稳；
     没有 pwsh 时退回 Windows PowerShell，它会读 UTF-16 编码的命令，
     所以中文不会被代码页弄坏。
+
+    `creationflags=_NO_WINDOW`：见上方注释 —— 计划任务无控制台运行时，
+    没有这一条会在屏幕上闪一个 PowerShell 黑框。
     """
     fn = shutil.which("pwsh") or shutil.which("powershell")
     if not fn:
@@ -176,7 +185,7 @@ def _run_ps(script: str, timeout: int = 30):
         r = subprocess.run(
             [fn, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-EncodedCommand", enc],
-            capture_output=True, timeout=timeout,
+            capture_output=True, timeout=timeout, creationflags=_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         # 通知类脚本会在弹完后自己 sleep 一会儿再退出；超时不算失败
