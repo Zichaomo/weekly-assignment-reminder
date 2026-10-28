@@ -18,6 +18,11 @@ ROOT = Path(__file__).resolve().parent
 PLATFORM = "buct-theol"
 PARSE_VERSION = "2026-10-25.1"
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_IDENTITY_SOURCE_TRUSTED = "authenticated-visible-v1"
+_IDENTITY_SOURCE_EXPLICIT = "explicit-account-scope"
+_IDENTITY_MIGRATION_VERSION = "legacy-auto-binding-v1"
+_TRUSTED_IDENTITY_SOURCES = frozenset({
+    _IDENTITY_SOURCE_TRUSTED, _IDENTITY_SOURCE_EXPLICIT})
 
 
 def _load_config() -> dict:
@@ -97,6 +102,14 @@ def _identity_generation_key(scope: str) -> str:
     return f"identity_generation:{scope}"
 
 
+def _identity_source_key(scope: str) -> str:
+    return f"identity_source:{scope}"
+
+
+def _identity_migration_key(scope: str) -> str:
+    return f"identity_migration:{scope}"
+
+
 def _scope_identity_generation(scope: str,
                                con: sqlite3.Connection | None = None) -> int:
     """Return the account/authentication generation for a cache scope."""
@@ -116,6 +129,55 @@ def _advance_identity_generation(con: sqlite3.Connection, scope: str) -> int:
     con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
                 (_identity_generation_key(scope), str(generation)))
     return generation
+
+
+def _stored_identity(con: sqlite3.Connection, scope: str) -> tuple[str | None, str | None]:
+    marker_row = con.execute(
+        "SELECT value FROM meta WHERE key=?", (_identity_key(scope),)).fetchone()
+    source_row = con.execute(
+        "SELECT value FROM meta WHERE key=?", (_identity_source_key(scope),)).fetchone()
+    return (marker_row["value"] if marker_row else None,
+            source_row["value"] if source_row else None)
+
+
+def _legacy_identity_needs_migration(con: sqlite3.Connection, scope: str) -> bool:
+    marker, source = _stored_identity(con, scope)
+    return bool(marker and source not in _TRUSTED_IDENTITY_SOURCES)
+
+
+def _migrate_legacy_identity(con: sqlite3.Connection, scope: str) -> bool:
+    """Neutralize an unversioned automatic identity exactly once.
+
+    The old implementation could bind a course-page teacher name as the login
+    account.  Such a marker has no provenance and cannot be verified or used to
+    reject a newly trusted marker.  Explicit account scopes remain trusted.
+    """
+    marker, source = _stored_identity(con, scope)
+    if not marker or source in _TRUSTED_IDENTITY_SOURCES:
+        return False
+    if configured_account_scope() == scope:
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (_identity_source_key(scope), _IDENTITY_SOURCE_EXPLICIT))
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (_identity_migration_key(scope), _IDENTITY_MIGRATION_VERSION))
+        return True
+
+    migrated = con.execute(
+        "SELECT value FROM meta WHERE key=?", (_identity_migration_key(scope),)).fetchone()
+    if not migrated:
+        reason = "旧版自动身份绑定来源不可信；旧正文只可离线导出，需重新抓取并复核"
+        _invalidate_scope_state(con, scope, reason, "identity_changed",
+                                bump_generation=True)
+        now = time.time()
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (f"identity_previous:{scope}", marker))
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (f"identity_changed_at:{scope}", str(now)))
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (_identity_migration_key(scope), _IDENTITY_MIGRATION_VERSION))
+    con.execute("DELETE FROM meta WHERE key IN (?,?)",
+                (_identity_key(scope), _identity_source_key(scope)))
+    return True
 
 
 _IDENTITY_STALE_REASON = "平台账号身份或认证状态已变更；旧正文只可离线导出，需重新抓取并复核"
@@ -171,6 +233,7 @@ def bind_identity(marker: str, scope: str | None = None,
     if allow_change is None:
         allow_change = os.environ.get("HOMEWORK_ACCOUNT_CHANGE") == "1"
     with connection(write=True) as con:
+        _migrate_legacy_identity(con, scope)
         row = con.execute("SELECT value FROM meta WHERE key=?", (_identity_key(scope),)).fetchone()
         old = row["value"] if row else None
         changed = bool(old and old != digest)
@@ -192,6 +255,8 @@ def bind_identity(marker: str, scope: str | None = None,
                         (f"identity_changed_at:{scope}", str(now)))
         con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
                     (_identity_key(scope), digest))
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (_identity_source_key(scope), _IDENTITY_SOURCE_TRUSTED))
     status = identity_status(scope)
     status["changed"] = changed
     return status
@@ -207,19 +272,32 @@ def invalidate_scope_scans(reason: str, scope: str | None = None,
                                        bump_generation=True)
 
 
-def identity_status(scope: str | None = None) -> dict:
+def migrate_identity_state(scope: str | None = None) -> bool:
+    """Run the one-time identity provenance migration when needed."""
     init_db()
     scope = scope or account_scope()
-    explicit = configured_account_scope() is not None
     with connection() as con:
-        row = con.execute("SELECT value FROM meta WHERE key=?", (_identity_key(scope),)).fetchone()
-    marker = row["value"] if row else None
-    verified = bool(explicit or marker)
+        if not _legacy_identity_needs_migration(con, scope):
+            return False
+    with connection(write=True) as con:
+        return _migrate_legacy_identity(con, scope)
+
+
+def identity_status(scope: str | None = None) -> dict:
+    scope = scope or account_scope()
+    migrate_identity_state(scope)
+    explicit = configured_account_scope() == scope
+    with connection() as con:
+        marker, source = _stored_identity(con, scope)
+    trusted_marker = bool(marker and source in _TRUSTED_IDENTITY_SOURCES)
+    verified = bool(explicit or trusted_marker)
     return {"scope": scope, "verified": verified,
-            "source": "config" if explicit else ("platform-marker" if marker else "unverified"),
-            "marker_hash": marker,
+            "source": "config" if explicit else ("platform-marker" if trusted_marker
+                                                  else "unverified"),
+            "marker_hash": marker if trusted_marker else None,
+            "binding_source": source,
             "reason": ("使用 config.json/env 中显式 account_scope" if explicit
-                       else ("已绑定平台可见身份标记" if marker
+                       else ("已绑定可信平台账号元素" if trusted_marker
                              else "默认路径哈希无法确认平台账号；仅允许离线查看，正式发布被阻断"))}
 
 
@@ -385,6 +463,7 @@ def begin_scan(scan_id: str, *, mode: str, expected_lids: Iterable[str],
     requested = sorted({str(x) for x in (requested_lids or expected)})
     now = time.time()
     with connection(write=True) as con:
+        _migrate_legacy_identity(con, scope)
         generation = _scope_identity_generation(scope, con)
         con.execute(
             """INSERT INTO scan_runs(scan_id,account_scope,platform,mode,

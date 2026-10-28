@@ -642,7 +642,7 @@ function renderStats(res) {
     `<span>正文 <b>${ready}</b> 已缓存${failed ? ` / <b>${failed}</b> 失败` : ''}</span>`,
     `<span>数据时间 <b>${esc(cov.updated_at || res.data_fetched_at || '无缓存')}</b>${cov.age_sec != null ? `（${fmtAge(cov.age_sec)}前）` : ''}</span>`,
   ];
-  if (res.first_screen_ms != null) parts.push(`<span>本机首屏 <b>${res.first_screen_ms.toFixed(1)} ms</b></span>`);
+  if (res.first_screen_ms != null) parts.push(`<span>列表读取 <b>${res.first_screen_ms.toFixed(1)} ms</b></span>`);
   if (blockers.length) {
     parts.push(`<span style="color:var(--red)">正式发布阻断：${blockers.map(esc).join('；')}</span>`);
   }

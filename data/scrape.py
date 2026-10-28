@@ -26,6 +26,7 @@
     python scrape.py --days 7       # 只输出未来 7 天内截止的（默认全部）
 """
 import argparse
+import html
 import json
 import os
 import re
@@ -34,7 +35,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urljoin, urlsplit
 
 import cache_store
 import content_pipeline
@@ -84,7 +85,20 @@ DEBUG_DIR = ROOT / "debug"
 
 # A single THEOL list is expected to fit comfortably in this bound.  Exceeding
 # it is a hard failure, never a partial success.
-MAX_LIST_PAGES = 30
+MAX_LIST_PAGES = 50
+
+TOTAL_RECORDS_RE = re.compile(r"共(?:有)?\s*(\d+)\s*条(?:记录|数据)?")
+TOTAL_PAGES_RE = re.compile(r"共\s*(\d+)\s*页")
+NEXT_PAGE_LABELS = ("下一页", "下页")
+TERMINAL_PAGE_LABELS = ("尾页", "末页")
+PAGE_NUMBER_QUERY_KEYS = ("s_gotopage", "gotopage", "pageno", "pagingpage", "page")
+
+IDENTITY_SELECTORS = (
+    "#userName,.userName,.user-name,#accountName,.account-name,.accountName,"
+    "#loginName,.loginName,.login-name,[data-account-name]")
+PERSONAL_IDENTITY_RE = re.compile(
+    r"(?m)(?:^|[\r\n|；;])[ \t]*(?:学号|用户名|姓名)[ \t]*[:：][ \t]*"
+    r"([^\s|；;，,]{1,40})")
 
 # 平台有两套时间写法，都要认：
 #   作业表：2026年11月26日21:13:00（偶尔出现残缺秒 9:04:0）
@@ -235,6 +249,361 @@ def _budget_ms(deadline: float, cap_ms: int = 60000) -> int:
 def _ensure_budget(deadline: float, step: str) -> None:
     if time.monotonic() >= deadline:
         raise RuntimeError(f"课程时间预算已耗尽（{step}）")
+
+
+def _host_is_platform(host: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return (host == "buct.edu.cn" or host.endswith(".buct.edu.cn")
+            or host in ("127.0.0.1", "localhost", "::1"))
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _url_origin(url: str):
+    """Return normalized (scheme, hostname, effective port), or None."""
+    try:
+        parts = urlsplit(str(url or ""))
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower().rstrip(".")
+        if scheme not in _DEFAULT_PORTS or not host:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
+    if port is None:
+        port = _DEFAULT_PORTS[scheme]
+    if not 1 <= port <= 65535:
+        return None
+    return scheme, host, port
+
+
+def _url_key(url: str):
+    """Stable comparison key; fragments and query ordering are irrelevant."""
+    try:
+        parts = urlsplit(str(url or ""))
+        port = parts.port
+    except ValueError:
+        return None
+    query = tuple(sorted(parse_qsl(parts.query, keep_blank_values=True)))
+    return (parts.scheme.lower(), (parts.hostname or "").lower().rstrip("."),
+            port, parts.path, query)
+
+
+def _course_ids(url: str) -> set[str]:
+    try:
+        query = parse_qs(urlsplit(str(url or "")).query, keep_blank_values=True)
+    except ValueError:
+        return set()
+    out: set[str] = set()
+    for key in ("courseId", "courseid", "lid", "cid", "course_id"):
+        out.update(str(v).strip() for v in query.get(key, []) if str(v).strip())
+    return out
+
+
+def _course_scope_ok(url: str, lid: str) -> tuple[bool, str]:
+    """Every explicit course ID on a list URL must be the expected course."""
+    expected = str(lid or "").strip()
+    if not expected:
+        return True, ""
+    wrong = sorted(x for x in _course_ids(url) if x != expected)
+    if wrong:
+        return False, f"列表页包含其它课程 ID：{', '.join(wrong)}"
+    return True, ""
+
+
+def _current_list_page(url: str) -> tuple[int | None, bool]:
+    """Return (explicit page number, explicit last-page evidence)."""
+    page_no = _query_page_number(url)
+    try:
+        query = parse_qs(urlsplit(str(url or "")).query, keep_blank_values=True)
+    except ValueError:
+        return page_no, False
+    terminal = any(str(v).strip().lower() in ("last", "end", "final")
+                   for v in query.get("s_page", []))
+    return page_no, terminal
+
+
+def _query_page_number(url: str) -> int | None:
+    """Read a page number from known list/paging query parameters."""
+    try:
+        query = parse_qs(urlsplit(str(url or "")).query, keep_blank_values=True)
+    except ValueError:
+        return None
+    lowered: dict[str, list[str]] = {}
+    for key, values in query.items():
+        lowered.setdefault(str(key).lower(), []).extend(values)
+    for key in PAGE_NUMBER_QUERY_KEYS:
+        for value in lowered.get(key, []):
+            if str(value).strip().isdigit():
+                return int(str(value).strip())
+    return None
+
+
+def _is_page_size_control(anchor: dict, label: str, href: str,
+                          onclick: str) -> bool:
+    """A per-page selector is not a next-page control."""
+    # Next-page handlers may also mention pagingNumberPer. Exempt only the
+    # observed size-setting button, never links or unknown JS navigation.
+    return (not href and label == "设置"
+            and str(anchor.get("type") or "").lower() == "button"
+            and "ItemsPerPageSubmitButton" in str(anchor.get("class") or "")
+            and "pagingnumberper" in onclick.lower())
+
+
+def _safe_next_target(current_url: str, href: str, lid: str) -> tuple[str | None, str]:
+    """Resolve a next-page href only when it stays on this list and course."""
+    raw = html.unescape(str(href or "")).strip()
+    if not raw:
+        return None, "下一页链接为空"
+    lowered = raw.lower()
+    if lowered.startswith(("javascript:", "mailto:", "data:", "#")):
+        return None, "下一页使用 JavaScript 或非 HTTP 跳转，无法确认分页"
+    resolved = urljoin(str(current_url or ""), raw)
+    try:
+        base = urlsplit(str(current_url or ""))
+        target = urlsplit(resolved)
+        target_host = (target.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None, "下一页地址无法解析"
+    if target.scheme.lower() not in ("http", "https"):
+        return None, "下一页不是 HTTP(S) 地址"
+    base_origin = _url_origin(current_url)
+    target_origin = _url_origin(resolved)
+    if base_origin is None:
+        return None, "当前列表地址无法解析或端口非法"
+    if target_origin is None:
+        return None, "下一页地址无法解析或端口非法"
+    if target_origin != base_origin:
+        return None, f"下一页跨域/跨源（协议、主机或端口不一致）：{target_host or '?'}"
+    if not _host_is_platform(target_host):
+        return None, f"下一页跨域：{target_host or '?'}"
+    if target.path != base.path:
+        return None, f"下一页跨栏目路径：{target.path or '?'}"
+    if any(x in target.path.lower() for x in
+           ("sso_login", "/login", "course_column_preview_transfer", "enter_course")):
+        return None, "下一页跳到了认证/课程入口"
+    target_ids = _course_ids(resolved)
+    expected = str(lid or "").strip()
+    if expected and target_ids and any(x != expected for x in target_ids):
+        return None, "下一页包含其它课程 ID"
+    return resolved, ""
+
+
+def _retry_list_url_usable(url: str | None) -> bool:
+    """A retry may replay the landed list URL, never the one-time transfer."""
+    if not url:
+        return False
+    if _url_origin(url) is None:
+        return False
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return False
+    path = (parts.path or "").lower()
+    if parts.scheme.lower() not in ("http", "https"):
+        return False
+    if not _host_is_platform((parts.hostname or "").lower().rstrip(".")):
+        return False
+    if any(x in path for x in ("sso_login", "/login", "course_column_preview_transfer",
+                               "enter_course", "layout/newpage/index.jsp")):
+        return False
+    return "hwtask.jsp" in path or "/question/test/student/list.jsp" in path
+
+
+def _landed_list_scope_ok(landed: str, first_landed: str, lid: str) -> tuple[bool, str]:
+    """Reject a next page that redirects away from the first landed list."""
+    try:
+        base = urlsplit(first_landed)
+        target = urlsplit(landed)
+        target_host = (target.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False, "分页落地地址无法解析"
+    if target.scheme.lower() not in ("http", "https"):
+        return False, "分页落地地址不是 HTTP(S)"
+    base_origin = _url_origin(first_landed)
+    target_origin = _url_origin(landed)
+    if base_origin is None:
+        return False, "分页落地基准地址无法解析或端口非法"
+    if target_origin is None:
+        return False, "分页落地地址无法解析或端口非法"
+    if target_origin != base_origin:
+        return False, f"分页落地跨域/跨源（协议、主机或端口不一致）：{target_host or '?'}"
+    if not _host_is_platform(target_host):
+        return False, f"分页落地跨域：{target_host or '?'}"
+    if target.path != base.path:
+        return False, f"分页落地跨栏目路径：{target.path or '?'}"
+    course_ok, course_why = _course_scope_ok(landed, lid)
+    if not course_ok:
+        return False, course_why.replace("列表页", "分页落地", 1)
+    return True, ""
+
+
+def _record_id(kind: str, row: dict) -> str:
+    key = "hwtid" if kind == "homework" else "test_id"
+    return str(row.get(key) or "").strip()
+
+
+def _record_signature(row: dict) -> str:
+    return json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _collect_list_pages(page, kind: str, source: str, lid: str, deadline: float,
+                        debug: bool, dump_prefix: str) -> tuple[list[dict], str, str, str]:
+    """Collect every explicitly linked page, returning rows only when complete.
+
+    A partial traversal is never returned as success.  The landed first list URL
+    is returned for a safe retry (the one-time transfer URL is never replayed).
+    """
+    collected: list[dict] = []
+    seen_rows: dict[str, str] = {}
+    visited: set = set()
+    first_landed = ""
+    total_records = None
+    total_pages = None
+    current = source
+    page_count = 0
+
+    try:
+        while True:
+            _ensure_budget(deadline, f"{kind} 列表第 {page_count + 1} 页")
+            if page_count >= MAX_LIST_PAGES:
+                return [], "incomplete", f"列表超过最大翻页数 {MAX_LIST_PAGES}，拒绝部分结果", first_landed
+            try:
+                page.goto(current, wait_until="domcontentloaded",
+                          timeout=_budget_ms(deadline))
+            except Exception as exc:  # noqa: BLE001
+                return [], "incomplete", f"列表页加载失败：{exc}", first_landed
+            _ensure_budget(deadline, f"{kind} 列表第 {page_count + 1} 页加载")
+
+            landed = str(getattr(page, "url", "") or current)
+            if page_is_login(page):
+                return [], "auth", "列表页跳到了登录/认证页", first_landed
+            try:
+                landed_parts = urlsplit(landed)
+            except ValueError:
+                return [], "incomplete", "列表页落地地址无法解析", first_landed
+            if landed_parts.scheme.lower() not in ("http", "https"):
+                return [], "incomplete", "列表页不是 HTTP(S) 地址", first_landed
+            if _url_origin(landed) is None:
+                return [], "incomplete", "列表页地址无法解析或端口非法", first_landed
+            if not _host_is_platform((landed_parts.hostname or "").lower().rstrip(".")):
+                return [], "incomplete", f"列表页域名异常：{landed_parts.hostname or '?'}", first_landed
+            course_ok, course_why = _course_scope_ok(landed, lid)
+            if not course_ok:
+                return [], "incomplete", course_why, first_landed
+            if page_count == 0:
+                source_origin = _url_origin(current)
+                if (source_origin is not None
+                        and _url_origin(landed) != source_origin):
+                    return [], "incomplete", (
+                        "列表首落地跨域/跨源（协议、主机或端口不一致）"), first_landed
+            if not first_landed:
+                first_landed = landed
+
+            landed_key = _url_key(landed)
+            if landed_key in visited:
+                return [], "incomplete", f"分页循环/重复页：{landed}", first_landed
+            visited.add(landed_key)
+            visited.add(_url_key(current))
+            if page_count > 0:
+                scope_ok, scope_why = _landed_list_scope_ok(landed, first_landed, lid)
+                if not scope_ok:
+                    return [], "incomplete", scope_why, first_landed
+
+            try:
+                page_rows = parse_hw_table(page) if kind == "homework" else parse_test_table(page)
+            except Exception as exc:  # noqa: BLE001
+                return [], "incomplete", f"列表行解析失败：{exc}", first_landed
+            status, why = classify_list_page(page, kind, page_rows)
+            if status in ("auth", "invalid", "incomplete"):
+                return [], status, why, first_landed
+
+            evidence = _pagination_evidence(page)
+            page_count += 1
+            _ensure_budget(deadline, f"{kind} 列表第 {page_count} 页解析")
+            if debug:
+                dump(page, f"{dump_prefix}_p{page_count}", debug)
+
+            this_total = evidence["total_records"]
+            if this_total is not None:
+                if total_records is None:
+                    total_records = this_total
+                elif this_total != total_records:
+                    return [], "incomplete", (f"页脚总记录数前后不一致："
+                                              f"{total_records} vs {this_total}"), first_landed
+            this_pages = evidence["total_pages"]
+            if this_pages is not None:
+                if total_pages is None:
+                    total_pages = this_pages
+                elif this_pages != total_pages:
+                    return [], "incomplete", (f"页脚总页数前后不一致："
+                                              f"{total_pages} vs {this_pages}"), first_landed
+
+            if status == "empty":
+                if (page_count != 1 or evidence["next_links"]
+                        or (evidence["has_terminal"] and total_records != 0)
+                        or (total_pages or 0) > 1):
+                    return [], "incomplete", "空列表仍出现分页证据，拒绝当作完整空页", first_landed
+                if total_records not in (None, 0):
+                    return [], "incomplete", f"页脚称有 {total_records} 条记录但页面为空", first_landed
+                return [], "empty", why, first_landed
+
+            for row in page_rows:
+                rid = _record_id(kind, row)
+                if not rid:
+                    return [], "incomplete", f"第 {page_count} 页存在缺少平台 ID 的行", first_landed
+                signature = _record_signature(row)
+                if rid in seen_rows:
+                    if seen_rows[rid] == signature:
+                        return [], "incomplete", f"出现重复平台 ID {rid}，拒绝去重后冒充完整", first_landed
+                    return [], "incomplete", f"平台 ID {rid} 内容冲突", first_landed
+                seen_rows[rid] = signature
+                collected.append(row)
+            if total_records is not None and len(collected) > total_records:
+                return [], "incomplete", (f"已汇总 {len(collected)} 行，超过页脚总数 "
+                                          f"{total_records}"), first_landed
+
+            current_page, explicit_terminal = _current_list_page(landed)
+            if explicit_terminal or (total_pages is not None and current_page is not None
+                                     and current_page >= total_pages):
+                break
+            if evidence["unknown_next"]:
+                return [], "incomplete", "存在无法解析的 JavaScript 分页控件", first_landed
+
+            next_targets: list[str] = []
+            for href in evidence["next_links"]:
+                resolved, reason = _safe_next_target(landed, href, lid)
+                if not resolved:
+                    return [], "incomplete", reason, first_landed
+                key = _url_key(resolved)
+                if key not in {_url_key(x) for x in next_targets}:
+                    next_targets.append(resolved)
+            if len(next_targets) > 1:
+                return [], "incomplete", "页面同时给出多个不同的下一页地址", first_landed
+            if not next_targets:
+                break
+            _ensure_budget(deadline, f"{kind} 列表第 {page_count + 1} 页翻页")
+            current = next_targets[0]
+            if _url_key(current) in visited:
+                return [], "incomplete", f"分页循环/重复页：{current}", first_landed
+    except RuntimeError as exc:
+        return [], "incomplete", str(exc), first_landed
+
+    try:
+        _ensure_budget(deadline, f"{kind} 列表完整性核对")
+    except RuntimeError as exc:
+        return [], "incomplete", str(exc), first_landed
+    if total_pages is not None and page_count != total_pages:
+        return [], "incomplete", (f"页脚称共 {total_pages} 页，实际只遍历 "
+                                  f"{page_count} 页"), first_landed
+    if total_records is None:
+        if page_count > 1:
+            return [], "incomplete", "多页列表缺少页脚总记录数，无法核对完整性", first_landed
+    elif len(collected) != total_records:
+        return [], "incomplete", (f"页脚总记录数 {total_records}，实际汇总 "
+                                  f"{len(collected)} 条"), first_landed
+    return collected, "ok", f"{len(collected)} 行，已核对 {page_count} 页", first_landed
 
 
 def fetch_course_both(ctx, page, lid: str, name: str, debug: bool = False,
@@ -902,27 +1271,128 @@ def _table_evidence(page) -> dict:
     return {"tables": tables}
 
 
-def pagination_uncertain(page) -> bool:
-    """True when a next/more-page control proves we have not seen everything."""
+def _pagination_evidence(page) -> dict:
+    """Extract only pagination facts that can be checked without JS parsing."""
     text = _body_text(page)
-    m = re.search(r"共\s*(\d+)\s*页", text)
-    if m and int(m.group(1)) > 1:
-        return True
+    total_match = TOTAL_RECORDS_RE.search(text)
+    pages_match = TOTAL_PAGES_RE.search(text)
     try:
         anchors = page.eval_on_selector_all(
             "a,button,input", """els => els.map(a => ({
                 text:((a.textContent||a.value||'')+'').trim(),
                 href:a.getAttribute('href')||'', onclick:a.getAttribute('onclick')||'',
+                type:a.getAttribute('type')||'', class:a.getAttribute('class')||'',
+                name:a.getAttribute('name')||'', id:a.getAttribute('id')||'',
                 disabled:a.hasAttribute('disabled') || a.disabled === true}))""")
     except Exception:  # noqa: BLE001
         anchors = []
-    for a in anchors or []:
-        label = str(a.get("text") or "")
-        if any(x in label for x in ("下一页", "下页", "尾页")) and not a.get("disabled"):
-            # JavaScript handlers and bare anchors are just as capable of
-            # loading page 2 as a normal href.
-            return True
-    return False
+    current_url = str(getattr(page, "url", "") or "")
+    current_page, explicit_terminal = _current_list_page(current_url)
+    labeled_next: list[str] = []
+    numeric_candidates: list[tuple[int, str]] = []
+    terminal_links: list[str] = []
+    unknown_next = False
+
+    for anchor in anchors or []:
+        label = re.sub(r"\s+", "", str(anchor.get("text") or ""))
+        href = str(anchor.get("href") or "").strip()
+        onclick = str(anchor.get("onclick") or "").strip()
+        if anchor.get("disabled"):
+            continue
+        if _is_page_size_control(anchor, label, href, onclick):
+            continue
+        lowered_href = href.lower()
+        usable_href = bool(href) and not lowered_href.startswith(
+            ("javascript:", "mailto:", "data:", "#"))
+
+        page_no = None
+        next_query = False
+        if usable_href:
+            try:
+                target_url = urljoin(current_url, href)
+                page_no = _query_page_number(target_url)
+                query = parse_qs(urlsplit(target_url).query, keep_blank_values=True)
+                next_query = any(str(v).strip().lower() in ("next", "nextpage")
+                                 for v in query.get("s_page", []))
+            except ValueError:
+                page_no = None
+
+        is_next = any(x in label for x in NEXT_PAGE_LABELS) or next_query
+        is_prev = "上一页" in label or "上页" in label
+        is_terminal = any(x in label for x in TERMINAL_PAGE_LABELS)
+        if is_terminal:
+            terminal_links.append(href)
+            continue
+        if is_prev:
+            continue
+        numeric_next = (page_no is not None and
+                        ((current_page is None and page_no > 1)
+                         or (current_page is not None and page_no > current_page)))
+        if is_next:
+            if usable_href:
+                labeled_next.append(href)
+            else:
+                unknown_next = True
+            continue
+        if numeric_next:
+            if usable_href:
+                numeric_candidates.append((page_no, href))
+            continue
+        if not usable_href and onclick and re.search(
+                r"(?:next|gotopage|s_gotopage|pagingpage\s*=|"
+                r"(?<![a-z])page\s*=|翻页)", onclick, re.I):
+            unknown_next = True
+
+    if labeled_next:
+        next_links = labeled_next
+    elif numeric_candidates:
+        nearest = min(page_no for page_no, _href in numeric_candidates)
+        next_links = [href for page_no, href in numeric_candidates
+                      if page_no == nearest]
+    else:
+        next_links = []
+    return {
+        "total_records": int(total_match.group(1)) if total_match else None,
+        "total_pages": int(pages_match.group(1)) if pages_match else None,
+        "next_links": next_links,
+        "unknown_next": unknown_next,
+        "current_page": current_page,
+        "explicit_terminal": explicit_terminal,
+        "terminal_links": terminal_links,
+        "has_terminal": bool(terminal_links) or explicit_terminal,
+    }
+
+
+def _pagination_block_reason(page) -> str:
+    """Return why pagination cannot be followed, or an empty string."""
+    evidence = _pagination_evidence(page)
+    if evidence["unknown_next"]:
+        return "存在无法解析的下一页/JavaScript 分页控件，未确认完整"
+    if evidence["next_links"]:
+        current_url = str(getattr(page, "url", "") or "")
+        for href in evidence["next_links"]:
+            _target, reason = _safe_next_target(current_url, href, "")
+            if reason:
+                return reason
+        return ""
+    total_pages = evidence["total_pages"]
+    if total_pages is not None and total_pages > 1:
+        current_page = evidence["current_page"]
+        if evidence["explicit_terminal"] or (
+                current_page is not None
+                and current_page >= total_pages):
+            return ""
+        return (f"页脚称共 {total_pages} 页，但当前页没有可安全跟随的"
+                "下一页")
+    if (evidence["has_terminal"] and not evidence["explicit_terminal"]
+            and total_pages is None and evidence["total_records"] is None):
+        return "只有尾页链接，缺少总记录数/总页数等可靠末页证据，未确认完整"
+    return ""
+
+
+def pagination_uncertain(page) -> bool:
+    """True only when pagination is present but cannot be followed safely."""
+    return bool(_pagination_block_reason(page))
 
 
 def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
@@ -942,9 +1412,13 @@ def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
             break
     text = _body_text(page)
     header_ok = target is not None
-    explicit_empty = any(marker in text for marker in EMPTY_PAGE_MARKERS)
-    if pagination_uncertain(page):
-        return "incomplete", "页面存在下一页/多页标记，未确认完整"
+    total_match = TOTAL_RECORDS_RE.search(text)
+    footer_total = int(total_match.group(1)) if total_match else None
+    explicit_empty = (any(marker in text for marker in EMPTY_PAGE_MARKERS)
+                      or footer_total == 0)
+    pagination_reason = _pagination_block_reason(page)
+    if pagination_reason:
+        return "incomplete", pagination_reason
     if not header_ok:
         if evidence["tables"] or rows:
             return "invalid", "未找到带「标题/截止时间」的目标表格"
@@ -953,7 +1427,13 @@ def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
     if data_rows == 0:
         if explicit_empty:
             return "empty", "目标表头有效且页面明确显示空态"
+        if footer_total is not None:
+            return "incomplete", f"目标表头无数据行，但页脚称共 {footer_total} 条"
         return "invalid", "只有目标表头，没有数据行或明确空态证据"
+    if footer_total is not None and footer_total == 0:
+        return "invalid", "页面有数据行但页脚总记录数为 0"
+    if footer_total is not None and footer_total < data_rows:
+        return "incomplete", f"页脚总记录数 {footer_total} 小于本页 {data_rows} 行"
     if not rows:
         return "incomplete", f"目标表有 {data_rows} 个数据行，但一条也未解析"
     if len(rows) < data_rows:
@@ -1077,25 +1557,108 @@ def page_authenticated(page) -> bool:
         return False
 
 
+def _authenticated_personal_identity_page(page) -> bool:
+    """Only the protected personal account page may supply a body fallback."""
+    try:
+        parts = urlsplit(str(getattr(page, "url", "") or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+        path = (parts.path or "").rstrip("/")
+    except ValueError:
+        return False
+    if not _host_is_platform(host) or path != "/meol/personal.do":
+        return False
+    text = _body_text(page)
+    return ("在线总时长" in text and "登录时间" in text) or page_authenticated(page)
+
+
+def _clean_identity_marker(value: str) -> str | None:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not value or "教师姓名" in value or "教师信息" in value:
+        return None
+    return value[:120]
+
+
 def platform_identity(page) -> str | None:
-    """Return a non-credential visible account marker, or None if unavailable."""
+    """Return only a trusted, non-credential visible account marker."""
+    try:
+        parts = urlsplit(str(getattr(page, "url", "") or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not _host_is_platform(host) or page_is_login(page):
+        return None
+
     try:
         value = page.eval_on_selector(
-            "#userName,.userName,.user-name,.user-info,.userInfo,.personal-info",
+            IDENTITY_SELECTORS,
             """el => (el.textContent||el.getAttribute('title')||'')
                 .replace(/\\s+/g,' ').trim()""")
     except Exception:  # noqa: BLE001
         value = ""
-    if value:
-        return str(value)[:120]
+    marker = _clean_identity_marker(str(value or ""))
+    if marker:
+        return marker
+
+    if not _authenticated_personal_identity_page(page):
+        return None
     text = _body_text(page)
-    m = re.search(r"(?:学号|姓名|用户名)\s*[:：]\s*([^\s|]{1,40})", text)
-    return m.group(1).strip() if m else None
+    match = PERSONAL_IDENTITY_RE.search(text)
+    return _clean_identity_marker(match.group(1)) if match else None
+
+
+def resolve_platform_identity(page) -> str | None:
+    """Read this account's protected profile when the personal header lacks an ID.
+
+    Only follow the own-profile link observed on an authenticated personal page;
+    course teacher profiles and arbitrary URLs must never supply an identity.
+    Keep the caller's page in place so course discovery still starts there.
+    """
+    marker = platform_identity(page)
+    if marker or not _authenticated_personal_identity_page(page) or page_is_login(page):
+        return marker
+    profile = None
+    try:
+        href = page.eval_on_selector(
+            '.name a.info.chgright[href]', "el => el.getAttribute('href')")
+        if not href:
+            return None
+        target = urljoin(page.url, str(href))
+        def allowed(url):
+            parts = urlsplit(url)
+            base = urlsplit(BASE)
+            return (parts.scheme, parts.netloc, parts.path) == (
+                base.scheme, base.netloc, '/meol/popups/viewstudent_info.jsp')
+        if not allowed(target):
+            return None
+        profile = page.context.new_page()
+        profile.goto(target, wait_until='domcontentloaded', timeout=12000)
+        if not allowed(profile.url) or page_is_login(profile):
+            return None
+        pairs = profile.eval_on_selector_all('tr', """rows => rows.flatMap(r => {
+            const cells = [...r.cells];
+            return cells.flatMap((c,i) => c.tagName === 'TH' && cells[i+1]?.tagName === 'TD'
+                ? [[c.textContent.trim(), cells[i+1].textContent.trim()]] : []);
+        })""")
+        # Prefer stable account identifiers. A display name alone is insufficient.
+        for label in ('用户名', '学号'):
+            values = {str(value).strip() for key, value in pairs
+                      if re.sub(r'[\s:：]', '', str(key)) == label and str(value).strip()}
+            if len(values) > 1:
+                return None
+            if values:
+                value = values.pop()
+                return value if re.fullmatch(r'[A-Za-z0-9_.@-]{1,96}', value) else None
+        return None
+    except Exception:  # noqa: BLE001 -- missing/changed profile keeps publishing blocked
+        return None
+    finally:
+        if profile is not None:
+            profile.close()
 
 
 def bind_page_identity(page, scope: str | None = None):
     """Bind the visible account marker on every authenticated entry point."""
-    marker = platform_identity(page)
+    marker = resolve_platform_identity(page)
     if not marker:
         return None
     return cache_store.bind_identity(marker, scope=scope)
@@ -1883,6 +2446,7 @@ def _run_scan(args):
     T_START = time.time()
     T = {"login": 0.0, "pool": 0.0, "homework": 0.0, "test": 0.0, "content": 0.0, "save": 0.0}
     run_scan_id = str(args.scan_id or uuid.uuid4().hex[:12])
+    cache_store.migrate_identity_state(cache_store.account_scope())
 
     with sync_playwright() as p:
         ctx = make_context(p, headless=True)
@@ -1912,7 +2476,7 @@ def _run_scan(args):
                              ensure_ascii=False))
             return 1
         try:
-            marker = platform_identity(page)
+            marker = resolve_platform_identity(page)
             if marker:
                 cache_store.bind_identity(marker, scope=cache_store.account_scope())
             else:
