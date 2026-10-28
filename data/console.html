@@ -182,7 +182,6 @@ td.title{white-space:normal!important}
   <div class="sec-label">检 索 与 发 布</div>
   <div class="panel ops">
     <button class="btn accent" id="btnFetch">检索北化在线</button>
-    <button class="btn" id="btnContentDue">补齐正文</button>
     <button class="btn" id="btnPreview">预览</button>
     <button class="btn" id="btnPublish">提前发布</button>
     <span class="sep"></span>
@@ -1204,7 +1203,7 @@ function autoFillVisibleContent() {
   const next = () => {
     if (state.autoFillRound >= 200) {
       state.autoFilling = false;
-      log('正文自动补齐已暂停：本轮批次达到上限，可点「补齐窗口内正文」继续。');
+      log('正文自动补齐已暂停：本轮批次达到上限；可重新检索，或在对应作业中刷新正文。');
       return;
     }
     state.autoFillRound += 1;
@@ -1262,15 +1261,6 @@ $('#btnFetch').onclick = () => {
     }
     autoFillVisibleContent();
   });
-};
-$('#btnContentDue').onclick = () => {
-  log('正在补齐窗口内正文（同一认证上下文批量执行；不抓测试题，不阻塞列表）…');
-  runTask('content', { force: false }, '补齐窗口内作业正文', async res => {
-    if (res.error) log(res.error);
-    await refreshList({ silent: true });
-    log(`正文补齐：请求 ${res.requested || 0} 条，成功 ${res.ok_count || 0}，失败 ${res.failed || 0}` +
-      (res.remaining ? `，剩余 ${res.remaining} 条可继续` : '') + '。');
-  }, { globalBusy: false });
 };
 $('#btnPreview').onclick = () => doPublish(true);
 $('#btnPublish').onclick = () => {
