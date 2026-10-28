@@ -877,7 +877,11 @@ function renderSegments(r, segments, parent) {
         img.src = assetUrl(seg.asset_id); img.alt = seg.alt || '作业图片';
         img.loading = 'lazy'; img.style.maxWidth = '100%'; img.style.verticalAlign = 'top';
         if (seg.crop_safe !== false) img.onclick = () => openCrop(r, seg.asset_id);
-        parent.appendChild(img);
+        const wrap = document.createElement('span');
+        wrap.className = 'inline-image';
+        wrap.appendChild(img);
+        renderSavedCrops(r, seg.asset_id, wrap);
+        parent.appendChild(wrap);
       } else {
         const s = document.createElement('span'); s.className = 'stale-note';
         s.textContent = '［图片未缓存：' + (seg.error || seg.status || '未知原因') + '］';
@@ -895,7 +899,7 @@ function renderSavedCrops(r, assetId, box) {
   if (!view || !Array.isArray(view.regions)) return;
   const regions = view.regions.filter(x => x.asset_id === assetId);
   if (!regions.length) return;
-  const wrap = document.createElement('div'); wrap.className = 'crop-thumbs';
+  const wrap = document.createElement('span'); wrap.className = 'crop-thumbs';
   const img = new Image();
   img.onload = () => regions.forEach(reg => {
     const c = document.createElement('canvas');

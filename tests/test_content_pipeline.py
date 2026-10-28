@@ -164,6 +164,26 @@ class ImageDownloadTests(IsolatedCase):
         self.assertEqual(Path(asset["original_path"]).read_bytes(), data)
         self.assertEqual(asset["path"], asset["original_path"])
 
+    def test_theol_legacy_pjpeg_header_accepts_verified_jpeg_bytes(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow not installed')
+        buf = io.BytesIO()
+        Image.new('RGB', (8, 6)).save(buf, format='JPEG')
+        self.write_config({'content': {'asset_max_bytes': 10000}})
+        response = FakeStreamResponse(headers={'content-type': 'image/pjpeg'}, body=buf.getvalue())
+        session = FakeStreamSession({'https://course.buct.edu.cn/image.jsp': [response]})
+        asset = cp.download_image(session, 'https://course.buct.edu.cn/image.jsp')
+        self.assertEqual(asset['mime'], 'image/jpeg')
+        self.assertEqual((asset['width'], asset['height']), (8, 6))
+
+    def test_pjpeg_alias_does_not_accept_a_different_image_format(self):
+        response = FakeStreamResponse(headers={'content-type': 'image/pjpeg'}, body=make_png())
+        session = FakeStreamSession({'https://course.buct.edu.cn/image.jsp': [response]})
+        with self.assertRaisesRegex(cp.AssetError, 'MIME 与内容不一致'):
+            cp.download_image(session, 'https://course.buct.edu.cn/image.jsp')
+
     def test_exif_orientation_derives_display_but_preserves_source_bytes(self):
         try:
             from PIL import Image

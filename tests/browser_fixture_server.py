@@ -162,6 +162,8 @@ def main():
                       {"type": "image", "asset_id": asset_id, "status": "ready",
                        "crop_safe": True, "width": 400, "height": 300,
                        "mime": "image/png", "alt": "正文图片"}]},
+        {"id": "a1", "type": "attachment", "text": "fixture题目附件.pdf",
+         "url": "https://course.buct.edu.cn/fixture-assignment.pdf"},
     ]
     cache_store.save_content(item["item_key"], {
         "status": "ready", "source_url": "https://course.buct.edu.cn/fixture",

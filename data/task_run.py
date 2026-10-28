@@ -240,6 +240,9 @@ def main() -> int:
         log_line(f"[task_run] 失败：退出码 {r.returncode}，用时 {elapsed:.0f} 秒")
         # weekly.py 自己已经就各类失败发过告警了；这里只在「连它的告警都没发出去」
         # 这种极端情况下兜一手，避免任务挂了却一片安静。
+        if args.dry_run:
+            log_line("[task_run] 演练模式：失败告警未发送。")
+            return r.returncode
         _alert("task-failed", "作业提醒定时任务执行失败",
                f"task_run.py 调用 weekly.py 返回 {r.returncode}\n"
                f"用时 {elapsed:.0f} 秒\n"

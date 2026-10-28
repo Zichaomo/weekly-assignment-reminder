@@ -73,6 +73,8 @@
   },
   "_scan": "扫描节奏与超时。publish_fresh_sec 只控制“缓存是否足够新可用于发布”，不是正文 TTL。",
   "scan": {
+    "_direct_course_entry": "优先访问已知课程落地页；须同时核对来源、课程ID、课程名和作业入口，否则回退原入口。设false可关闭",
+    "direct_course_entry": true,
     "_publish_fresh_sec": "发布前要求扫描缓存的最大年龄（秒），默认 300；过期会拒绝发送",
     "publish_fresh_sec": 300,
     "_course_gap_sec": "相邻课程请求间隔（秒），默认 0.3；不要设得过小",

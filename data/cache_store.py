@@ -64,6 +64,7 @@ def cache_settings() -> dict:
                              or content.get("batch_limit", 0)),
         "course_gap_sec": float(os.environ.get("HOMEWORK_COURSE_GAP_SEC")
                                 or scan.get("course_gap_sec", 0.3)),
+        "direct_course_entry": scan.get("direct_course_entry", True) is True,
         "no_tests_review_days": int(scan.get("no_tests_review_days", 7)),
         "asset_max_bytes": int(content.get("asset_max_bytes", 8 * 1024 * 1024)),
         "asset_max_pixels": int(content.get("asset_max_pixels", 40_000_000)),

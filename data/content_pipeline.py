@@ -721,11 +721,12 @@ def download_image(session, url: str, *, allowed_hosts=None) -> dict:
         raise AssetError("图片超过大小限制")
     info = _decode_image(data, max_pixels)
     declared = (headers.get("content-type") or "").split(";")[0].strip().lower()
+    # THEOL's image JSP serves JPEG bytes with this legacy MIME alias.
+    declared = {"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg"}.get(
+        declared, declared)
     if declared.startswith("image/") and declared.split("/")[-1] not in (
             "png", "jpeg", "jpg", "gif", "webp"):
         raise AssetError("图片 MIME 类型不允许")
-    if declared == "image/jpg":
-        declared = "image/jpeg"
     if declared.startswith("image/") and declared != info["source_mime"]:
         raise AssetError("图片 MIME 与内容不一致")
     # Asset identity/version is always the *source byte* hash, so replacing an

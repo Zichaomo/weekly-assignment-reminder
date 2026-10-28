@@ -418,10 +418,16 @@ def main() -> int:
                     help="完全不发个人小群那条（只想发班级群时用）")
     args = ap.parse_args()
 
+    def report_alert(*a, **kw):
+        if args.no_send:
+            print("演练模式：告警未发送。", file=sys.stderr)
+            return False
+        return send_alert(*a, **kw)
+
     # ---- 前置检查：定时任务到底有没有在工作？（不抓取，秒回）----
     if args.check_freshness:
         code = check_freshness()
-        if code == 2 and args.alert_if_stale:
+        if code == 2 and args.alert_if_stale and not args.no_send:
             try:
                 import alert
                 cfg = alert.load_cfg()
@@ -454,8 +460,9 @@ def main() -> int:
                     f"处理：双击 {ROOT.parent / 'login.bat'} 手动登录一次，再重跑作业提醒。\n"
                     "影响：本次没有生成提醒，群里不会收到消息。")
             print(text)
-            ok = send_alert("login-failed", "北化在线登录失效，自动登录也失败", text)
-            print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
+            ok = report_alert("login-failed", "北化在线登录失效，自动登录也失败", text)
+            if not args.no_send:
+                print("已发送登录失效告警。" if ok else "告警发送失败（见 stderr）。", file=sys.stderr)
             return 1
 
         # ---- 抓取：这里的失败必须告警，否则就是静默漏报 ----
@@ -467,8 +474,22 @@ def main() -> int:
                     r"排查：看 data\server_console.log 与 data\fetch_log.jsonl；"
                     r"必要时双击 login.bat 重新登录后重跑。")
             print("抓取失败：", e, file=sys.stderr)
-            send_alert("fetch-crashed", "作业提醒：抓取失败", text)
+            report_alert("fetch-crashed", "作业提醒：抓取失败", text)
             return 1
+
+    # Freshly fetched output must meet the same scope, identity and freshness
+    # requirements as cache reuse. Use the verified snapshot for both audiences.
+    if not args.pool and not args.no_send:
+        verified, cache_coverage = load_fresh_publish_cache()
+        if verified is None:
+            reasons = (cache_coverage or {}).get("publish_block_reasons") or ["完整缓存不可用"]
+            text = "本次扫描未通过发布检查：" + "；".join(reasons)
+            print(text, file=sys.stderr)
+            report_alert("publish-blocked", "作业提醒：覆盖检查未通过，未发送", text)
+            return 2
+        # Keep diagnostics from this scan while publishing canonical cache rows.
+        data = {**verified, **{k: data[k] for k in (
+            '_elapsed_sec', 'warnings', 'per_course', 'timing') if k in data}}
 
     elapsed = data.get("_elapsed_sec")
     platform = data.get("homeworks", [])
@@ -509,7 +530,7 @@ def main() -> int:
         text += ("\n排查：data\\fetch_log.jsonl 看本次记录；"
                  "若是平台 0 条，先双击 login.bat 重新登录再重跑。")
         print("⚠️ " + "；".join(unhealthy), file=sys.stderr)
-        send_alert("fetch-empty" if not platform else "fetch-partial",
+        report_alert("fetch-empty" if not platform else "fetch-partial",
                    "作业提醒：本次抓取结果不可信", text, level="error")
 
     manual = load_manual()
@@ -566,6 +587,14 @@ def main() -> int:
     if args.no_send:
         print("演练模式：未发送。")
         return 0
+
+    if not args.pool:
+        verified, final_coverage = load_fresh_publish_cache()
+        if verified is None:
+            print("发送前覆盖或新鲜度已变化，本次未发送：" + "；".join(
+                (final_coverage or {}).get("publish_block_reasons") or ["完整缓存不可用"]),
+                file=sys.stderr)
+            return 2
 
     rc = 0
 

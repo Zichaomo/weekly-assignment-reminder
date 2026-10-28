@@ -606,6 +606,40 @@ def _collect_list_pages(page, kind: str, source: str, lid: str, deadline: float,
     return collected, "ok", f"{len(collected)} 行，已核对 {page_count} 页", first_landed
 
 
+def enter_course_page(page, lid: str, name: str, deadline: float) -> bool:
+    """Try the observed native landing page, otherwise use the official gateway.
+
+    A decorative courseId is insufficient: require the protected native origin,
+    exact course path/ID, expected course name, and homework menu together.
+    Returns whether the direct landing was confirmed; both paths share the
+    caller's deadline and subsequent course validation.
+    """
+    settings = cache_store.cache_settings()
+    if (settings.get('direct_course_entry', True) and name
+            and re.fullmatch(r'\d+', str(lid))):
+        target = f'{BASE}/meol/jpk/course/layout/newpage/index.jsp?courseId={lid}'
+        try:
+            page.goto(target, wait_until='domcontentloaded',
+                      timeout=_budget_ms(deadline, cap_ms=10000))
+            if page_is_login(page):
+                raise RuntimeError('认证上下文失效：课程直达入口跳到了登录页')
+            landed = urlsplit(page.url)
+            body = _body_text(page)
+            if (_url_origin(page.url) == _url_origin(BASE)
+                    and landed.path == '/meol/jpk/course/layout/newpage/index.jsp'
+                    and _course_ids(page.url) == {str(lid)}
+                    and name in body and '课程作业' in body):
+                _ensure_budget(deadline, '确认课程直达页')
+                return True
+        except Exception as exc:  # noqa: BLE001 -- old layouts keep the gateway
+            if '认证上下文失效' in str(exc):
+                raise
+        _ensure_budget(deadline, '回退课程入口')
+    page.goto(f'{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw',
+              wait_until='domcontentloaded', timeout=_budget_ms(deadline))
+    return False
+
+
 def fetch_course_both(ctx, page, lid: str, name: str, debug: bool = False,
                       want_homework: bool = True, want_tests: bool = False,
                       empty_retries: int = 2, return_status: bool = False):
@@ -618,11 +652,10 @@ def fetch_course_both(ctx, page, lid: str, name: str, debug: bool = False,
     notes: list[str] = []
     statuses = {"homework": "invalid", "tests": "disabled" if not want_tests else "invalid"}
     evidence: dict[str, str] = {}
-    course_url = f"{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw"
     settings = cache_store.cache_settings()
     deadline = time.monotonic() + max(5.0, float(settings["course_timeout_sec"]))
 
-    page.goto(course_url, wait_until="domcontentloaded", timeout=_budget_ms(deadline))
+    enter_course_page(page, lid, name, deadline)
     if page_is_login(page):
         raise RuntimeError("认证上下文失效：课程入口跳到了登录页")
     if not wait_text(page, "课程作业", timeout=min(12.0, max(0.1, deadline - time.monotonic()))):

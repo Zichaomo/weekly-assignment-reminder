@@ -150,6 +150,32 @@ async function main() {
     await page.waitForSelector('.content-detail', { timeout: 5000 });
     assert((await page.locator('.content-detail').innerText()).includes('作图并说明'));
 
+    // Exercise the actual attachment control without opening an external app.
+    let attachmentOpened = null;
+    await page.route('**/api/open', async route => {
+      attachmentOpened = route.request().postDataJSON().url;
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true }) });
+    });
+    await page.locator('.content-detail .attach').getByText('打开附件').click();
+    await waitUntil(() => attachmentOpened !== null, 5000);
+    assert.strictEqual(attachmentOpened, 'https://course.buct.edu.cn/fixture-assignment.pdf');
+
+    // A purely graphical assignment must advertise images even with no text.
+    const pureImage = await page.evaluate(() => {
+      const host = document.createElement('div');
+      const r = state.allRows.find(x => x.item_key);
+      const image = collectContentImages(r.content_blocks).find(x => x.status === 'ready');
+      renderContentBrief({ ...r, content_text: '', content_blocks: [
+        { type: 'paragraph', segments: [image] }], view: null }, host);
+      return { label: host.querySelector('.pure-image')?.textContent,
+        imageCount: host.querySelectorAll('img.thumb').length,
+        empty: host.textContent.includes('平台未填写') };
+    });
+    assert.strictEqual(pureImage.label, '图片作业 · 1 张图');
+    assert.strictEqual(pureImage.imageCount, 1);
+    assert.strictEqual(pureImage.empty, false);
+
     const cellImage = page.locator('.content-detail td img[alt="表格单元格图片"]');
     await cellImage.waitFor({ state: 'visible', timeout: 5000 });
     await cellImage.scrollIntoViewIfNeeded();
@@ -194,6 +220,16 @@ async function main() {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#tbody tr[data-key]', { timeout: 10000 });
     await page.locator('#tbody tr[data-key]').first().locator('[data-act="content"]').click();
+    // Inline images must show saved regions in the detail, not only in the editor.
+    await page.waitForFunction(() =>
+      document.querySelectorAll('.content-detail p .crop-thumbs canvas').length === 2,
+      null, { timeout: 5000 });
+    const cropSizes = await page.locator('.content-detail p .crop-thumbs canvas')
+      .evaluateAll(canvases => canvases.map(c => [c.width, c.height]));
+    assert(cropSizes.every(([w, h]) => w > 20 && h > 20), 'saved crop previews must draw actual pixels');
+    const inlineShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-inline-crops.png');
+    fs.mkdirSync(path.dirname(inlineShot), { recursive: true });
+    await page.locator('.content-detail p .crop-thumbs').screenshot({ path: inlineShot });
     await page.locator('.content-detail img[alt="正文图片"]').first().click();
     await page.waitForSelector('#maskCrop.on', { timeout: 5000 });
     await page.waitForFunction(() => document.querySelectorAll('#cropRegions div').length === 2,
@@ -290,6 +326,30 @@ async function main() {
 
     const shot = path.join(outDir, 'browser-smoke.png');
     await page.screenshot({ path: shot, fullPage: false });
+    // Daily operations use the same real isolated HTTP handlers as the app.
+    const dailyDeadline = new Date(Date.now() + 2 * 86400000);
+    const pad = n => String(n).padStart(2, '0');
+    const dateText = `${dailyDeadline.getFullYear()}-${pad(dailyDeadline.getMonth()+1)}-${pad(dailyDeadline.getDate())} 23:59`;
+    await page.locator('#addC').fill('fixture手动课程');
+    await page.locator('#addT').fill('fixture手动新任务');
+    await page.locator('#addD').fill(dateText);
+    await page.locator('#btnAdd').click();
+    await page.waitForFunction(() => state.manualRows.some(r => r.title === 'fixture手动新任务'));
+    const manualId = await page.evaluate(() => state.manualRows.find(r => r.title === 'fixture手动新任务').manual_id);
+    const edited = await page.request.post(base + '/api/manual', { data: { action: 'edit', id: manualId, title: 'fixture已编辑' } });
+    assert.strictEqual((await edited.json()).ok, true);
+    await page.evaluate(() => refreshList({ silent: true }));
+    assert(await page.getByText('fixture已编辑', { exact: true }).isVisible());
+    const removed = await page.request.post(base + '/api/manual', { data: { action: 'rm', id: manualId } });
+    assert.strictEqual((await removed.json()).ok, true);
+    await page.evaluate(() => refreshList({ silent: true }));
+    assert.strictEqual(await page.getByText('fixture已编辑', { exact: true }).count(), 0);
+    for (const action of ['apply', 'remove']) {
+      const response = await page.request.post(base + '/api/blacklist', { data: { kind: 'course', action, lids: ['101'] } });
+      assert.strictEqual((await response.json()).ok, true);
+      await page.evaluate(() => refreshList({ silent: true }));
+      assert.strictEqual(await page.locator('#tbody tr[data-key]').count(), action === 'apply' ? 0 : 1);
+    }
     await wait(300);
 
     assert.deepStrictEqual(events.pageErrors, [], 'page errors: ' + events.pageErrors.join('; '));
@@ -316,7 +376,7 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true,
-      screenshots: [cropShot, shot],
+      screenshots: [cropShot, shot, inlineShot],
       persisted_regions: persisted.regions.length,
       cold_open_task_posts: 0,
       task_posts_during_poll_test: events.taskPosts.length,
