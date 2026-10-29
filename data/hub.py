@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -107,6 +108,8 @@ def build_rows(platform_hw: list, manual_items: list, days: int,
             "content_checked_at": hw.get("content_checked_at"),
             "content_error": hw.get("content_error"),
             "content_text": hw.get("content_text") or "",
+            "content_summary": hw.get("content_summary"),
+            "content_review_stale": bool(hw.get("content_review_stale")),
             "content_blocks": hw.get("content_blocks") or [],
             "asset_ids": hw.get("asset_ids") or [],
             "content_version": hw.get("source_version"),
@@ -156,6 +159,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
     t_start = time.perf_counter()
     platform_hw = []
     error = None
+    error_code = None
     warnings = {}
     sweep_meta = None
     elapsed = None
@@ -182,18 +186,37 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
                     extra.append("--content-after-scan")
                 if lids:
                     extra.extend(["--lids", *[str(x) for x in lids]])
-            data = weekly.fetch(extra or None)
+            try:
+                data = weekly.fetch(extra or None)
+            except weekly.AuthenticationRequired:
+                print('登录状态已过期，尝试自动续登一次…')
+                # login.py owns the shared platform lock itself. Holding it
+                # here while waiting on that subprocess would deadlock.
+                if not weekly.ensure_login(check=False):
+                    raise weekly.AuthenticationRequired('自动登录未成功，请双击 login.bat 完成登录，再重新检索。')
+                if scan_id:
+                    retry_id = uuid.uuid4().hex[:12]
+                    extra = list(extra)
+                    extra[extra.index('--scan-id') + 1] = retry_id
+                    # A failed scan ID is immutable; keep its evidence and let
+                    # the same UI task follow a fresh scan for the retry.
+                    cache_store.update_task(scan_id, 'running', scan_id=retry_id)
+                data = weekly.fetch(extra or None)
             warnings = data.get("warnings", {}) or {}
             sweep_meta = data.get("sweep")
             elapsed = data.get("_elapsed_sec")
             timing = data.get("timing") or {}
         except Exception as e:  # noqa: BLE001
-            error = f"北化在线抓取失败（会话可能过期，请运行 login.py）：{e}"
+            if isinstance(e, weekly.AuthenticationRequired):
+                error_code = 'auth_required'
+                error = '北化在线登录已失效，自动续登后仍未成功。请双击 login.bat 完成登录，再重新检索。'
+            else:
+                error = f"北化在线检索失败：{e}"
             lowered = str(e).lower()
             if any(x in str(e) for x in ("未登录", "登录", "认证", "session")) or \
                     any(x in lowered for x in ("login", "auth")):
                 cache_store.invalidate_scope_scans(
-                    "抓取在开始记录扫描前认证失败；旧成功快照禁止冒充最新结果")
+                    "认证失败：请重新登录后检索，旧缓存暂不能用于发布", status='auth_failed')
     # 列表始终优先读取 SQLite：扫描过程中每门课事务写入，本地读取无需平台。
     t_local = time.perf_counter()
     try:
@@ -240,6 +263,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
     out = {
         "ok": error is None,
         "error": error,
+        "error_code": error_code,
         "rows": rows,
         "platform_count": len(platform_hw),
         "manual_count": len(manual_items),
@@ -403,6 +427,9 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     msg_personal = weekly.format_message(personal_items, days,
                                          title="📚 我的作业提醒（含选修课）",
                                          elective_lids=elec)
+    import image_delivery
+    class_images = image_delivery.collect(class_items)
+    personal_images = image_delivery.collect(personal_items)
     (ROOT / "last_message.txt").write_text(msg, encoding="utf-8")
     (ROOT / "last_message_personal.txt").write_text(msg_personal, encoding="utf-8")
 
@@ -427,6 +454,7 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
             "ok": True, "sent": False,
             "message": msg,                    # 班级群那条（已去选修课）
             "message_personal": msg_personal,  # 个人小群那条（完整清单）
+            "images": class_images, "images_personal": personal_images,
             "count": len(class_items), "count_personal": len(personal_items),
             "elective_count": len(elec),
             "channel": channel or "默认",
@@ -438,33 +466,29 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
                                   if data_source == "cache" else None)
         return out
 
-    cfg = notify.load_config()
+    cfg = dict(notify.load_config())
+    cfg['_image_manifest'] = class_images
     ch = (channel or cfg.get("channel", "clipboard")).lower()
 
     # 去重：同一目标上、窗口内推过完全一样的内容就跳过
     # （防止手滑连点两次「提前发布」重复打扰；按目标区分，测试群发过不影响班级群）
     window = int(cfg.get("dedup_window_sec", 300) or 0)
     target = notify.dedup_target(ch, cfg)
-    dup = notify.recent_duplicate(msg, window, target)
+    dup = notify.recent_duplicate(msg, window, target) if not class_images else None
     if dup:
         note = (f"{window} 秒内已向同一目标推送过完全相同的内容"
                 f"（{dup.get('time')}，来源 {dup.get('source')}），本次已跳过，未重复发送。")
         notify.log_push("hub", ch, msg, True, note="duplicate-skipped", target=target)
-        return {
-            "ok": True, "sent": False, "deduped": True, "note": note,
-            "message": msg, "message_personal": msg_personal,
-            "count": len(class_items), "count_personal": len(personal_items),
-            "channel": ch,
-        }
-
-    try:
-        sent = notify.dispatch(msg, ch, cfg)
-    except Exception as e:  # noqa: BLE001
-        notify.log_push("hub", ch, msg, False,
-                        note=f"exception:{type(e).__name__}", target=target)
-        return {"ok": False, "error": f"推送异常：{e}", "message": msg}
-    notify.log_push("hub", ch, msg, sent,
-                    note="" if sent else "send-failed", target=target)
+        sent = True
+    else:
+        try:
+            sent = notify.dispatch(msg, ch, cfg)
+        except Exception as e:  # noqa: BLE001
+            notify.log_push("hub", ch, msg, False,
+                            note=f"exception:{type(e).__name__}", target=target)
+            return {"ok": False, "error": f"推送异常：{type(e).__name__}", "message": msg}
+        notify.log_push("hub", ch, msg, sent,
+                        note="" if sent else "send-failed", target=target)
 
     # 个人小群那条：可选通道，失败不影响班级群那条（两者各自记账）
     personal = {"ok": True, "skipped": True, "note": "未启用"}
@@ -472,13 +496,14 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     if pready:
         p_ch = notify.personal_cfg(cfg)["channel"]
         p_target = notify.dedup_target(p_ch, cfg, "personal")
-        p_dup = notify.recent_duplicate(msg_personal, window, p_target)
+        p_dup = notify.recent_duplicate(msg_personal, window, p_target) if not personal_images else None
         if p_dup:
             personal = {"ok": True, "sent": False, "deduped": True,
                         "note": f"{window} 秒内已向个人小群推过相同内容，已跳过"}
         else:
             try:
-                p_sent = notify.dispatch(msg_personal, p_ch, cfg, audience="personal")
+                p_sent = notify.dispatch(msg_personal, p_ch,
+                    {**cfg, '_image_manifest':personal_images}, audience="personal")
                 notify.log_push("hub", p_ch, msg_personal, p_sent,
                                 note="" if p_sent else "send-failed",
                                 target=p_target, audience="personal")
@@ -494,7 +519,11 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         personal = {"ok": True, "skipped": True, "note": pwhy}
 
     out = {
-        "ok": sent, "sent": sent, "message": msg,
+        "ok": sent and personal.get('ok', False),
+        "sent": bool((sent and not dup) or personal.get('sent')), "message": msg,
+        "deduped": bool(dup) and bool(personal.get('deduped') or personal.get('skipped')),
+        "note": note if dup else '',
+        "images": class_images, "images_personal": personal_images,
         "message_personal": msg_personal,
         "count": len(class_items), "count_personal": len(personal_items),
         "elective_count": len(elec),

@@ -15,10 +15,12 @@
   python notify.py --self-test                        # 检查各渠道配置是否就绪
 """
 import argparse
+import base64
 import ctypes
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -62,6 +64,7 @@ DEFAULT_CONFIG = {
 }
 
 PUSH_LOG = ROOT / "push_log.jsonl"
+PART_LOG = ROOT / 'push_parts.jsonl'
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) buct-homework-bot/1.0"
 
@@ -105,7 +108,8 @@ def dedup_target(channel: str, cfg: dict, audience: str = "class") -> str:
     prefix = "personal:" if audience == "personal" else ""
     if ch == "wecom":
         hook = (pcfg.get("wecom_webhook") if audience == "personal"
-                else cfg.get("wecom_webhook"))
+                else (cfg.get('_wecom_webhook_override') or os.environ.get(WECOM_ENV)
+                      or cfg.get("wecom_webhook")))
         return prefix + _msg_hash(str(hook or ""))
     if ch == "pushplus":
         tok = (pcfg.get("pushplus_token") if audience == "personal"
@@ -216,7 +220,7 @@ def personal_ready(cfg: dict) -> tuple:
         hook = p["wecom_webhook"]
         if not hook:
             return False, "personal.wecom_webhook 未配置（个人小群机器人）"
-        main_hook = (cfg.get("wecom_webhook") or "").strip()
+        main_hook = (os.environ.get(WECOM_ENV) or cfg.get("wecom_webhook") or "").strip()
         if main_hook and hook == main_hook:
             return False, ("personal.wecom_webhook 与班级群的 wecom_webhook 是同一个 key —— "
                            "那样选修课又会发进班级群，已拒绝")
@@ -396,7 +400,7 @@ def send_pushplus(text: str, cfg: dict) -> bool:
 
 
 # ---------------------------------------------------------------- wecom
-def send_wecom(text: str, cfg: dict) -> bool:
+def send_wecom(text: str, cfg: dict, *, image_bytes=None) -> bool:
     # _wecom_webhook_override：给「个人小群」用。环境变量 BUCT_WECOM_WEBHOOK 是
     # 定时任务用来定向班级群的，个人那条绝不能被它劫持到班级群去。
     hook = ((cfg.get("_wecom_webhook_override") or "").strip()
@@ -406,6 +410,10 @@ def send_wecom(text: str, cfg: dict) -> bool:
         print("ERROR: wecom_webhook 为空，请在 config.json 填写。", file=sys.stderr)
         return False
     payload = {"msgtype": "text", "text": {"content": text}}
+    if image_bytes is not None:
+        payload = {'msgtype':'image', 'image':{
+            'base64':base64.b64encode(image_bytes).decode('ascii'),
+            'md5':hashlib.md5(image_bytes).hexdigest()}}
     req = urllib.request.Request(
         hook,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -415,7 +423,7 @@ def send_wecom(text: str, cfg: dict) -> bool:
         with urllib.request.urlopen(req, timeout=20) as r:
             res = json.loads(r.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001
-        print(f"ERROR: 企业微信请求失败 {e}", file=sys.stderr)
+        print(f"ERROR: 企业微信请求失败 {type(e).__name__}", file=sys.stderr)
         return False
     if res.get("errcode") == 0:
         # 成功提示一律走 stderr：stdout 要保持纯 JSON，避免调用方（console.ps1）解析失败
@@ -454,8 +462,12 @@ SENDERS = {
 
 def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> bool:
     """发送。audience=personal 时自动套用 personal 段（群/标题/凭据都不共用）。"""
+    channel = (channel or '').lower()
     eff_cfg = cfg
     if audience == "personal":
+        if channel != 'none' and not personal_ready(cfg)[0]:
+            print('个人通道不可用，拒绝回退到班级群。', file=sys.stderr)
+            return False
         p = personal_cfg(cfg)
         eff_cfg = dict(cfg)
         eff_cfg.update({
@@ -469,7 +481,51 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
     if not fn:
         print(f"ERROR: 未知渠道 {channel}，可选: {', '.join(SENDERS)}", file=sys.stderr)
         return False
-    return fn(text, eff_cfg)
+    images = cfg.get('_image_manifest') or []
+    if channel != 'wecom' and (not images or channel == 'none'):
+        return fn(text, eff_cfg)
+    if channel != 'wecom':
+        # Keep the reminder useful on text-only channels without claiming an
+        # image was delivered. Original images are currently a WeCom feature.
+        text = re.sub(r'作业原图随提醒发送（\d+ 张）。', '图片作业详情参见北化在线。', text)
+        return fn(text, eff_cfg)
+    import image_delivery
+    bundle = image_delivery.bundle_key(text, images)
+    target = dedup_target(channel, cfg, audience)
+    window = int(cfg.get('dedup_window_sec', 300) or 0)
+    completed = set()
+    if PART_LOG.exists() and window > 0:
+        for line in PART_LOG.read_text(encoding='utf-8').splitlines():
+            try:
+                r = json.loads(line)
+                if r['target'] == target and r['bundle'] == bundle and time.time()-r['ts'] < window:
+                    completed.add(r['part'])
+            except (ValueError, KeyError, TypeError):
+                continue
+    def part(key, action):
+        if key in completed:
+            return True
+        if not action():
+            return False
+        with PART_LOG.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'target':target,'bundle':bundle,'part':key,'ts':time.time()})+'\n')
+        time.sleep(3.1)
+        return True
+    for n, chunk in enumerate(image_delivery.text_chunks(text)):
+        if not part(f'text:{n}', lambda: send_wecom(chunk, eff_cfg)):
+            return False
+    for i, entry in enumerate(images):
+        try:
+            raw = image_delivery.original_bytes(entry)
+            caption = f"{entry['course']}｜{entry['title']}\n截止：{entry['deadline']}\n作业原图（{i+1}/{len(images)}）"
+            if not part(f'caption:{i}', lambda: send_wecom(caption, eff_cfg)):
+                return False
+            if not part(f'image:{i}', lambda: send_wecom('', eff_cfg, image_bytes=raw)):
+                return False
+        except (ValueError, OSError):
+            print('ERROR: 原图未发送，请查看北化在线；已成功发送的部分将在重试时跳过。', file=sys.stderr)
+            return False
+    return True
 
 
 def self_test(cfg: dict) -> int:
@@ -512,6 +568,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="待推送文本文件（utf-8）")
     ap.add_argument("--message", help="直接给文本")
+    ap.add_argument('--image-manifest', help='原图发送清单（仅本地文件）')
     ap.add_argument("--channel", help="覆盖 config.json 的 channel")
     ap.add_argument("--audience", choices=["class", "personal"], default="class",
                     help="class=班级群那条（全部课程−选修课）/ "
@@ -524,6 +581,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config()
+    if args.image_manifest:
+        cfg['_image_manifest'] = json.loads(Path(args.image_manifest).read_text(encoding='utf-8'))
+    if args.no_dedup:
+        cfg['dedup_window_sec'] = 0
 
     if args.self_test:
         return self_test(cfg)
@@ -556,7 +617,7 @@ def main() -> int:
     target = dedup_target(channel, cfg, args.audience)
 
     # 去重：同一目标上、窗口内推过完全相同的内容就跳过（防止连点两次造成重复打扰）
-    if not args.no_dedup:
+    if not args.no_dedup and not cfg.get('_image_manifest'):
         window = int(cfg.get("dedup_window_sec", 300) or 0)
         dup = recent_duplicate(text, window, target)
         if dup:

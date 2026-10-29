@@ -49,6 +49,7 @@ class DailyWorkflows(IsolatedCase):
         self.stack.enter_context(patch.object(fetch_log, 'log_fetch'))
         self.send = self.stack.enter_context(patch.object(weekly, 'send_one', side_effect=AssertionError('delivery forbidden')))
         self.alert = self.stack.enter_context(patch.object(weekly, 'send_alert', side_effect=AssertionError('alert forbidden')))
+        self.original_fetch = weekly.fetch
         self.fetch = self.stack.enter_context(patch.object(weekly, 'fetch', side_effect=AssertionError('platform forbidden')))
         self.stack.enter_context(patch.object(scrape, 'sync_playwright', side_effect=AssertionError('browser forbidden')))
         self.seed()
@@ -104,6 +105,80 @@ class DailyWorkflows(IsolatedCase):
              patch.object(weekly, 'ensure_login', return_value=False):
             self.assertEqual(self.run_weekly('--no-send'), 1)
         self.alert.assert_not_called(); self.send.assert_not_called()
+
+    def test_manual_fetch_renews_expired_login_once_then_retries(self):
+        self.fetch.side_effect=[weekly.AuthenticationRequired('expired'),{'ok':True,'homeworks':[]}]
+        with patch.object(weekly,'ensure_login',return_value=True) as login:
+            result=hub.run_list(7,True)
+        self.assertTrue(result['ok']);self.assertEqual(self.fetch.call_count,2)
+        login.assert_called_once()
+
+    def test_manual_fetch_does_not_loop_on_login_failure(self):
+        self.fetch.side_effect=weekly.AuthenticationRequired('expired')
+        with patch.object(weekly,'ensure_login',return_value=False) as login:
+            result=hub.run_list(7,True)
+        self.assertFalse(result['ok']);self.assertEqual(result['error_code'],'auth_required')
+        self.assertEqual(self.fetch.call_count,1);login.assert_called_once()
+        self.assertEqual(cache_store.latest_state()['scan']['status'],'auth_failed')
+
+    def test_manual_fetch_stops_if_retry_is_still_unauthenticated(self):
+        self.fetch.side_effect=weekly.AuthenticationRequired('expired')
+        with patch.object(weekly,'ensure_login',return_value=True) as login:
+            result=hub.run_list(7,True)
+        self.assertFalse(result['ok']);self.assertEqual(self.fetch.call_count,2)
+        login.assert_called_once()
+
+    def test_non_auth_fetch_errors_do_not_launch_login(self):
+        self.fetch.side_effect=RuntimeError('network failed')
+        with patch.object(weekly,'ensure_login',side_effect=AssertionError('not auth')):
+            result=hub.run_list(7,True)
+        self.assertFalse(result['ok']);self.assertIsNone(result['error_code'])
+
+    def test_fetch_reports_a_typed_login_failure(self):
+        from types import SimpleNamespace
+        with patch.object(weekly.subprocess,'run',return_value=SimpleNamespace(
+                returncode=1,stdout='{"ok":false}',stderr='ERROR: 未登录或会话已过期，请运行: python login.py')):
+            with self.assertRaises(weekly.AuthenticationRequired):
+                self.original_fetch()
+
+    def test_login_recovery_is_headless_and_time_bounded(self):
+        from types import SimpleNamespace
+        with patch.object(weekly.subprocess,'run',side_effect=[
+                SimpleNamespace(returncode=1,stdout='NEED_LOGIN'),
+                SimpleNamespace(returncode=0,stdout='fixture success')]) as run:
+            self.assertTrue(weekly.ensure_login())
+        cmd=run.call_args_list[1].args[0]
+        self.assertIn('--headless',cmd);self.assertIn('--no-wait',cmd)
+        self.assertTrue(all(c.kwargs['timeout']<=120 for c in run.call_args_list))
+
+    def test_login_timeout_returns_failure_without_retries(self):
+        with patch.object(weekly.subprocess,'run',side_effect=weekly.subprocess.TimeoutExpired('login',90)) as run:
+            self.assertFalse(weekly.ensure_login())
+        self.assertEqual(run.call_count,1)
+
+    def test_known_expired_session_skips_redundant_check(self):
+        from types import SimpleNamespace
+        with patch.object(weekly.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertTrue(weekly.ensure_login(check=False))
+        self.assertEqual(run.call_count,1)
+        self.assertIn('--auto',run.call_args.args[0]);self.assertNotIn('--check',run.call_args.args[0])
+
+    def test_auth_retry_uses_a_new_scan_id_and_updates_task_progress_link(self):
+        cache_store.register_task('ui-task','signature','fetch',{})
+        self.fetch.side_effect=[weekly.AuthenticationRequired('expired'),{'ok':True,'homeworks':[]}]
+        with patch.object(weekly,'ensure_login',return_value=True):
+            self.assertTrue(hub.run_list(7,True,scan_id='ui-task')['ok'])
+        first=self.fetch.call_args_list[0].args[0]
+        second=self.fetch.call_args_list[1].args[0]
+        first_id=first[first.index('--scan-id')+1]
+        retry_id=second[second.index('--scan-id')+1]
+        self.assertEqual(first_id,'ui-task');self.assertNotEqual(first_id,retry_id)
+        self.assertEqual(cache_store.task_record('ui-task')['scan_id'],retry_id)
+        cache_store.begin_scan(retry_id,mode='test',expected_lids=self.index,
+            tests_requested=True,course_index_version=cache_store.version_hash(self.index))
+        progress=server.task_progress({'scan_id':'ui-task','status':'running',
+            'params':{'_task_id':'ui-task'}})
+        self.assertEqual(progress['scan_id'],retry_id)
 
     def test_new_fetch_requires_coverage_before_sending(self):
         # A usable body is not evidence that every course scan completed.

@@ -134,6 +134,75 @@ async function main() {
     assert.strictEqual(events.taskPosts.length, 0, 'cold open must not start a task');
     assert.strictEqual(await page.locator('#tbody > tr > td.empty').count(), 0,
       'loaded rows must remove the empty placeholder');
+    const initialRows = await page.locator('#tbody tr[data-key]').count();
+    const effectiveRow = page.locator('#tbody tr[data-key]').filter({ hasText: 'fixture有效摘要' });
+    assert((await effectiveRow.locator('.effective-summary').innerText()).includes('习题：10-11、10-13、10-21。'));
+    assert(!(await effectiveRow.locator('.content-brief').innerText()).includes('提交图片'));
+    assert.strictEqual(await effectiveRow.locator('.content-detail').count(), 0, 'full body starts folded');
+    await effectiveRow.locator('[data-act="content"]').click();
+    assert((await effectiveRow.locator('.content-detail').innerText()).includes('提交图片'), 'original boilerplate remains accessible');
+    await effectiveRow.locator('[data-act="content"]').click();
+    const genericRow = page.locator('#tbody tr[data-key]').filter({ hasText: 'fixture通用说明' });
+    assert((await genericRow.locator('.effective-summary').innerText()).includes('没有具体题目'));
+    assert(!(await genericRow.locator('.content-brief').innerText()).includes('正放，不要倒置'));
+    const summaryShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-summary.png');
+    fs.mkdirSync(path.dirname(summaryShot), { recursive: true });
+    await effectiveRow.screenshot({ path: summaryShot });
+
+    // Save an explicit publishing decision through the real endpoint. A conflict
+    // must keep the editor/draft, and reload must retain successful decisions.
+    const effectiveKey = await effectiveRow.getAttribute('data-key');
+    const reviewUrl = base + '/api/assignments/' + encodeURIComponent(effectiveKey) + '/review';
+    let reviewConflict = true;
+    let oldReviewBackend = true;
+    const conflictReviewRoute = async route => {
+      if (oldReviewBackend) {
+        oldReviewBackend = false;
+        await route.fulfill({ status: 404, contentType: 'application/json',
+          body: JSON.stringify({ ok: false, error: 'not found' }) });
+      } else if (reviewConflict) {
+        reviewConflict = false;
+        await route.fulfill({ status: 409, contentType: 'application/json',
+          body: JSON.stringify({ ok: false, code: 'version_conflict', error: '正文版本已更新' }) });
+      } else await route.fallback();
+    };
+    await page.route(reviewUrl, conflictReviewRoute);
+    await effectiveRow.getByText('确认推送内容', { exact: true }).click();
+    await page.locator('#reviewText').fill('10-11、10-13');
+    const reviewShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-review.png');
+    await page.screenshot({ path: reviewShot });
+    await page.locator('#reviewSave').click();
+    await page.waitForFunction(() => document.querySelector('#reviewStatus').textContent.includes('后台仍在使用旧版本'));
+    assert.strictEqual(await page.locator('#reviewText').inputValue(), '10-11、10-13');
+    await page.locator('#reviewSave').click();
+    await page.waitForFunction(() => document.querySelector('#reviewStatus').textContent.includes('正文版本已更新'));
+    assert(await page.locator('#maskReview').evaluate(el => el.classList.contains('on')));
+    assert.strictEqual(await page.locator('#reviewText').inputValue(), '10-11、10-13');
+    await page.unroute(reviewUrl, conflictReviewRoute);
+    await page.locator('#reviewSave').click();
+    await page.waitForFunction(() => !document.querySelector('#maskReview').classList.contains('on'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await effectiveRow.getByText('修改确认结果', { exact: true }).waitFor();
+    assert((await effectiveRow.locator('.effective-summary').innerText()).includes('已人工确认 · 推送此正文'));
+    assert((await effectiveRow.locator('.effective-summary').innerText()).includes('10-11、10-13'));
+    assert(!(await effectiveRow.locator('.effective-summary').innerText()).includes('10-21'));
+    await effectiveRow.getByText('修改确认结果', { exact: true }).click();
+    await page.locator('#reviewOmit').click();
+    await page.waitForFunction(() => !document.querySelector('#maskReview').classList.contains('on'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await effectiveRow.getByText('修改确认结果', { exact: true }).waitFor();
+    assert((await effectiveRow.locator('.effective-summary').innerText()).includes('已人工确认 · 不推送正文'));
+    assert((await effectiveRow.locator('.title-line').innerText()).includes('fixture有效摘要'));
+    const invalidReview = await page.request.post(reviewUrl, {data: {
+      expected_version: 'old-version', mode: 'include', text: '不会保存的旧版本',
+    }});
+    assert.strictEqual(invalidReview.status(), 409);
+    await effectiveRow.getByText('修改确认结果', { exact: true }).click();
+    await page.locator('#reviewAuto').click();
+    await page.waitForFunction(() => !document.querySelector('#maskReview').classList.contains('on'));
+    await effectiveRow.getByText('确认推送内容', { exact: true }).waitFor();
+    assert((await effectiveRow.locator('.effective-summary').innerText()).includes('10-21'));
+    assert.strictEqual(events.taskPosts.length, 0, 'confirmation must not start scans, body fetches or sends');
 
     // Date/window changes are local reads only.
     await page.evaluate(() => {
@@ -146,6 +215,18 @@ async function main() {
 
     const row = page.locator('#tbody tr[data-key]').first();
     const rowKey = await row.getAttribute('data-key');
+    const previewAsset = await page.evaluate(async key => {
+      const content = await (await fetch('/api/assignments/' + encodeURIComponent(key) + '/content')).json();
+      const entry = {asset_id: content.asset_ids[0], course: '复变函数', title: '<script>preview</script>'};
+      showPreview('原图预览验证', {images: [entry], images_personal: [entry]});
+      return entry.asset_id;
+    }, rowKey);
+    await page.waitForFunction(() => [...document.querySelectorAll('#pane-preview img')].every(im => im.complete && im.naturalWidth > 0));
+    assert.strictEqual(await page.locator('#pane-preview img').count(), 2);
+    assert.strictEqual(await page.locator('#pane-preview script').count(), 0);
+    assert((await page.locator('#pane-preview img').first().getAttribute('src')).includes(previewAsset));
+    const imagePreviewShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-image-preview.png');
+    await page.locator('#pane-preview').screenshot({path: imagePreviewShot});
     await row.locator('[data-act="content"]').click();
     await page.waitForSelector('.content-detail', { timeout: 5000 });
     assert((await page.locator('.content-detail').innerText()).includes('作图并说明'));
@@ -326,6 +407,34 @@ async function main() {
 
     const shot = path.join(outDir, 'browser-smoke.png');
     await page.screenshot({ path: shot, fullPage: false });
+    // Failed fetches must not enqueue a second wave of content failures.
+    const beforeFailedFetch = events.taskPosts.length;
+    await page.route('**/api/tasks', async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true, task_id: 'fixture-auth-failed', status: 'queued' }) });
+    });
+    await page.route('**/api/tasks/fixture-auth-failed', async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        ok: true, status: 'error', result: { ok: false, error_code: 'auth_required', error: '登录已过期' } }) });
+    });
+    await page.locator('#btnFetch').click();
+    await page.waitForFunction(() => !state.busyTasks.size);
+    await wait(700);
+    assert.strictEqual(events.taskPosts.length, beforeFailedFetch + 1, 'auth failure must not enqueue content');
+    await page.evaluate(() => renderStats({ first_screen_ms: 42, cache: {
+      publish_block_reasons: ['10 门课程抓取失败', '认证失败：请重新登录', '缓存超过300秒', '<script>fixture</script>'],
+      failed_courses: ['101'], tests_missing_courses: ['101'], last_scan_status: 'auth_failed' } }));
+    const banner = page.locator('.status-alert');
+    assert((await banner.locator('.status-alert-title').innerText()).includes('登录已过期'));
+    assert.notStrictEqual(await banner.evaluate(el => getComputedStyle(el).backgroundColor), 'rgba(0, 0, 0, 0)');
+    assert.strictEqual(await banner.locator('script').count(), 0);
+    assert.strictEqual(await banner.locator('details').getAttribute('open'), null);
+    const alertShot = path.join(outDir, 'browser-smoke-auth-alert.png');
+    await page.locator('#stats').screenshot({ path: alertShot });
+    await page.setViewportSize({ width: 760, height: 900 });
+    const bounds = await banner.boundingBox();
+    assert(bounds.x >= 0 && bounds.x + bounds.width <= 761, 'warning must wrap within viewport');
+    await page.setViewportSize({ width: 1440, height: 1000 });
     // Daily operations use the same real isolated HTTP handlers as the app.
     const dailyDeadline = new Date(Date.now() + 2 * 86400000);
     const pad = n => String(n).padStart(2, '0');
@@ -348,7 +457,7 @@ async function main() {
       const response = await page.request.post(base + '/api/blacklist', { data: { kind: 'course', action, lids: ['101'] } });
       assert.strictEqual((await response.json()).ok, true);
       await page.evaluate(() => refreshList({ silent: true }));
-      assert.strictEqual(await page.locator('#tbody tr[data-key]').count(), action === 'apply' ? 0 : 1);
+      assert.strictEqual(await page.locator('#tbody tr[data-key]').count(), action === 'apply' ? 0 : initialRows);
     }
     await wait(300);
 
@@ -365,9 +474,10 @@ async function main() {
     // URL that we made fail may emit console errors.
     const unexpectedConsole = events.consoleErrors.filter(entry => {
       const expectedConflict = entry.url === viewUrl && /status of 409/.test(entry.text);
+      const expectedReviewConflict = entry.url === reviewUrl && /status of (409|404)/.test(entry.text);
       const expectedPollLoss = entry.url === taskGetUrl
         && /net::ERR_FAILED|Failed to load resource/.test(entry.text);
-      return !(expectedConflict || expectedPollLoss);
+      return !(expectedConflict || expectedReviewConflict || expectedPollLoss);
     });
     assert.deepStrictEqual(unexpectedConsole, [],
       'unexpected console errors: ' + JSON.stringify(unexpectedConsole));
@@ -376,10 +486,11 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true,
-      screenshots: [cropShot, shot, inlineShot],
+      screenshots: [cropShot, shot, inlineShot, summaryShot, alertShot, reviewShot, imagePreviewShot],
       persisted_regions: persisted.regions.length,
       cold_open_task_posts: 0,
-      task_posts_during_poll_test: events.taskPosts.length,
+      task_posts_during_poll_test: beforeFailedFetch,
+      task_posts_failed_fetch: events.taskPosts.length - beforeFailedFetch,
       task_polls: taskPolls,
       conflict_view_posts: viewPosts,
       console_errors_exact: events.consoleErrors,

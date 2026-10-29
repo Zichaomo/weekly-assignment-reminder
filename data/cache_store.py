@@ -413,6 +413,12 @@ def init_db() -> None:
             review_status TEXT NOT NULL DEFAULT 'ok', updated_at REAL NOT NULL,
             PRIMARY KEY(item_key, source_version, view_key)
         );
+        CREATE TABLE IF NOT EXISTS content_reviews (
+            item_key TEXT PRIMARY KEY, source_version TEXT NOT NULL,
+            identity_generation INTEGER NOT NULL, mode TEXT NOT NULL,
+            text TEXT NOT NULL DEFAULT '', valid INTEGER NOT NULL DEFAULT 1,
+            updated_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_registry (
             task_id TEXT PRIMARY KEY, signature TEXT NOT NULL, op TEXT NOT NULL,
             params_json TEXT NOT NULL, status TEXT NOT NULL,
@@ -904,6 +910,16 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
                 continue
             if item["kind"] == "test" and str(item.get("lid")) in excluded_tests:
                 continue
+            review = con.execute('SELECT * FROM content_reviews WHERE item_key=?',
+                                 (item['item_key'],)).fetchone()
+            if review and identity_current:
+                if (review['valid'] and review['source_version'] == version
+                        and review['identity_generation'] == generation):
+                    item['content_review'] = dict(review)
+                else:
+                    item['content_review_stale'] = True
+            import content_summary
+            item['content_summary'] = content_summary.summarize(item)
             out.append(item)
     return out
 
@@ -977,6 +993,7 @@ def save_content(item_key: str, result: dict, *, ttl_sec: int | None = None,
         revision = int(old["revision"] if old else 0)
         if new_version and (not same_identity or new_version != old_version):
             revision += 1
+            con.execute('UPDATE content_reviews SET valid=0 WHERE item_key=?', (item_key,))
             con.execute(
                 """UPDATE content_views SET review_status='needs_review'
                    WHERE item_key=? AND source_version<>?""",
@@ -1081,6 +1098,39 @@ def _validate_regions(regions: Any) -> list[dict]:
         clean.append({"asset_id": asset_id, "box": [x1, y1, x2, y2],
                       "origin": str(region.get("origin") or "manual")})
     return clean
+
+
+def save_content_review(item_key: str, *, expected_version: str,
+                        mode: str, text: str = '') -> None:
+    """Bind explicit publishing decisions to the current account and body."""
+    if mode not in ('include', 'omit', 'auto'):
+        raise ValueError('请选择确认正文、不推送正文或恢复自动识别')
+    if not isinstance(text, str):
+        raise ValueError('推送正文必须是文字')
+    text = text.strip() if mode == 'include' else ''
+    if mode == 'include' and (not text or len(text) > 1200):
+        raise ValueError('请填写 1–1200 字的推送正文，不会自动截断题目')
+    init_db()
+    scope = account_scope()
+    with connection(write=True) as con:
+        row = con.execute('''SELECT c.*, a.account_scope FROM assignment_contents c
+                             JOIN assignments a ON a.item_key=c.item_key
+                             WHERE c.item_key=? AND a.account_scope=?''',
+                          (item_key, scope)).fetchone()
+        if (not row or not expected_version or row['source_version'] != expected_version
+                or row['identity_generation'] != _scope_identity_generation(scope, con)):
+            raise VersionConflict('正文版本或账号已变更，请重新读取原文后确认')
+        if mode != 'auto' and (row['status'] != 'ready' or row['error']
+                or not row['source_checked_at']
+                or time.time() - row['source_checked_at'] > row['ttl_sec']):
+            raise VersionConflict('正文已过期或获取失败，请刷新正文后确认')
+        if mode == 'auto':
+            con.execute('DELETE FROM content_reviews WHERE item_key=?', (item_key,))
+        else:
+            con.execute('''INSERT OR REPLACE INTO content_reviews
+                           (item_key,source_version,identity_generation,mode,text,valid,updated_at)
+                           VALUES(?,?,?,?,?,1,?)''',
+                        (item_key, expected_version, row['identity_generation'], mode, text, time.time()))
 
 
 def save_view(item_key: str, *, expected_version: str, regions: list[dict],

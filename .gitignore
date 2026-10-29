@@ -91,5 +91,8 @@ data/task_catchup.log
 # Local delegation logs and homework cache
 .deepastra-work/
 data/cache/
+data/push_parts.jsonl
+data/last_images.json
+data/last_images_personal.json
 data/platform.lock
 data/platform-access.lock

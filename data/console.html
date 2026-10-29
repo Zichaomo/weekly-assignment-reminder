@@ -65,7 +65,15 @@ b,strong{font-family:'Lanxi-普惠体中黑';font-weight:600}
 .field input:focus{outline:none;border-color:var(--ink)}
 .addnote{font-size:11px;color:var(--faint);margin-top:8px;max-width:640px}
 /* ---------- 列表 ---------- */
-.stats{display:flex;gap:20px;font-size:12.5px;color:var(--gray);margin-bottom:8px;font-variant-numeric:tabular-nums}
+.stats{font-size:12.5px;color:var(--gray);margin-bottom:12px;font-variant-numeric:tabular-nums}
+.stats-metrics{display:flex;flex-wrap:wrap;gap:8px 18px;line-height:1.7;margin-bottom:10px}
+.stats-metrics>span{white-space:nowrap}
+.status-alert{padding:14px 18px;border:1px solid #edc7b9;border-left:4px solid var(--accent);border-radius:8px;background:#fff3ed;color:#773b27;line-height:1.7;overflow-wrap:anywhere}
+.status-alert-title{display:block;font-size:14px;font-weight:700;margin-bottom:3px}
+.status-alert details{margin-top:8px;padding-top:8px;border-top:1px solid #edc7b9}
+.status-alert summary{cursor:pointer;font-size:12px;color:#805642}
+.status-alert ul{padding-left:20px;margin:6px 0}
+.status-alert .link{color:#773b27}
 .stats b{color:var(--ink)}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 th{font-size:10.5px;letter-spacing:.14em;color:var(--gray);text-align:left;padding:8px 12px;border-bottom:2px solid var(--ink);background:#F3F2EE;font-family:'Lanxi-普惠体粗';white-space:nowrap}
@@ -144,6 +152,7 @@ td.title{white-space:normal!important}
 .eladd{display:none;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)}
 .eladd .addnote{margin-top:6px}
 .editgrid{display:grid;grid-template-columns:1fr;gap:12px}
+#reviewText{font:inherit;line-height:1.7;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)}
 /* ---------- 原图与多矩形裁剪 ---------- */
 .modal.wide{width:min(1120px,96vw)}
 .crop-grid{display:grid;grid-template-columns:minmax(0,1fr) 230px;gap:14px}
@@ -297,6 +306,24 @@ td.title{white-space:normal!important}
 </div>
 
 <!-- 原图 / 多矩形裁剪 -->
+<div class="mask" id="maskReview">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reviewTitle">
+    <header><h3 id="reviewTitle">确认推送正文</h3><button class="btn small ghost" id="reviewClose">关闭</button></header>
+    <div class="body editgrid">
+      <div id="reviewCourse"></div>
+      <div class="blinfo">保留需要同学完成的题号或要求，删去通用提交说明。保存后会用于群消息正文；选择“不推送正文”仍会提醒作业标题和截止时间。图片、附件请先在完整原文中核对。</div>
+      <label for="reviewText">最终推送正文（最多 1200 字）</label>
+      <textarea id="reviewText" rows="8" maxlength="1200" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
+      <div id="reviewStatus" role="status" aria-live="polite"></div>
+    </div>
+    <footer style="flex-wrap:wrap">
+      <button class="btn ghost" id="reviewAuto">恢复自动识别</button>
+      <button class="btn" id="reviewOmit">不推送正文</button>
+      <button class="btn accent" id="reviewSave">确认推送此正文</button>
+    </footer>
+  </div>
+</div>
+
 <div class="mask" id="maskCrop">
   <div class="modal wide">
     <header><h3 id="cropTitle">原图与裁剪</h3><button class="btn small ghost" id="cropClose">关闭</button></header>
@@ -369,8 +396,19 @@ function log(line) {
   p.textContent += (p.textContent ? '\n' : '') + `[${t}] ${line}`;
   p.scrollTop = p.scrollHeight;
 }
-function showPreview(text) {
+function showPreview(text, result = {}) {
   $('#pane-preview').textContent = text;
+  for (const [label, images] of [['班级群原图', result.images || []], ['个人群原图', result.images_personal || []]]) {
+    for (const entry of images) {
+      const figure = document.createElement('div');
+      const caption = document.createElement('div');
+      caption.textContent = `${label}｜${entry.course}｜${entry.title}`;
+      const img = document.createElement('img');
+      img.src = assetUrl(entry.asset_id); img.alt = caption.textContent;
+      img.style.cssText = 'display:block;max-width:100%;max-height:260px;object-fit:contain;margin:8px 0';
+      figure.append(caption, img); $('#pane-preview').appendChild(figure);
+    }
+  }
   switchTab('preview');
 }
 function switchTab(name) {
@@ -483,7 +521,7 @@ async function resumeLastTask() {
     $('#taskbar').classList.remove('on');
     log(`重连任务结束：${now.status}${now.error ? ' · ' + now.error : ''}`);
     refreshList({ silent: true });
-    autoFillVisibleContent();
+    if (now.status === 'done' && now.result?.ok !== false) autoFillVisibleContent();
   }, 900);
 }
 function setButtons(on) {
@@ -504,6 +542,8 @@ function rowSignature(r, key) {
   return JSON.stringify([key, r.title, r.course, r.deadline, r.left, r.status,
     r.content_status, r.content_revision, r.source_version, r.content_stale,
     r.content_error, r.content_checked_at, r.content_text,
+    r.content_summary,
+    r.content_review_stale,
     (r.content_blocks || []).map(b => b.id || b.type),
     (r.view && r.view.updated_at) || '', state.expanded.has(key)]);
 }
@@ -635,6 +675,7 @@ function renderStats(res) {
   const missing = cov.missing_courses || [];
   const testMissing = cov.tests_missing_courses || [];
   const blockers = cov.publish_block_reasons || [];
+  const authRequired = res.error_code === 'auth_required' || /认证失败|登录态失效|未登录|auth_failed/.test(blockers.join(' '));
   const parts = [
     `<span>平台 <b>${state.platformRows.length}</b> 条</span>`,
     `<span>手动 <b>${state.manualRows.length}</b> 条</span>`,
@@ -642,20 +683,30 @@ function renderStats(res) {
     `<span>数据时间 <b>${esc(cov.updated_at || res.data_fetched_at || '无缓存')}</b>${cov.age_sec != null ? `（${fmtAge(cov.age_sec)}前）` : ''}</span>`,
   ];
   if (res.first_screen_ms != null) parts.push(`<span>列表读取 <b>${res.first_screen_ms.toFixed(1)} ms</b></span>`);
-  if (blockers.length) {
-    parts.push(`<span style="color:var(--red)">正式发布阻断：${blockers.map(esc).join('；')}</span>`);
-  }
+  const detailParts = [];
   if (failedLids.length) {
     const links = failedLids.slice(0, 8).map(lid => {
       const r = state.platformRows.find(x => String(x.lid) === String(lid));
       return `<a class="link" data-lid="${esc(lid)}" title="只重试这门课">${esc(r ? r.course : ('课程 ' + lid))}</a>`;
     });
-    parts.push(`<span>失败课程：${links.join('、')}${failedLids.length > 8 ? '…' : ''}</span>`);
+    detailParts.push(`<div>受影响课程：${links.join('、')}${failedLids.length > 8 ? '…' : ''}</div>`);
   }
-  if (missing.length) parts.push(`<span>缺失范围：${missing.length} 门课（旧缓存仍可见）</span>`);
-  if (testMissing.length) parts.push(`<span>测试覆盖缺失：${testMissing.length} 门课</span>`);
+  if (missing.length) detailParts.push(`<div>缺失范围：${missing.length} 门课（旧缓存仍可见）</div>`);
+  if (testMissing.length) detailParts.push(`<div>测试覆盖缺失：${testMissing.length} 门课</div>`);
+  let notice = '';
+  if (blockers.length || res.error) {
+    const title = authRequired ? '登录已过期，请重新登录北化在线'
+      : (failedLids.length || missing.length ? '本次检索未完成，暂不能发布' : '数据需要更新，暂不能发布');
+    const action = authRequired
+      ? '请双击 login.bat 完成登录，然后点击「检索北化在线」。旧条目仍可查看，手动添加不受影响。'
+      : '请重新检索；如只有个别课程失败，可在详细信息中点击课程名重试。旧条目仍可查看。';
+    const reasons = blockers.length ? blockers : [res.error];
+    notice = `<div class="status-alert" role="alert"><strong class="status-alert-title">${esc(title)}</strong>`
+      + `<div>${esc(action)}</div><details><summary>查看详细原因与受影响课程</summary>`
+      + `<ul>${reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>${detailParts.join('')}</details></div>`;
+  }
   const el = $('#stats');
-  el.innerHTML = parts.join('');
+  el.innerHTML = `<div class="stats-metrics">${parts.join('')}</div>${notice}`;
   el.querySelectorAll('[data-lid]').forEach(a => a.onclick = () => refreshCourse(a.dataset.lid));
 }
 async function manualOp(p) {
@@ -690,6 +741,28 @@ function renderContentBrief(r, cell) {
   const text = (r.content_text || '').trim();
   const images = collectContentImages(blocks);
   const hasContent = !!text || images.length > 0 || blocks.length > 0;
+  const summary = r.content_summary;
+  if (summary) {
+    const labels = { ready: '已提取作业信息', generic_only: '没有具体题目 · 仅通用说明',
+      needs_review: '自动附平台提示 · 可选调整', unavailable: '正文未就绪 · 自动附平台提示',
+      reference_only: '详细要求见北化在线', images: '原图随提醒发送 · 无需确认' };
+    const info = document.createElement('div');
+    info.className = 'effective-summary';
+    const label = document.createElement('strong');
+    label.textContent = summary.origin === 'manual'
+      ? (summary.status === 'ready' ? '已人工确认 · 推送此正文' : '已人工确认 · 不推送正文')
+      : (labels[summary.status] || labels.needs_review);
+    info.appendChild(label);
+    const excerpt = document.createElement('div');
+    excerpt.style.whiteSpace = 'pre-wrap';
+    excerpt.textContent = summary.status === 'ready' ? summary.text : summary.reason;
+    info.appendChild(excerpt); box.appendChild(info);
+    if (summary.status !== 'reference_only' && r.content_ready && !r.content_stale && !r.content_error && r.source_version) {
+      const actions = document.createElement('div'); actions.className = 'content-actions';
+      actions.appendChild(makeLink(summary.origin === 'manual' ? '修改确认结果' : '确认推送内容', () => openContentReview(r)));
+      info.appendChild(actions);
+    }
+  }
   const stateLine = document.createElement('div');
   stateLine.className = 'content-state';
   const st = document.createElement('span');
@@ -707,7 +780,7 @@ function renderContentBrief(r, cell) {
       : (r.content_error ? '标题、截止时间和平台入口仍可正常使用。' : '列表已可用，正文将在同一认证上下文内按窗口补齐。');
     box.appendChild(hint);
   } else {
-    if (text) {
+    if (text && !summary) {
       const ex = document.createElement('div'); ex.className = 'excerpt'; ex.textContent = text;
       box.appendChild(ex);
     } else if (images.length) {
@@ -731,7 +804,7 @@ function renderContentBrief(r, cell) {
   const mini = document.createElement('div'); mini.className = 'mini';
   const key = r.item_key;
   if (hasContent || r.content_status) {
-    mini.appendChild(makeLink(state.expanded.has(key) ? '收起' : '展开图文', () => {
+    mini.appendChild(makeLink(state.expanded.has(key) ? '收起完整原文' : '展开完整原文', () => {
       if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
       state.rowSigs.delete(key); render();
     }));
@@ -787,6 +860,10 @@ function renderBlock(r, b, box) {
   if (!b || typeof b !== 'object') return;
   if (b.type === 'paragraph') {
     const p = document.createElement('p');
+    if ((r.content_summary?.excerpts || []).some(x => x.block_id && x.block_id === b.id)) {
+      p.title = '作业摘要引自本段原文';
+      p.style.borderLeft = '3px solid var(--green)'; p.style.paddingLeft = '8px';
+    }
     if (b.pre) p.style.whiteSpace = 'pre-wrap';
     if (Array.isArray(b.segments) && b.segments.length) renderSegments(r, b.segments, p);
     else p.textContent = b.text || '';
@@ -1166,6 +1243,43 @@ $('#cropSave').onclick = async () => {
   alert('裁剪保存失败：' + (res.error || '未知错误'));
 };
 
+function openContentReview(r) {
+  state.review = { key: r.item_key, version: r.source_version, saving: false };
+  $('#reviewCourse').textContent = `${r.course || ''}｜${r.title || ''}`;
+  $('#reviewText').value = r.content_summary?.origin === 'manual'
+    ? r.content_summary.text : (r.content_summary?.text || r.content_text || '');
+  $('#reviewStatus').textContent = '只保存本条作业当前原文的确认结果，不会立即发送消息。';
+  $('#maskReview').classList.add('on');
+  $('#reviewText').focus();
+}
+$('#reviewClose').onclick = () => { if (!state.review?.saving) { $('#maskReview').classList.remove('on'); state.review = null; } };
+async function saveContentReview(mode) {
+  const edit = state.review;
+  if (!edit || edit.saving) return;
+  edit.saving = true;
+  const buttons = ['reviewSave', 'reviewOmit', 'reviewAuto', 'reviewClose'];
+  buttons.forEach(id => $( '#' + id).disabled = true);
+  $('#reviewStatus').textContent = '正在保存…';
+  const res = await api('/api/assignments/' + encodeURIComponent(edit.key) + '/review', {
+    expected_version: edit.version, mode, text: $('#reviewText').value,
+  });
+  edit.saving = false;
+  buttons.forEach(id => $( '#' + id).disabled = false);
+  if (!res.ok) {
+    $('#reviewStatus').textContent = res.http_status === 404
+      ? '未保存：后台仍在使用旧版本，尚不支持正文确认。请重启控制台后台后重试；当前草稿仍保留在这里。'
+      : '未保存：' + (res.error || '请求失败，请重试')
+      + (res.http_status === 409 ? '。请关闭此窗口、刷新正文，再重新确认；当前草稿仍保留在这里。' : '');
+    return;
+  }
+  $('#maskReview').classList.remove('on'); state.review = null;
+  await loadContentItem(edit.key);
+  log(mode === 'auto' ? '已恢复自动识别。' : '确认结果已保存，将用于下次消息预览和发布。');
+}
+$('#reviewSave').onclick = () => saveContentReview('include');
+$('#reviewOmit').onclick = () => saveContentReview('omit');
+$('#reviewAuto').onclick = () => saveContentReview('auto');
+
 async function loadContentItem(key) {
   const c = await api('/api/assignments/' + encodeURIComponent(key) + '/content');
   if (!c.ok) {
@@ -1179,6 +1293,8 @@ async function loadContentItem(key) {
     r.content_error = c.error; r.content_checked_at = c.checked_at;
     r.source_version = c.source_version; r.content_revision = c.revision;
     r.content_blocks = c.blocks || []; r.content_text = c.text || '';
+    r.content_summary = c.summary;
+    r.content_review_stale = !!c.review_stale;
     r.asset_ids = c.asset_ids || []; r.view = c.view; r.stale_view = c.stale_view;
     state.rowSigs.delete(key); render();
   }
@@ -1247,6 +1363,10 @@ $('#btnFetch').onclick = () => {
   runTask('fetch', { days, all, tests }, '全量扫描北化在线课程', res => {
     if (res.error) log(res.error);
     refreshList({ silent: true });
+    if (res.ok === false) {
+      log('检索未成功，已停止后续正文补齐；请按提示处理后重新检索。');
+      return;
+    }
     const scope = all ? '全部，含已过期' : `未来 ${days} 天`;
     log(`检索任务结束：${scope}，列表从 SQLite 读取；失败课程旧数据仍保留。`);
     if (res.sweep && res.sweep.missed_from_pool && res.sweep.missed_from_pool.length)
@@ -1304,7 +1424,7 @@ function doPublish(noSend) {
       if (!noSend) alert('发布已拒绝：列表缓存不完整或不新鲜。\n\n' + why + '\n\n请先完成一次完整检索；旧列表和预览不会被清空。');
     }
     if (res.error && !noSend) log(res.error);
-    if (res.message) showPreview(bothMessages(res));
+    if (res.message) showPreview(bothMessages(res), res);
     if (res.elapsed_human) log(`本次抓取用时 ${res.elapsed_human}`);
     // 数据来源：复用检索结果时不重新抓取（省 1-2 分钟）
     if (res.data_source === 'cache') {

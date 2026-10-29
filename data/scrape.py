@@ -2489,7 +2489,7 @@ def _run_scan(args):
         dump(page, "home", args.debug)
 
         if not wait_authenticated(page, ctx, timeout=12):
-            cache_store.invalidate_scope_scans("认证失败：列表扫描登录态失效")
+            cache_store.invalidate_scope_scans("认证失败：列表扫描登录态失效", status='auth_failed')
             print("ERROR: 未登录或会话已过期，请运行: python login.py", file=sys.stderr)
             try:
                 index_now = load_course_index()

@@ -26,6 +26,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import cache_store
+import content_summary
+import image_delivery
 
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
@@ -36,6 +38,10 @@ UTF8_ENV["PYTHONIOENCODING"] = "utf-8"
 
 # 连续多少比例的门课抓取失败算「覆盖严重不完整」（与 server.py 的缓存守卫同一口径）
 MAX_FAIL_RATIO = 0.5
+
+
+class AuthenticationRequired(RuntimeError):
+    """The scraper positively identified an unauthenticated session."""
 
 
 def fetch(extra_args: list = None) -> dict:
@@ -54,8 +60,11 @@ def fetch(extra_args: list = None) -> dict:
         errors="replace",
         env=UTF8_ENV,
         cwd=str(ROOT),
+        timeout=900,
     )
     elapsed = time.time() - t0
+    if 'ERROR: 未登录或会话已过期' in (out.stderr or ''):
+        raise AuthenticationRequired('北化在线登录状态已过期')
     if out.returncode != 0:
         raise RuntimeError(f"抓取失败（耗时 {elapsed:.0f} 秒）:\n{out.stdout}\n{out.stderr}")
     if not out.stdout:
@@ -212,6 +221,17 @@ def format_message(items: list, days: int, title: str = None,
                deadline_line(it)]
         if it.get("note"):
             blk.append(f"   备注：{it['note']}")
+        if it.get('kind') not in ('manual', 'test') and it.get('source') != 'manual':
+            summary = content_summary.summarize(it)
+            if summary['status'] == 'ready':
+                body_lines = [line for line in summary['text'].splitlines() if line.strip()]
+                blk.extend('   ' + line for line in body_lines[:3])
+                if len(body_lines) > 3:
+                    blk.append('   ……（详情参见北化在线）')
+            elif summary['status'] == 'images':
+                blk.append(f"   作业原图随提醒发送（{len(summary['asset_ids'])} 张）。")
+            elif summary['status'] in ('needs_review', 'unavailable', 'reference_only'):
+                blk.append('   详细要求见北化在线')
         return blk
 
     picked = sorted(items, key=lambda x: (x.get("_deadline_dt") or datetime.max))
@@ -234,7 +254,7 @@ def format_message(items: list, days: int, title: str = None,
     return "\n".join(lines).rstrip()
 
 
-def ensure_login() -> bool:
+def ensure_login(*, check: bool = True) -> bool:
     """抓取前保证有有效登录态。
 
     1. 先快速检查 storage_state；
@@ -242,22 +262,29 @@ def ensure_login() -> bool:
        不转人工，免得后台挂死）。实测本机 IP 不弹滑块，所以这一步通常能自愈；
     3. 仍失败 -> 返回 False，由调用方发告警让人工双击 login.bat。
     """
-    r = subprocess.run(
-        [PY, str(ROOT / "login.py"), "--check"],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", env=UTF8_ENV, cwd=str(ROOT),
-    )
-    if "LOGGED_IN" in (r.stdout or ""):
-        return True
+    if check:
+        try:
+            r = subprocess.run(
+                [PY, str(ROOT / "login.py"), "--check"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=UTF8_ENV, cwd=str(ROOT), timeout=90,
+            )
+        except subprocess.TimeoutExpired:
+            print('登录状态检查超时，请运行 login.bat。', file=sys.stderr)
+            return False
+        if "LOGGED_IN" in (r.stdout or ""):
+            return True
 
     print("登录态失效，尝试自动登录（最多 45 秒）...", file=sys.stderr)
-    r2 = subprocess.run(
-        [PY, str(ROOT / "login.py"), "--no-wait"],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", env=UTF8_ENV, cwd=str(ROOT),
-    )
-    for line in (r2.stdout or "").splitlines():
-        print("  " + line, file=sys.stderr)
+    try:
+        r2 = subprocess.run(
+            [PY, str(ROOT / "login.py"), "--auto", "--headless", "--no-wait"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=UTF8_ENV, cwd=str(ROOT), timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print('自动登录超时，请运行 login.bat。', file=sys.stderr)
+        return False
     if r2.returncode == 0:
         print("自动登录成功，继续抓取。", file=sys.stderr)
         return True
@@ -378,7 +405,7 @@ def _elective_lids_from_disk(data: dict) -> set:
 
 
 def send_one(text: str, audience: str, source: str = "weekly",
-             channel: str = None) -> tuple:
+             channel: str = None, images=None) -> tuple:
     """调用 notify.py 发一条。返回 (退出码, stdout, stderr)。
 
     audience=class  → 班级群（全部课程 − 选修课）
@@ -391,8 +418,12 @@ def send_one(text: str, audience: str, source: str = "weekly",
            "--source", source, "--audience", audience]
     if channel:
         cmd += ["--channel", channel]
+    if images:
+        manifest = ROOT / ('last_images_personal.json' if audience == 'personal' else 'last_images.json')
+        manifest.write_text(json.dumps(images, ensure_ascii=False), encoding='utf-8')
+        cmd += ['--image-manifest', str(manifest)]
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=UTF8_ENV)
+                       encoding="utf-8", errors="replace", env=UTF8_ENV, timeout=300)
     return r.returncode, r.stdout or "", r.stderr or ""
 
 
@@ -603,7 +634,8 @@ def main() -> int:
         print("按 --skip-class 跳过班级群那条（今天已经发过了）。")
     else:
         try:
-            code, out, err = send_one(class_msg, "class", "weekly", args.channel)
+            code, out, err = send_one(class_msg, "class", "weekly", args.channel,
+                                      images=image_delivery.collect(class_items))
         except Exception as e:  # noqa: BLE001
             text = (f"调用推送脚本时直接异常：{type(e).__name__}\n{e}\n\n"
                     r"提醒正文已生成在 data\last_message.txt，可以先手动复制到群里顶上。")
@@ -629,7 +661,8 @@ def main() -> int:
         print("按 --skip-personal 跳过个人那条（今天已经发过了）。")
     else:
         try:
-            code2, out2, err2 = send_one(personal_msg, "personal", "weekly", None)
+            code2, out2, err2 = send_one(personal_msg, "personal", "weekly", None,
+                                         images=image_delivery.collect(personal_items))
         except Exception as e:  # noqa: BLE001
             print(f"个人推送异常：{type(e).__name__}: {e}", file=sys.stderr)
             code2, out2, err2 = 1, "", f"{type(e).__name__}: {e}"

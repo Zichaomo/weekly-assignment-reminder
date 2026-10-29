@@ -114,7 +114,11 @@ def main():
         "smoke-scan", lid="101", course="fixture课程 A",
         homeworks=[{"hwtid": "9001", "title": "fixture作业（脱敏）",
                     "deadline": deadline, "submit_url": None, "result_url": None,
-                    "submitted": False}],
+                    "submitted": False},
+                   {"hwtid":"9002", "title":"fixture有效摘要", "deadline":
+                    (datetime.now()+timedelta(days=6)).strftime('%Y-%m-%d %H:%M')},
+                   {"hwtid":"9003", "title":"fixture通用说明", "deadline":
+                    (datetime.now()+timedelta(days=6)).strftime('%Y-%m-%d %H:%M')}],
         tests=[], homework_status="ok", tests_status="disabled",
         index_version=cache_store.version_hash(index), scope=scope)
     cache_store.update_scan("smoke-scan", status="complete", finished_at=time.time())
@@ -171,6 +175,14 @@ def main():
         "blocks": blocks, "asset_ids": [asset_id, cell_asset_id],
         "assets": [asset, cell_asset],
         "text": "fixture正文：完成第 1、2 题"}, scope=scope)
+
+    for entry in cache_store.load_items(scope):
+        if entry.get('hwtid') not in ('9002','9003'):
+            continue
+        raw = ('<p>提交图片</p><p>习题：10-11、10-13、10-21。</p>'
+               if entry['hwtid']=='9002' else '<p>提交图片</p><p>一页作为一张照片，正放，不要倒置。</p>')
+        result=content_pipeline.ingest_html(raw,'https://course.buct.edu.cn/fixture')
+        cache_store.save_content(entry['item_key'],result,scope=scope)
 
     class FixtureHandler(server.Handler):
         def _do_GET(self):

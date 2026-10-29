@@ -291,6 +291,11 @@ def submit_task(op, params):
 def task_progress(task: dict) -> dict | None:
     """Progress may only come from this task's own scan id."""
     scan_id = task.get("scan_id")
+    task_id = (task.get('params') or {}).get('_task_id')
+    if task_id and task.get('status') in ('queued', 'running'):
+        record = cache_store.task_record(task_id)
+        if record and record.get('scan_id'):
+            scan_id = record['scan_id']
     if not scan_id:
         return None
     progress = cache_store.scan_progress(scan_id)
@@ -456,6 +461,8 @@ class Handler(BaseHTTPRequestHandler):
                 "blocks": item.get("content_blocks") or [],
                 "asset_ids": item.get("asset_ids") or [],
                 "text": item.get("content_text") or "",
+                "summary": item.get("content_summary"),
+                "review_stale": bool(item.get("content_review_stale")),
                 "view": item.get("view"), "stale_view": item.get("stale_view"),
             })
 
@@ -544,6 +551,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "task_id": task_id,
                                     "deduped": deduped,
                                     "status": "already-active" if deduped else "queued"})
+
+        if u.path.startswith("/api/assignments/") and u.path.endswith("/review"):
+            key = unquote(u.path[len("/api/assignments/"):-len("/review")])
+            try:
+                cache_store.save_content_review(key,
+                    expected_version=p.get('expected_version'), mode=p.get('mode'),
+                    text=p.get('text', ''))
+            except cache_store.VersionConflict as exc:
+                return self._send(409, {'ok': False, 'error': str(exc), 'code': 'version_conflict'})
+            return self._send(200, {'ok': True})
 
         if u.path.startswith("/api/assignments/") and u.path.endswith("/view"):
             key = unquote(u.path[len("/api/assignments/"):-len("/view")])
