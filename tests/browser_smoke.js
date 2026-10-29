@@ -217,13 +217,19 @@ async function main() {
     const rowKey = await row.getAttribute('data-key');
     const previewAsset = await page.evaluate(async key => {
       const content = await (await fetch('/api/assignments/' + encodeURIComponent(key) + '/content')).json();
-      const entry = {asset_id: content.asset_ids[0], course: '复变函数', title: '<script>preview</script>'};
-      showPreview('原图预览验证', {images: [entry], images_personal: [entry]});
+      const entry = {item_key:key, asset_id: content.asset_ids[0], course: '复变函数', title: '<script>preview</script>'};
+      const message='• 复变函数｜<script>preview</script>\n   作业原图随提醒发送（1 张）。\n• 下一门课｜普通作业';
+      showPreview('原图预览验证', {message, message_personal:message, images: [entry], images_personal: [entry]});
       return entry.asset_id;
     }, rowKey);
     await page.waitForFunction(() => [...document.querySelectorAll('#pane-preview img')].every(im => im.complete && im.naturalWidth > 0));
     assert.strictEqual(await page.locator('#pane-preview img').count(), 2);
     assert.strictEqual(await page.locator('#pane-preview script').count(), 0);
+    assert(await page.locator('#pane-preview').evaluate(pane => {
+      const nodes=[...pane.childNodes];
+      const i=nodes.findIndex(n => n.nodeName==='IMG');
+      return nodes[i-1].textContent.includes('复变函数') && nodes[i+1].textContent.includes('下一门课');
+    }), 'preview must interleave original image and assignment text');
     assert((await page.locator('#pane-preview img').first().getAttribute('src')).includes(previewAsset));
     const imagePreviewShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-image-preview.png');
     await page.locator('#pane-preview').screenshot({path: imagePreviewShot});

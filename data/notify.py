@@ -400,7 +400,7 @@ def send_pushplus(text: str, cfg: dict) -> bool:
 
 
 # ---------------------------------------------------------------- wecom
-def send_wecom(text: str, cfg: dict, *, image_bytes=None) -> bool:
+def send_wecom(text: str, cfg: dict, *, image_bytes=None, markdown=False) -> bool:
     # _wecom_webhook_override：给「个人小群」用。环境变量 BUCT_WECOM_WEBHOOK 是
     # 定时任务用来定向班级群的，个人那条绝不能被它劫持到班级群去。
     hook = ((cfg.get("_wecom_webhook_override") or "").strip()
@@ -410,6 +410,8 @@ def send_wecom(text: str, cfg: dict, *, image_bytes=None) -> bool:
         print("ERROR: wecom_webhook 为空，请在 config.json 填写。", file=sys.stderr)
         return False
     payload = {"msgtype": "text", "text": {"content": text}}
+    if markdown:
+        payload = {'msgtype':'markdown_v2', 'markdown_v2':{'content':text}}
     if image_bytes is not None:
         payload = {'msgtype':'image', 'image':{
             'base64':base64.b64encode(image_bytes).decode('ascii'),
@@ -420,7 +422,7 @@ def send_wecom(text: str, cfg: dict, *, image_bytes=None) -> bool:
         headers={"Content-Type": "application/json", "User-Agent": UA},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=60 if image_bytes is not None else 20) as r:
             res = json.loads(r.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001
         print(f"ERROR: 企业微信请求失败 {type(e).__name__}", file=sys.stderr)
@@ -490,6 +492,7 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
         text = re.sub(r'作业原图随提醒发送（\d+ 张）。', '图片作业详情参见北化在线。', text)
         return fn(text, eff_cfg)
     import image_delivery
+    inline = image_delivery.inline_markdown(text, images)
     bundle = image_delivery.bundle_key(text, images)
     target = dedup_target(channel, cfg, audience)
     window = int(cfg.get('dedup_window_sec', 300) or 0)
@@ -510,6 +513,11 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
         with PART_LOG.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps({'target':target,'bundle':bundle,'part':key,'ts':time.time()})+'\n')
         time.sleep(3.1)
+        return True
+    if inline:
+        for n, chunk in enumerate(inline):
+            if not part(f'inline:{n}', lambda: send_wecom(chunk, eff_cfg, markdown=True)):
+                return False
         return True
     for n, chunk in enumerate(image_delivery.text_chunks(text)):
         if not part(f'text:{n}', lambda: send_wecom(chunk, eff_cfg)):

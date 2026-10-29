@@ -80,7 +80,8 @@ class OriginalImageDelivery(IsolatedCase):
                 {'type':'image','asset_id':self.aid,'status':'ready'}]}],
             'asset_ids':[self.aid],'assets':[{'asset_id':self.aid,'sha256':self.aid,
                 'path':str(self.display),'display_path':str(self.display),'original_path':str(self.path),
-                'mime':'image/png','width':4,'height':3,'bytes':len(self.raw)}]})
+                'mime':'image/png','width':4,'height':3,'bytes':len(self.raw),
+                'source_url':'https://course.buct.edu.cn/meol/common/openfile.jsp?id=unit'}]})
         self.item=cache_store.get_item(self.key)
         self.images=delivery.collect([self.item])
         self.cfg={'wecom_webhook':'https://unit.invalid/class', 'dedup_window_sec':300,
@@ -108,10 +109,42 @@ class OriginalImageDelivery(IsolatedCase):
         self.path.write_bytes(b'changed')
         with self.assertRaises(ValueError):delivery.original_bytes(self.images[0])
 
+    def test_inline_places_original_image_between_assignments_in_one_message(self):
+        other={'course':'普通物理', 'title':'下一项作业', 'deadline':'2099-01-02 23:59'}
+        text=weekly.format_message([self.item, other],7)
+        requests=[]
+        def response(req, **kwargs):
+            requests.append(req)
+            return io.BytesIO(self.raw if req.get_method()=='GET' else b'{"errcode":0}')
+        with patch.object(notify.urllib.request,'urlopen',side_effect=response),patch.object(notify.time,'sleep'):
+            self.assertTrue(notify.dispatch(text,'wecom',self.cfg))
+        posts=[json.loads(req.data) for req in requests if req.get_method()=='POST']
+        self.assertEqual(len(posts),1)
+        self.assertEqual(posts[0]['msgtype'],'markdown_v2')
+        body=posts[0]['markdown_v2']['content']
+        self.assertLess(body.index('图片任务'),body.index('![作业原图]'))
+        self.assertLess(body.index('![作业原图]'),body.index('下一项作业'))
+        self.assertNotIn('作业原图随提醒发送',body)
+        self.assertLessEqual(len(body.encode('utf-8')),4096)
+
+    def test_inline_unavailable_public_url_falls_back_to_original_upload(self):
+        text=weekly.format_message([self.item],7)
+        requests=[]
+        def response(req, **kwargs):
+            requests.append(req)
+            return io.BytesIO(b'login page' if req.get_method()=='GET' else b'{"errcode":0}')
+        with patch.object(notify.urllib.request,'urlopen',side_effect=response),patch.object(notify.time,'sleep'):
+            self.assertTrue(notify.dispatch(text,'wecom',self.cfg))
+        posts=[json.loads(req.data) for req in requests if req.get_method()=='POST']
+        self.assertEqual([p['msgtype'] for p in posts],['text','text','image'])
+        self.assertEqual(base64.b64decode(posts[-1]['image']['base64']),self.raw)
+
     def test_http_payload_is_byte_exact_and_personal_target_ignores_class_env(self):
         requests=[]
+        timeouts=[]
         def response(req,**kwargs):
             requests.append(req)
+            timeouts.append(kwargs['timeout'])
             obj=io.BytesIO(b'{"errcode":0}')
             return obj
         with patch.object(notify.urllib.request,'urlopen',side_effect=response), \
@@ -120,6 +153,7 @@ class OriginalImageDelivery(IsolatedCase):
         self.assertTrue(all(r.full_url=='https://unit.invalid/personal' for r in requests))
         payloads=[json.loads(r.data) for r in requests]
         self.assertEqual([x['msgtype'] for x in payloads],['text','text','image'])
+        self.assertEqual(timeouts,[20,20,60])
         image=payloads[-1]['image']
         self.assertEqual(base64.b64decode(image['base64']),self.raw)
         self.assertEqual(image['md5'],hashlib.md5(self.raw).hexdigest())

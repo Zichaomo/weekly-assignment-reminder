@@ -2,6 +2,9 @@
 import hashlib
 import io
 import json
+import re
+import urllib.request
+from urllib.parse import urlsplit, quote
 from pathlib import Path
 
 import cache_store
@@ -61,6 +64,53 @@ def text_chunks(text, limit=1800):
             current, size = '', 0
         current += char
         size += width
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def inline_markdown(text, images):
+    """Use only anonymously verified, byte-identical platform image URLs."""
+    if not images:
+        return None
+    marker = r'^   作业原图随提醒发送（\d+ 张）。$'
+    if len(re.findall(marker, text, re.M)) != len({e['item_key'] for e in images}):
+        return None
+    groups = {}
+    try:
+        for entry in images:
+            raw = original_bytes(entry)
+            record = cache_store.asset_record(entry['asset_id'])
+            url = record['source_url']
+            parts = urlsplit(url)
+            if parts.scheme != 'https' or parts.hostname != 'course.buct.edu.cn' or parts.username:
+                return None
+            with urllib.request.urlopen(urllib.request.Request(url,
+                    headers={'User-Agent':'Mozilla/5.0'}), timeout=10) as response:
+                downloaded = response.read(len(raw)+1)
+            if downloaded != raw:
+                return None
+            groups.setdefault(entry['item_key'], []).append((entry, quote(url, safe=':/?=&%')))
+    except (ValueError, OSError):
+        return None
+    ordered = sorted(groups.values(), key=lambda group:text.find('｜'+group[0][0]['title']))
+    if len(re.findall(marker, text, re.M)) != len(ordered):
+        return None
+    # Escape literal source text before introducing the image Markdown.
+    body = re.sub(r'([\\`*_{}\[\]<>])', r'\\\1', text)
+    cursor = iter(ordered)
+    body = re.sub(marker, lambda _: '\n\n' + '\n\n'.join(
+        f'![作业原图]({url})' for entry, url in next(cursor)) + '\n', body, flags=re.M)
+    # Keep each homework with its image when the API's 4096-byte limit requires
+    # more than one message. An oversized individual item uses separate images.
+    chunks, current = [], ''
+    for block in re.split(r'(?=^• )', body, flags=re.M):
+        if len(block.encode('utf-8')) > 4000:
+            return None
+        if current and len((current+block).encode('utf-8')) > 4000:
+            chunks.append(current)
+            current = ''
+        current += block
     if current:
         chunks.append(current)
     return chunks
