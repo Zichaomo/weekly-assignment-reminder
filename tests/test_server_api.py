@@ -75,6 +75,23 @@ class ServerApiTests(IsolatedCase):
         self.assertEqual(data["source_version"], "v1")
         self.assertEqual(data["blocks"][0]["text"], "正文")
 
+    def test_course_rules_api_preview_save_conflict_and_reset(self):
+        status, state = self.get('/api/course-rules')
+        self.assertEqual(status, 200)
+        rule = dict(id='api-rule', course='课程1', match='exact', mode='full', lines=1)
+        status, preview = self.post('/api/course-rules/preview', {'rule':rule, 'item_key':self.key})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview['push_text'], '正文')
+        status, saved = self.post('/api/course-rules', {'action':'save', 'rule':rule,
+                                                      'expected_revision':state['revision']})
+        self.assertEqual(status, 200)
+        status, _ = self.post('/api/course-rules', {'action':'save', 'rule':rule,
+                                                   'expected_revision':state['revision']})
+        self.assertEqual(status, 409)
+        status, _ = self.post('/api/course-rules', {'action':'reset', 'id':rule['id'],
+                                                   'expected_revision':saved['revision']})
+        self.assertEqual(status, 200)
+
     def test_version_conflict_is_409_and_bad_geometry_is_400(self):
         status, data = self.view({"expected_version": "old", "regions": []})
         self.assertEqual(status, 409)

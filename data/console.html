@@ -188,6 +188,22 @@ td.title{white-space:normal!important}
 
 <!-- 操作栏 -->
 <section class="sec">
+  <div class="sec-label">定 时 发 布</div>
+  <div class="panel" style="padding:14px 18px;line-height:1.8">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <strong id="scheduleSummary">正在读取定时状态…</strong>
+      <button class="btn small" id="btnScheduleSet">设置定时发布</button>
+      <button class="btn small ghost" id="btnScheduleCancel" disabled>取消定时发布</button>
+      <button class="btn small ghost" id="btnSystemRefresh">刷新状态</button>
+    </div>
+    <div id="scheduleActionStatus" role="status" aria-live="polite"></div>
+    <details id="scheduleDetails"><summary class="link" style="cursor:pointer">展开定时状态</summary>
+      <div id="scheduleText" style="white-space:pre-wrap">正在读取定时任务状态…</div>
+    </details>
+  </div>
+</section>
+
+<section class="sec">
   <div class="sec-label">检 索 与 发 布</div>
   <div class="panel ops">
     <button class="btn accent" id="btnFetch">检索北化在线</button>
@@ -251,7 +267,31 @@ td.title{white-space:normal!important}
   <div class="pane" id="pane-log"></div>
 </section>
 
+<section class="sec" id="backendSection">
+  <div class="sec-label">后 台 版 本</div>
+  <div class="panel" style="padding:14px 18px;line-height:1.8">
+    <strong id="runtimeText">正在检查后台版本…</strong>
+    <button class="btn small" id="btnUpdateBackend" disabled>更新后台</button>
+    <button class="btn small ghost" id="btnBackendRefresh">检查版本</button>
+    <div id="runtimeHint" class="blinfo">加载本地新版本，任务运行期间暂不可用。</div>
+  </div>
+</section>
 <div class="foot">全量扫描 · 不依赖首页待提交池 · 黑名单均需人工二次确认 · <a class="link" id="btnShutdown">停止控制台服务</a></div>
+
+<div class="mask" id="maskSchedule">
+  <div class="modal" style="width:min(520px,92vw)" role="dialog" aria-modal="true" aria-labelledby="scheduleTitle">
+    <header><h3 id="scheduleTitle">设置定时发布</h3><button class="btn small ghost" id="scheduleClose">关闭</button></header>
+    <div class="body editgrid">
+      <div>每周日自动发布，按当前推送配置发送。</div>
+      <div class="field"><label for="scheduleTime">发布时间</label><input id="scheduleTime" type="time" value="09:00"></div>
+      <div class="field"><label for="scheduleDays">提醒未来多少天的作业</label><input id="scheduleDays" type="number" min="1" max="30" value="7"></div>
+      <label><input id="scheduleCatchup" type="checkbox" checked>开启错过后的补推检查</label>
+      <div class="blinfo">保存仅设置以后的定时任务，不会立即发布。取消会同时停用每周提醒和补推检查，保留配置及历史记录。</div>
+      <div id="scheduleEditStatus" role="status"></div>
+    </div>
+    <footer><button class="btn accent" id="scheduleSave">保存定时设置</button></footer>
+  </div>
+</div>
 
 <!-- 名单弹窗（课程黑名单 / 测试黑名单 / 选修课名单） -->
 <div class="mask" id="maskBl">
@@ -1860,5 +1900,7 @@ $('#chkAll').addEventListener('change', () => refreshList({ silent: true }));
   setInterval(beat, 5000);
 })();
 </script>
+<script src="/system_panel.js"></script>
+<script src="/course_rules.js"></script>
 </body>
 </html>

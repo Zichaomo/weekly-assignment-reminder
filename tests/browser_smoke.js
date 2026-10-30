@@ -135,6 +135,109 @@ async function main() {
     assert.strictEqual(await page.locator('#tbody > tr > td.empty').count(), 0,
       'loaded rows must remove the empty placeholder');
     const initialRows = await page.locator('#tbody tr[data-key]').count();
+    await page.waitForFunction(() => document.querySelector('#runtimeText').textContent.includes('本地最新版本'));
+    assert(!(await page.locator('#scheduleDetails').evaluate(el => el.open)), 'schedule details start folded');
+    assert(await page.evaluate(() => !document.querySelector('#scheduleDetails').closest('section').contains(document.querySelector('#runtimeText'))));
+    assert(await page.evaluate(() => !!(document.querySelector('#backendSection').compareDocumentPosition(document.querySelector('.foot')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+    await page.locator('#scheduleDetails summary').click();
+    assert((await page.locator('#scheduleText').innerText()).includes('2099-01-04 09:00:00'));
+    await page.locator('#scheduleDetails summary').click();
+    let scheduleRevision=1, scheduleActions=[], deniedCancel=false;
+    let scheduleTasks=[{name:'BUCT-Homework-Weekly',registered:true,enabled:true,state:3,matches_project:true,schedule_time:'09:00',days:7,next_run:'2099-01-04 09:00:00'},
+      {name:'BUCT-Homework-Catchup',registered:true,enabled:true,state:3,matches_project:true,next_run:'2099-01-04 00:05:00'}];
+    await page.route(/\/api\/schedule(?:\?.*)?$/, async route => {
+      if (route.request().method()==='POST') {
+        const p=route.request().postDataJSON();scheduleActions.push(p);
+        assert.strictEqual(p.expected_revision,String(scheduleRevision));
+        if(p.action==='cancel' && !deniedCancel) {
+          deniedCancel=true;
+          await route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({ok:false,error:'未完成Windows权限确认，定时设置未保存。'})});return;
+        }
+        if(p.action==='set') {scheduleTasks[0].enabled=true;scheduleTasks[0].schedule_time=p.time;scheduleTasks[0].days=p.days;scheduleTasks[1].enabled=p.catchup;}
+        else scheduleTasks.forEach(t=>t.enabled=false);
+        scheduleRevision++;
+        await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true,"note":"定时设置已更新"}'});return;
+      }
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,available:true,tasks:scheduleTasks,revision:String(scheduleRevision),last_attempt:{},last_success:{}})});
+    });
+    await page.locator('#btnScheduleSet').click();
+    await page.locator('#maskSchedule.on').waitFor();
+    await page.locator('#scheduleTime').fill('10:30');await page.locator('#scheduleDays').fill('14');
+    await page.locator('#scheduleSave').click();
+    await page.waitForFunction(() => !document.querySelector('#maskSchedule').classList.contains('on'));
+    await page.waitForFunction(() => !document.querySelector('#btnScheduleCancel').disabled);
+    await page.locator('#btnScheduleCancel').click();
+    await page.waitForFunction(() => document.querySelector('#scheduleActionStatus').textContent.includes('未完成Windows权限确认'));
+    assert(await page.locator('#scheduleActionStatus').isVisible());
+    await page.waitForFunction(() => !document.querySelector('#btnScheduleCancel').disabled);
+    await page.locator('#btnScheduleCancel').click();
+    await page.waitForFunction(() => document.querySelector('#scheduleSummary').textContent==='定时发布未开启');
+    assert.deepStrictEqual(scheduleActions.map(p=>p.action),['set','cancel','cancel']);
+    assert.strictEqual(scheduleActions[0].time,'10:30');assert.strictEqual(scheduleActions[0].days,14);
+    assert(scheduleActions[0].catchup);
+    assert(scheduleTasks.every(t=>!t.enabled));
+    await page.locator('#scheduleDetails summary').click();
+    const stoppedDetails=await page.locator('#scheduleText').innerText();
+    assert(stoppedDetails.includes('已停用，不会自动运行'));
+    assert(!stoppedDetails.includes('下次运行：'));
+    assert(!stoppedDetails.includes('2099-01-04'));
+    await page.locator('#scheduleDetails summary').click();
+    await page.locator('#btnScheduleSet').click();
+    await page.locator('#maskSchedule.on').waitFor();
+    assert(await page.locator('#scheduleCatchup').isChecked(), 'reopening settings defaults catchup on even after cancellation');
+    await page.locator('#scheduleClose').click();
+    events.dialogs.length=0;
+    await page.unroute(/\/api\/schedule(?:\?.*)?$/);
+    await page.locator('#btnSystemRefresh').click();
+    assert(await page.locator('#btnUpdateBackend').isDisabled());
+    let systemPid=100, systemOld=true, systemBusy=true, restartPosts=0;
+    await page.route('**/api/runtime', route => route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
+      ok:true,pid:systemPid,running_version:systemOld?'old':'new',disk_version:'new',needs_update:systemOld,busy:systemBusy})}));
+    await page.locator('#btnSystemRefresh').click();
+    await page.waitForFunction(() => document.querySelector('#runtimeHint').textContent.includes('排队'));
+    assert(await page.locator('#btnUpdateBackend').isDisabled());
+    systemBusy=false;
+    await page.locator('#btnSystemRefresh').click();
+    await page.waitForFunction(() => !document.querySelector('#btnUpdateBackend').disabled);
+    await page.locator('#addT').fill('更新后保留的草稿');
+    await page.route('**/api/runtime/update', async route => {
+      restartPosts+=1;systemPid=101;systemOld=false;
+      await route.fulfill({status:202,contentType:'application/json',body:'{"ok":true}'});
+    });
+    await page.locator('#btnUpdateBackend').click();
+    await page.waitForFunction(() => document.querySelector('#runtimeText').textContent.includes('本地最新版本'));
+    assert.strictEqual(await page.locator('#addT').inputValue(),'更新后保留的草稿');
+    assert.strictEqual(restartPosts,1);
+    await page.locator('#addT').fill('');
+    await page.unroute('**/api/runtime');await page.unroute('**/api/runtime/update');
+    await page.locator('#btnSystemRefresh').click();
+    const systemShot=path.join(ROOT,'tests','artifacts','browser-smoke-system.png');
+    fs.mkdirSync(path.dirname(systemShot),{recursive:true});
+    await page.screenshot({path:systemShot});
+    await page.locator('#btnCourseRules').click();
+    await page.waitForSelector('#ruleMask.on');
+    assert.strictEqual(await page.locator('#ruleList .rule-row').count(), 4);
+    await page.locator('#ruleNew').click();
+    await page.locator('#ruleCourse').fill('fixture课程 A');
+    await page.locator('#ruleMode').selectOption('full');
+    await page.locator('#ruleLines').fill('2');
+    await page.locator('#ruleText').fill('任务一\n任务二\n任务三');
+    await page.locator('#rulePreview').click();
+    await page.waitForFunction(() => document.querySelector('#ruleResult').textContent.includes('任务二'));
+    assert(!(await page.locator('#ruleResult').innerText()).includes('任务三'));
+    await page.locator('#ruleSave').click();
+    await page.waitForFunction(() => document.querySelector('#ruleStatus').textContent.includes('已保存'));
+    const ruleShot = path.join(ROOT,'tests','artifacts','browser-smoke-course-rules.png');
+    await page.screenshot({path:ruleShot});
+    await page.locator('#ruleClose').click();
+    await page.locator('#btnCourseRules').click();
+    await page.locator('#ruleList .rule-row').filter({hasText:'fixture课程 A'}).click();
+    assert.strictEqual(await page.locator('#ruleLines').inputValue(), '2');
+    await page.locator('#ruleReset').click();
+    await page.waitForFunction(() => document.querySelector('#ruleStatus').textContent.includes('已恢复'));
+    await page.locator('#ruleClose').click();
+    assert(events.dialogs.some(d => d.type === 'confirm' && d.message.includes('删除这条自定义规则')));
+    events.dialogs.length = 0;
     const effectiveRow = page.locator('#tbody tr[data-key]').filter({ hasText: 'fixture有效摘要' });
     assert((await effectiveRow.locator('.effective-summary').innerText()).includes('习题：10-11、10-13、10-21。'));
     assert(!(await effectiveRow.locator('.content-brief').innerText()).includes('提交图片'));
@@ -481,9 +584,10 @@ async function main() {
     const unexpectedConsole = events.consoleErrors.filter(entry => {
       const expectedConflict = entry.url === viewUrl && /status of 409/.test(entry.text);
       const expectedReviewConflict = entry.url === reviewUrl && /status of (409|404)/.test(entry.text);
+      const expectedScheduleConflict = entry.url === base + '/api/schedule' && /status of 409/.test(entry.text);
       const expectedPollLoss = entry.url === taskGetUrl
         && /net::ERR_FAILED|Failed to load resource/.test(entry.text);
-      return !(expectedConflict || expectedReviewConflict || expectedPollLoss);
+      return !(expectedConflict || expectedReviewConflict || expectedPollLoss || expectedScheduleConflict);
     });
     assert.deepStrictEqual(unexpectedConsole, [],
       'unexpected console errors: ' + JSON.stringify(unexpectedConsole));
@@ -492,7 +596,7 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true,
-      screenshots: [cropShot, shot, inlineShot, summaryShot, alertShot, reviewShot, imagePreviewShot],
+      screenshots: [cropShot, shot, inlineShot, summaryShot, alertShot, reviewShot, imagePreviewShot, systemShot],
       persisted_regions: persisted.regions.length,
       cold_open_task_posts: 0,
       task_posts_during_poll_test: beforeFailedFetch,

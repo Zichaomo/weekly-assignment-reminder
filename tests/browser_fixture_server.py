@@ -58,6 +58,11 @@ def main():
     # entry point may run inside the fixture.
     cache_store._load_config = lambda: {}
     server.load_channel = lambda: "none"
+    server.schedule_status.snapshot = lambda *a: {'available':True,'tasks':[
+        {'name':'BUCT-Homework-Weekly','registered':True,'enabled':True,'state':3,
+         'next_run':'2099-01-04 09:00:00','last_run':None,'matches_project':True}],
+        'last_attempt':{},'last_success':{},'revision':'fixture-schedule'}
+    server.console_runtime.launch_restart = lambda *a: (_ for _ in ()).throw(AssertionError('real restart forbidden in fixture'))
     server.Handler.LOG_FILE = tmp / "server_error.log"
 
     class FixtureIsolationError(RuntimeError):
@@ -71,6 +76,7 @@ def main():
         return _blocked
 
     server.submit_task = blocked("server.submit_task")
+    server.schedule_control.change = blocked('schedule mutation')
     server.run_task = blocked("server.run_task")
     hub.run_publish = blocked("hub.run_publish")
     hub.run_content = blocked("hub.run_content")

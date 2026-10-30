@@ -225,8 +225,9 @@ def format_message(items: list, days: int, title: str = None,
             summary = content_summary.summarize(it)
             if summary['status'] == 'ready':
                 body_lines = [line for line in summary['text'].splitlines() if line.strip()]
-                blk.extend('   ' + line for line in body_lines[:3])
-                if len(body_lines) > 3:
+                limit = summary.get('push_lines', 3)
+                blk.extend('   ' + line for line in body_lines[:limit])
+                if len(body_lines) > limit:
                     blk.append('   ……（详情参见北化在线）')
             elif summary['status'] == 'images':
                 blk.append(f"   作业原图随提醒发送（{len(summary['asset_ids'])} 张）。")

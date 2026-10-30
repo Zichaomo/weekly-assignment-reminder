@@ -43,6 +43,13 @@ import hub      # noqa: E402  控制台后端：列表/发布/黑名单/正文/�
 import manual   # noqa: E402  手动条目增删改查（cmd_* 函数直接复用）
 import cache_store  # noqa: E402
 import content_pipeline  # noqa: E402
+import console_runtime
+import schedule_status
+import schedule_control
+import course_rules
+
+LIFECYCLE_LOCK = threading.RLock()
+_RESTARTING = False
 
 PORT = int(os.environ.get("HOMEWORK_CONSOLE_PORT", "8277"))
 PAGE_FILE = ROOT / "console.html"
@@ -271,6 +278,13 @@ def _task_worker(task_id, op, params):
 
 
 def submit_task(op, params):
+    with LIFECYCLE_LOCK:
+        if _RESTARTING:
+            raise ValueError('后台正在更新，请稍后重试')
+        return _submit_task(op, params)
+
+
+def _submit_task(op, params):
     task_id = uuid.uuid4().hex[:12]
     params = dict(params or {})
     params["_task_id"] = task_id
@@ -286,6 +300,14 @@ def submit_task(op, params):
                           "result": None, "error": None}
     EXEC.submit(_task_worker, task_id, op, params)
     return task_id, False
+
+
+def runtime_busy():
+    with TASKS_LOCK:
+        if any(t.get('status') in ('queued','running') for t in TASKS.values()):
+            return True
+    with cache_store.connection() as con:
+        return bool(con.execute("SELECT 1 FROM task_registry WHERE status IN ('queued','running') LIMIT 1").fetchone())
 
 
 def task_progress(task: dict) -> dict | None:
@@ -421,6 +443,19 @@ class Handler(BaseHTTPRequestHandler):
             _LAST_HEARTBEAT[0] = time.time()
             return self._send(200, {"ok": True})
 
+        if path == '/system_panel.js':
+            return self._send(200, None, 'text/javascript; charset=utf-8', raw=(ROOT/'system_panel.js').read_bytes())
+
+        if path == '/course_rules.js':
+            return self._send(200, None, 'text/javascript; charset=utf-8', raw=(ROOT/'course_rules.js').read_bytes())
+        if path == '/api/course-rules':
+            return self._send(200, {'ok': True, **course_rules.snapshot()})
+        if path == '/api/course-rules/samples':
+            return self._send(200, {'ok': True, 'items': [
+                {'item_key': x['item_key'], 'course': x.get('course'), 'title': x.get('title')}
+                for x in cache_store.load_items()
+                if x.get('kind') not in ('manual', 'test') and x.get('source') != 'manual']})
+
         if path == "/api/cache":
             return self._send(200, {"ok": True, **cache_state()})
 
@@ -429,6 +464,12 @@ class Handler(BaseHTTPRequestHandler):
                                     "port": PORT,
                                     "content_ttl_sec": cache_store.cache_settings()["content_ttl_sec"],
                                     "publish_fresh_sec": cache_store.cache_settings()["publish_fresh_sec"]})
+
+        if path == '/api/runtime':
+            return self._send(200, {'ok':True, **console_runtime.status(),
+                                    'updating':_RESTARTING, 'busy':runtime_busy()})
+        if path == '/api/schedule':
+            return self._send(200, {'ok':True, **schedule_status.snapshot(q.get('refresh',['0'])[0]=='1')})
 
         if path == "/api/list":
             # Local-only: this route must never touch the platform, even cold.
@@ -535,8 +576,49 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _do_POST(self):
+        global _RESTARTING
         u = urlparse(self.path)
         p = self._body()
+
+        if u.path == '/api/course-rules/preview':
+            return self._send(200, {'ok': True, **course_rules.preview(p)})
+        if u.path == '/api/course-rules':
+            with LIFECYCLE_LOCK:
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok': False, 'error': '请等待当前任务结束后再保存规则'})
+                try:
+                    result = course_rules.change(p)
+                except course_rules.Conflict as exc:
+                    return self._send(409, {'ok': False, 'error': str(exc)})
+                return self._send(200, {'ok': True, **result})
+
+        if u.path == '/api/schedule':
+            with LIFECYCLE_LOCK:
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok':False,'error':'有任务运行或排队，请完成后再修改定时设置'})
+                current=schedule_status.snapshot(True)
+                if not current.get('available') or p.get('expected_revision') != current.get('revision'):
+                    return self._send(409, {'ok':False,'error':'定时状态已变化或无法读取，请刷新后重试'})
+                res=schedule_control.change(p.get('action'),p.get('time','09:00'),
+                    p.get('days',7),p.get('catchup',True))
+                res['schedule']=schedule_status.snapshot(True)
+                return self._send(200 if res['ok'] else 409,res)
+
+        if u.path == '/api/runtime/update':
+            with LIFECYCLE_LOCK:
+                status=console_runtime.status()
+                if p.get('expected_version') != status['disk_version'] or p.get('expected_pid') != status['pid']:
+                    return self._send(409, {'ok':False,'error':'后台或本地代码已变化，请刷新状态后再更新'})
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok':False,'error':'仍有任务运行或排队，请完成后再更新'})
+                try:
+                    console_runtime.launch_restart(PORT)
+                except (SyntaxError,OSError):
+                    return self._send(409, {'ok':False,'error':'本地新版本暂时无法启动，当前后台继续运行，请修复文件后重试'})
+                _RESTARTING=True
+                self._send(202, {'ok':True,'version':status['disk_version']})
+                threading.Timer(.8, os._exit, args=(0,)).start()
+                return
 
         if u.path == "/api/tasks":
             op = p.get("op", "")

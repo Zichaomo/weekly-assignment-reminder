@@ -1,8 +1,8 @@
 """Conservative, source-backed homework excerpts. No model or network calls."""
 import re
+import course_rules
 
-RULE_VERSION = '2026-10-29.3'
-FULL_TEXT_COURSES = {'嵌入式系统创新应用与实践'}
+RULE_VERSION = '2026-10-30.1'
 QUESTION_LIST = re.compile(r'\d+\s*[-－—]\s*\d+(?:\s*[,，、]\s*\d+\s*[-－—]\s*\d+)*\s*[。.]?')
 SUBMISSION_SLOT = re.compile(r'(?:(?:第[一二三四五六七八九十百零两\d]+[周章节次])|本周)?\s*作业\s*(?:请)?\s*提交(?:在)?(?:这里|此处)[。！!]?')
 ANCHOR = re.compile(r'^(?:习题|题号|页码|作业范围|本次要求|本周要求|本次作业|本周作业|完成|解答|求解|证明|计算|阅读|预习|复习|第[一二三四五六七八九十百\d]+[章节页题])')
@@ -51,15 +51,16 @@ def _has_visual(blocks):
     return False
 
 
-def summarize(item):
+def summarize(item, rule=None):
     """Recompute from the current body; never trust a saved/previous summary."""
-    result = {'status': 'unavailable', 'text': '', 'excerpts': [],
+    rule = course_rules.resolve(item.get('course')) if rule is None else rule
+    mode = rule['mode']
+    result = {'status': 'unavailable', 'text': '', 'excerpts': [], 'push_lines': rule['lines'],
               'rule_version': RULE_VERSION, 'source_version': item.get('source_version'),
               'reason': '正文尚未就绪'}
-    course = str(item.get('course') or '').strip()
-    if course.startswith('大学物理实验'):
+    if mode == 'reference':
         result.update(status='reference_only', text='详细要求见北化在线', origin='course_rule',
-                      reason='本课程每周要求不同，统一提醒查看北化在线完整要求')
+                      reason='课程规则设为仅提示查看北化在线完整要求')
         return result
     if (not item.get('content_ready') or item.get('content_stale')
             or item.get('content_error') or item.get('content_identity_stale')):
@@ -79,7 +80,7 @@ def summarize(item):
     pieces = list(_pieces(blocks))
     if not pieces and item.get('content_text'):
         pieces = [(None, item['content_text'])]
-    if course.startswith('复变函数'):
+    if mode == 'images':
         import content_pipeline
         images = list(content_pipeline._iter_images(blocks))
         if images and all(im.get('status') == 'ready' and im.get('asset_id') for im in images):
@@ -87,7 +88,7 @@ def summarize(item):
                           asset_ids=list(dict.fromkeys(im['asset_id'] for im in images)),
                           reason='本课程正文图片按原图随提醒发送，无需人工确认')
             return result
-    if course.startswith('普通物理') and not _has_visual(blocks):
+    if mode == 'physics' and not _has_visual(blocks):
         kept = []
         for block_id, text in pieces:
             for match in re.finditer(r'[^\n。；;]+[。；;]?', text):
@@ -107,7 +108,7 @@ def summarize(item):
         return result
     # The user confirmed that every textual requirement in this course matters.
     # Keep wording, internal spaces, command arguments and list numbering intact.
-    if str(item.get('course') or '').strip() in FULL_TEXT_COURSES and not _has_visual(blocks):
+    if mode == 'full' and not _has_visual(blocks):
         import content_pipeline
         raw = content_pipeline.flatten_blocks_text(blocks) if blocks else item.get('content_text', '')
         text = '\n'.join(line.strip() for line in raw.splitlines() if line.strip())
