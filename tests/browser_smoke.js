@@ -160,6 +160,16 @@ async function main() {
       }
       await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,available:true,tasks:scheduleTasks,revision:String(scheduleRevision),last_attempt:{},last_success:{}})});
     });
+    scheduleTasks[0].next_run='2099-01-04 09:30:00';
+    await page.locator('#btnSystemRefresh').click();
+    await page.waitForFunction(() => document.querySelector('#scheduleSummary').textContent.includes('下次补推检查'));
+    assert(!(await page.locator('#scheduleSummary').innerText()).includes('下次首次发布'));
+    assert((await page.locator('#scheduleText').textContent()).includes('后续触发均为补推检查'));
+    assert((await page.locator('#scheduleText').textContent()).includes('已成功则跳过'));
+    assert((await page.locator('#scheduleText').textContent()).includes('旧版额外补推任务'));
+    scheduleTasks[0].next_run='2099-01-04 09:00:00';
+    await page.locator('#btnSystemRefresh').click();
+    await page.waitForFunction(() => document.querySelector('#scheduleSummary').textContent.includes('首次发布检查'));
     await page.locator('#btnScheduleSet').click();
     await page.locator('#maskSchedule.on').waitFor();
     await page.locator('#scheduleTime').fill('10:30');await page.locator('#scheduleDays').fill('14');
@@ -174,7 +184,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('#scheduleSummary').textContent==='定时发布未开启');
     assert.deepStrictEqual(scheduleActions.map(p=>p.action),['set','cancel','cancel']);
     assert.strictEqual(scheduleActions[0].time,'10:30');assert.strictEqual(scheduleActions[0].days,14);
-    assert(scheduleActions[0].catchup);
+    assert.strictEqual(scheduleActions[0].catchup,false);
     assert(scheduleTasks.every(t=>!t.enabled));
     await page.locator('#scheduleDetails summary').click();
     const stoppedDetails=await page.locator('#scheduleText').innerText();
@@ -184,7 +194,7 @@ async function main() {
     await page.locator('#scheduleDetails summary').click();
     await page.locator('#btnScheduleSet').click();
     await page.locator('#maskSchedule.on').waitFor();
-    assert(await page.locator('#scheduleCatchup').isChecked(), 'reopening settings defaults catchup on even after cancellation');
+    assert.strictEqual(await page.locator('#scheduleCatchup').count(),0, 'settings must not recreate retired midnight task');
     await page.locator('#scheduleClose').click();
     events.dialogs.length=0;
     await page.unroute(/\/api\/schedule(?:\?.*)?$/);
@@ -239,6 +249,25 @@ async function main() {
     assert(events.dialogs.some(d => d.type === 'confirm' && d.message.includes('删除这条自定义规则')));
     events.dialogs.length = 0;
     const effectiveRow = page.locator('#tbody tr[data-key]').filter({ hasText: 'fixture有效摘要' });
+    // Automatic fill must stay in the visible date window and attempt failures once.
+    await page.evaluate(() => {
+      window.__originalRunTask = runTask;
+      window.__autoRequests = [];
+      const deadline = offset => new Date(Date.now()+offset*86400000).toISOString().slice(0,16).replace('T',' ');
+      state.platformRows = Array.from({length:14},(_,i)=>({item_key:'window-'+i,kind:'homework',deadline:deadline(2),content_ready:false}));
+      state.platformRows.push({item_key:'history',deadline:deadline(-10)}, {item_key:'distant',deadline:deadline(40)});
+      runTask = (op,params,label,done) => {
+        window.__autoRequests.push(params.item_keys);
+        setTimeout(()=>done({ok:false,failed:params.item_keys.length,remaining:99,items:[]}),0);
+      };
+      autoFillVisibleContent();
+    });
+    await page.waitForFunction(() => window.__autoRequests.length===2 && !state.autoFilling);
+    const attempted = await page.evaluate(() => { runTask=window.__originalRunTask; return window.__autoRequests.flat(); });
+    assert.strictEqual(attempted.length,14);
+    assert.strictEqual(new Set(attempted).size,14);
+    assert(attempted.every(k=>k.startsWith('window-')));
+    await page.evaluate(()=>refreshList({silent:true}));
     assert((await effectiveRow.locator('.effective-summary').innerText()).includes('习题：10-11、10-13、10-21。'));
     assert(!(await effectiveRow.locator('.content-brief').innerText()).includes('提交图片'));
     assert.strictEqual(await effectiveRow.locator('.content-detail').count(), 0, 'full body starts folded');

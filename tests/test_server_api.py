@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -74,6 +76,32 @@ class ServerApiTests(IsolatedCase):
         self.assertTrue(data["ready"])
         self.assertEqual(data["source_version"], "v1")
         self.assertEqual(data["blocks"][0]["text"], "正文")
+
+    def test_preview_finishes_while_platform_executor_is_occupied(self):
+        release = threading.Event()
+        entered = threading.Event()
+        def platform_job():
+            entered.set()
+            release.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as platform, ThreadPoolExecutor(max_workers=1) as previews:
+            blocked = platform.submit(platform_job)
+            self.assertTrue(entered.wait(1))
+            try:
+                with patch.object(self.server_mod,'EXEC',platform), patch.object(self.server_mod,'PREVIEW_EXEC',previews), patch.object(self.server_mod.hub,'run_publish',return_value={'ok':True,'sent':False,'message':'local preview'}) as publish:
+                    status, task = self.post('/api/tasks',{'op':'preview','days':7})
+                    self.assertEqual(status,200)
+                    deadline = time.monotonic()+2
+                    while time.monotonic()<deadline:
+                        _, result = self.get('/api/tasks/'+task['task_id'])
+                        if result['status'] not in ('queued','running'):
+                            break
+                        time.sleep(.02)
+                    self.assertEqual(result['status'],'done')
+                    self.assertEqual(result['result']['message'],'local preview')
+                    self.assertFalse(blocked.done(), 'preview must finish before platform work')
+                    publish.assert_called_once_with(7,True,None)
+            finally:
+                release.set()
 
     def test_course_rules_api_preview_save_conflict_and_reset(self):
         status, state = self.get('/api/course-rules')

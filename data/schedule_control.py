@@ -70,7 +70,7 @@ def _elevated_change(action, time_text, days, catchup, *, verify_cycle=False):
     return {'ok':False,'error':'未完成Windows权限确认，定时设置未保存。'}
 
 
-def change(action, time_text='09:00', days=7, catchup=True, *, allow_elevation=True, principal_user=None):
+def change(action, time_text='09:00', days=7, catchup=False, *, allow_elevation=True, principal_user=None):
     if action not in ('set','cancel'):raise ValueError('未知的定时操作')
     if not isinstance(time_text,str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',time_text):
         raise ValueError('请选择有效的发布时间')

@@ -50,8 +50,9 @@ def original_bytes(entry):
     return raw
 
 
-def bundle_key(text, images):
-    return hashlib.sha256(json.dumps([text, images], sort_keys=True,
+def bundle_key(text, images, *, rendered=None):
+    payload = [text, images] if rendered is None else [text, images, rendered]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True,
                                     ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
@@ -73,6 +74,7 @@ def inline_markdown(text, images):
     """Use only anonymously verified, byte-identical platform image URLs."""
     if not images:
         return None
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     marker = r'^   作业原图随提醒发送（\d+ 张）。$'
     if len(re.findall(marker, text, re.M)) != len({e['item_key'] for e in images}):
         return None
@@ -100,7 +102,11 @@ def inline_markdown(text, images):
     body = re.sub(r'([\\`*_{}\[\]<>])', r'\\\1', text)
     cursor = iter(ordered)
     body = re.sub(marker, lambda _: '\n\n' + '\n\n'.join(
-        f'![作业原图]({url})' for entry, url in next(cursor)) + '\n', body, flags=re.M)
+        f'![作业原图]({url})' for entry, url in next(cursor)) + '\n\n', body, flags=re.M)
+    body = re.sub(r'\n{3,}', '\n\n', body).strip()
+    # Keep text compact with Markdown hard line breaks. Only images get new
+    # paragraph boundaries; retain the source's original section spacing.
+    body = re.sub(r'(?<!\n)\n(?!\n)', '  \n', body)
     # Keep each homework with its image when the API's 4096-byte limit requires
     # more than one message. An oversized individual item uses separate images.
     chunks, current = [], ''

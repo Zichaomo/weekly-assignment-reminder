@@ -54,6 +54,16 @@ class ContentFlowSeams(IsolatedCase):
         self.assertIn("does-not-exist", out["error"])
         self.assertIn("hwtid", out["error"])
 
+    def test_automatic_content_batch_excludes_old_and_distant_homework(self):
+        for offset in (-10, 40):
+            deadline=(datetime.now()+timedelta(days=offset)).strftime('%Y-%m-%d %H:%M')
+            with cache_store.connection(write=True) as con:
+                con.execute('UPDATE assignments SET deadline=? WHERE item_key=?',(deadline,self.item['item_key']))
+            with patch.object(scrape,'sync_playwright',side_effect=AssertionError('history must not launch browser')):
+                result=hub.run_content(force=True,limit=12)
+            self.assertEqual(result['requested'],0)
+            self.assertEqual(result['remaining'],0)
+
     def test_explicit_cached_item_does_not_start_browser(self):
         with patch.object(scrape, "sync_playwright", side_effect=AssertionError("browser used")):
             out = hub.run_content(item_keys=[self.item["item_key"]])

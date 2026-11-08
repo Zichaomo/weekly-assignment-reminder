@@ -24,6 +24,8 @@
   "notify_title": "北化在线作业提醒",
   "_dedup": "去重窗口（秒）：窗口内已向同一目标推过完全相同的内容则跳过，防止连点两次重复打扰。设 0 关闭",
   "dedup_window_sec": 300,
+  "_task_local_notice": "定时实际执行前后显示Windows本机通知；非阻塞，不进入群消息，演练及当天已发跳过时不提示",
+  "task_local_notice": true,
   "_personal": "【个人那条】班级群那条会删掉选修课；这条是完整清单（含选修课）。典型配置=建一个「选修课小群」机器人，把 webhook 填在下面。留空则只发班级群那条",
   "personal": {
     "enabled": true,

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import time
 import sys
 from types import SimpleNamespace
@@ -126,6 +127,55 @@ class OriginalImageDelivery(IsolatedCase):
         self.assertLess(body.index('![作业原图]'),body.index('下一项作业'))
         self.assertNotIn('作业原图随提醒发送',body)
         self.assertLessEqual(len(body.encode('utf-8')),4096)
+
+    def test_inline_mobile_payload_uses_compact_hard_breaks_and_image_paragraphs(self):
+        manual={'course':'英语','title':'U校园 新视野U5','source':'manual',
+                'deadline':'2099-01-01 23:59','note':'老师要求周末完成'}
+        other={'course':'普通物理','title':'下一项作业','deadline':'2099-01-02 23:59',
+               'content_ready':True,'content_blocks':[{'id':'p','type':'paragraph','text':'习题：1-2。'}]}
+        text=weekly.format_message([manual,self.item,other],7)
+        requests=[]
+        def response(req,**kwargs):
+            requests.append(req)
+            return io.BytesIO(self.raw if req.get_method()=='GET' else b'{"errcode":0}')
+        with patch.object(notify.urllib.request,'urlopen',side_effect=response),patch.object(notify.time,'sleep'):
+            self.assertTrue(notify.dispatch(text.replace('\n','\r\n'),'wecom',self.cfg))
+        posts=[json.loads(req.data) for req in requests if req.get_method()=='POST']
+        self.assertEqual(len(posts),1)
+        body=posts[0]['markdown_v2']['content']
+        self.assertIsNone(re.search(r'(?<!\n)(?<!  )\n(?!\n)',body), 'single breaks must be Markdown hard breaks')
+        rendered_lines=[p.strip() for p in body.splitlines() if p.strip()]
+        for line in text.splitlines():
+            if line.strip() and '作业原图随提醒发送' not in line:
+                self.assertIn(line.strip(),rendered_lines)
+        self.assertIn('• 英语 📌手动｜U校园 新视野U5  \n   ⏰',body)
+        self.assertRegex(body,r'\n\n!\[作业原图\]\([^\n]+\)\n\n')
+        self.assertLess(body.index('图片任务'),body.index('![作业原图]'))
+        self.assertLess(body.index('![作业原图]'),body.index('下一项作业'))
+        self.assertNotIn('<br',body)
+        self.assertLessEqual(len(body.encode('utf-8')),4096)
+
+    def test_mobile_breaks_are_counted_before_message_chunking(self):
+        items=[{'course':'英语','title':'手动作业'+str(n),'source':'manual',
+                'deadline':'2099-01-01 23:59','note':'按老师要求完成练习并提交'} for n in range(40)]
+        text=weekly.format_message([self.item,*items],7)
+        with patch.object(delivery.urllib.request,'urlopen',return_value=io.BytesIO(self.raw)):
+            chunks=delivery.inline_markdown(text,self.images)
+        self.assertIsNotNone(chunks)
+        self.assertGreater(len(chunks),1)
+        self.assertTrue(all(len(c.encode('utf-8'))<=4000 for c in chunks))
+        joined=''.join(chunks)
+        self.assertEqual(joined.count('• '),41)
+        self.assertEqual(joined.count('![作业原图]'),1)
+        self.assertIsNone(re.search(r'(?<!\n)(?<!  )\n(?!\n)',joined))
+
+    def test_inline_layout_change_does_not_reuse_other_layout_partial_receipts(self):
+        sent=[]
+        with patch.object(delivery,'inline_markdown',side_effect=[['old layout'],['new layout'],['new layout']]),patch.object(notify,'send_wecom',side_effect=lambda text,*a,**kw: sent.append(text) or True),patch.object(notify.time,'sleep'):
+            self.assertTrue(notify.dispatch('same reminder','wecom',self.cfg))
+            self.assertTrue(notify.dispatch('same reminder','wecom',self.cfg))
+            self.assertTrue(notify.dispatch('same reminder','wecom',self.cfg))
+        self.assertEqual(sent,['old layout','new layout'])
 
     def test_inline_unavailable_public_url_falls_back_to_original_upload(self):
         text=weekly.format_message([self.item],7)

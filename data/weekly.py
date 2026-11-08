@@ -471,12 +471,26 @@ def main() -> int:
 
     # 默认按「截止日期」取作业（全量扫描所有课程，不看是否已提交）——
     # 这份提醒是发给全班同学的，谁交没交不该决定某门课要不要提醒。
-    extra = [] if args.pool else ["--deadline-only"]
+    extra = [] if args.pool else ["--deadline-only", "--content-after-scan",
+                                 "--content-window-days", str(args.days),
+                                 "--content-limit", "0"]
 
     cached_payload = None
     cache_coverage = None
     if not args.pool:
         cached_payload, cache_coverage = load_fresh_publish_cache()
+        if cached_payload:
+            import course_rules
+            # List freshness does not prove body freshness. Refresh the due
+            # bodies in the scraper's authenticated context before formatting.
+            due = [item for item in merge_and_filter(cached_payload, [], args.days)
+                   if item.get('kind') not in ('test', 'manual')
+                   and course_rules.resolve(item.get('course'))['mode'] != 'reference'
+                   and (not item.get('content_ready') or item.get('content_stale')
+                        or item.get('content_error') or item.get('content_identity_stale'))]
+            if due:
+                print(f"列表缓存有效，但 {len(due)} 条待提醒作业正文需要更新，重新扫描并补齐正文。")
+                cached_payload = None
     if cached_payload:
         data = cached_payload
         print(f"复用完整新鲜缓存（{cache_coverage.get('age_sec', 0):.0f} 秒前，"
@@ -511,17 +525,18 @@ def main() -> int:
 
     # Freshly fetched output must meet the same scope, identity and freshness
     # requirements as cache reuse. Use the verified snapshot for both audiences.
-    if not args.pool and not args.no_send:
+    if not args.pool:
         verified, cache_coverage = load_fresh_publish_cache()
-        if verified is None:
+        if verified is None and not args.no_send:
             reasons = (cache_coverage or {}).get("publish_block_reasons") or ["完整缓存不可用"]
             text = "本次扫描未通过发布检查：" + "；".join(reasons)
             print(text, file=sys.stderr)
             report_alert("publish-blocked", "作业提醒：覆盖检查未通过，未发送", text)
             return 2
         # Keep diagnostics from this scan while publishing canonical cache rows.
-        data = {**verified, **{k: data[k] for k in (
-            '_elapsed_sec', 'warnings', 'per_course', 'timing') if k in data}}
+        if verified is not None:
+            data = {**verified, **{k: data[k] for k in (
+                '_elapsed_sec', 'warnings', 'per_course', 'timing') if k in data}}
 
     elapsed = data.get("_elapsed_sec")
     platform = data.get("homeworks", [])

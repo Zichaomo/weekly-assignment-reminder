@@ -56,6 +56,7 @@ PAGE_FILE = ROOT / "console.html"
 
 # Playwright 会话不能并发（共享 storage_state / 课程上下文），长任务串行执行
 EXEC = ThreadPoolExecutor(max_workers=1)
+PREVIEW_EXEC = ThreadPoolExecutor(max_workers=1)
 TASKS = {}          # id -> {status, op, started, finished, result, error}
 _LAST_HEARTBEAT = [0.0]   # 页面最后一次心跳时间（列表以便闭包内修改）
 HEARTBEAT_GAP = 30.0      # 超过这么久没有心跳 = 页面已关
@@ -298,7 +299,8 @@ def _submit_task(op, params):
                           "scan_id": task_id if op == "fetch" else None,
                           "started": time.time(), "finished": None,
                           "result": None, "error": None}
-    EXEC.submit(_task_worker, task_id, op, params)
+    # Preview reads SQLite and local assets only; platform work must not block it.
+    (PREVIEW_EXEC if op == 'preview' else EXEC).submit(_task_worker, task_id, op, params)
     return task_id, False
 
 
@@ -600,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not current.get('available') or p.get('expected_revision') != current.get('revision'):
                     return self._send(409, {'ok':False,'error':'定时状态已变化或无法读取，请刷新后重试'})
                 res=schedule_control.change(p.get('action'),p.get('time','09:00'),
-                    p.get('days',7),p.get('catchup',True))
+                    p.get('days',7),p.get('catchup',False))
                 res['schedule']=schedule_status.snapshot(True)
                 return self._send(200 if res['ok'] else 409,res)
 

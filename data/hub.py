@@ -828,9 +828,11 @@ def run_content(hwtid: str = "", item_keys=None, hwtids=None, force: bool = Fals
                 seen.add(item["item_key"])
                 selected.append(item)
     else:
-        selected = [x for x in homework
-                    if force or not x.get("content_ready")
-                    or x.get("content_stale") or x.get("content_error")]
+        # Automatic batches cover the configured upcoming window, not the
+        # entire historical homework cache. Explicit item requests remain valid.
+        selected = cache_store.content_due(
+            days=cache_store.cache_settings()['content_window_days'], force=force,
+            exclude_lids=blocked_now, exclude_test_lids=tests_blocked_now)
     selected.sort(key=lambda x: (x.get("deadline") or "", x.get("course") or ""))
 
     fresh, due = [], []

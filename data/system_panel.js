@@ -2,6 +2,11 @@
 let backendInfo = null, backendUpdating = false, systemRefreshing = false;
 let scheduleInfo = null, scheduleChanging = false;
 const updateDraftFields = ['addC','addT','addD','addN','numDays','chkAll','chkTests'];
+function nextScheduleAction(task) {
+  if (task.name !== 'BUCT-Homework-Weekly') return '补推检查';
+  if (!task.schedule_time || !task.next_run) return '定时检查';
+  return task.next_run.slice(11,16) === task.schedule_time ? '首次发布检查' : '补推检查';
+}
 try {
   const draft = JSON.parse(sessionStorage.getItem('homeworkUpdateDraft') || 'null');
   if (draft) for (const id of updateDraftFields) {
@@ -33,19 +38,23 @@ async function refreshSystemStatus(force = false) {
     const weekly = (schedule.tasks || []).find(t => t.name === 'BUCT-Homework-Weekly');
     const enabled = (schedule.tasks || []).some(t => t.registered && t.enabled);
     $('#scheduleSummary').textContent = !schedule.available ? '定时状态暂时无法读取'
-      : weekly?.enabled ? `定时发布已开启 · 下次 ${weekly.next_run || '待系统安排'}`
+      : weekly?.enabled ? `定时发布已开启 · 下次${nextScheduleAction(weekly)} ${weekly.next_run || '待系统安排'}`
       : enabled ? '每周发布未开启，补推仍开启' : '定时发布未开启';
     $('#btnScheduleSet').disabled = !schedule.available || !!runtime.busy;
     $('#btnScheduleCancel').disabled = !schedule.available || !enabled || !!runtime.busy;
     const lines = [];
+    if (schedule.available && weekly?.registered) {
+      lines.push(`每周日首次发布：${weekly.schedule_time || '按已设置时间'}。后续触发均为补推检查，仅补发未成功的提醒，已成功则跳过，不会定时重复群发。`);
+    }
     if (!schedule.available) lines.push(schedule.error || '计划任务状态暂时未知');
     for (const task of schedule.tasks || []) {
-      const label = task.name === 'BUCT-Homework-Weekly' ? '每周提醒' : '补推检查';
+      if (task.name === 'BUCT-Homework-Catchup' && (!task.registered || !task.enabled)) continue;
+      const label = task.name === 'BUCT-Homework-Weekly' ? '首次发布及后续补推检查' : '旧版额外补推任务';
       if (!task.registered) { lines.push(`${label}：尚未注册`); continue; }
       const states = {0:'未知',1:'已停用',2:'排队中',3:'就绪',4:'正在运行'};
       lines.push(`${label}：${task.enabled ? (states[task.state] || '未知') : '已停用'}`
         + (task.matches_project ? '' : ' · 注意：任务指向其他位置')
-        + (task.enabled ? `\n下次运行：${task.next_run || '暂无固定时间'}` : '\n已停用，不会自动运行')
+        + (task.enabled ? `\n下次${nextScheduleAction(task)}：${task.next_run || '暂无固定时间'}（届时检查是否需要发送）` : '\n已停用，不会自动运行')
         + ` · 上次系统结果：${task.last_run ? task.last_result === 0 ? '运行完成（0）' : '返回码 ' + task.last_result : '尚未运行'}`);
     }
     const attempt = schedule.last_attempt || {};
@@ -73,7 +82,6 @@ $('#btnScheduleSet').onclick = async () => {
   const weekly = tasks.find(t => t.name === 'BUCT-Homework-Weekly');
   $('#scheduleTime').value = weekly?.schedule_time || '09:00';
   $('#scheduleDays').value = weekly?.days || 7;
-  $('#scheduleCatchup').checked = true;
   $('#scheduleEditStatus').textContent = '';
   $('#maskSchedule').classList.add('on');
 };
@@ -89,7 +97,7 @@ async function changeSchedule(action) {
   for (const id of ['scheduleSave','scheduleClose','btnScheduleSet','btnScheduleCancel']) $('#' + id).disabled = true;
   $('#scheduleEditStatus').textContent = $('#scheduleActionStatus').textContent = '正在保存；若弹出Windows权限确认，请允许本项目修改计划任务。';
   const result = await api('/api/schedule', {action, expected_revision:scheduleInfo.revision,
-    time, days, catchup:$('#scheduleCatchup').checked});
+    time, days, catchup:false});
   scheduleChanging = false;
   $('#scheduleSave').disabled = $('#scheduleClose').disabled = false;
   if (result.ok) {

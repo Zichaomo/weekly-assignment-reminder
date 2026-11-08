@@ -44,6 +44,7 @@ for _s in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(ROOT))
 import notify  # noqa: E402  复用 webhook 解析，避免「哪个群」有两套说法
+import task_notice
 
 TASK_LOG = ROOT / "task_log.jsonl"
 CONSOLE_LOG = ROOT / "task_run.log"
@@ -212,9 +213,26 @@ def main() -> int:
         cmd.append("--no-send")
     cmd += weekly_flags
     log_line("[task_run] 执行：" + " ".join(cmd))
-    r = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy(),
-                       capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    show_notice = not args.dry_run and args.channel != 'none' and cfg.get('task_local_notice', True)
+    if show_notice:
+        task_notice.launch('start')
+    try:
+        r = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy(),
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=1800)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        elapsed = time.time() - t0
+        if show_notice:
+            task_notice.launch('failure', elapsed)
+        log_line(f'[task_run] 执行未完成：{type(exc).__name__}，用时 {elapsed:.0f} 秒')
+        log_task(kind=args.kind, ok=False, exit_code=1, elapsed_sec=round(elapsed, 1),
+                 wecom=args.wecom, error=type(exc).__name__)
+        if not args.dry_run:
+            _alert('task-failed', '作业提醒定时任务未完成',
+                   '执行程序无法启动或已超过30分钟上限；请检查日志，部分消息可能已发送。')
+        return 1
+    if show_notice:
+        task_notice.launch('success' if r.returncode == 0 else 'failure', time.time() - t0)
     for stream in (r.stdout or "", r.stderr or ""):
         for line in stream.splitlines():
             log_line("  | " + line)

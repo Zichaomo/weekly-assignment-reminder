@@ -1,4 +1,6 @@
 import json
+import base64
+import re
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -43,6 +45,16 @@ class ScheduleControl(IsolatedCase):
         self.assertIn('$old[$name].xml',script)
         self.assertNotIn('.Run(',script)
         self.assertEqual(run.call_args.kwargs['timeout'],30)
+
+    def test_default_settings_keep_weekly_retry_without_extra_midnight_task(self):
+        with patch.object(control.os,'name','nt'),patch.object(control.subprocess,'run',return_value=SimpleNamespace(stdout='{"ok":true}')) as run:
+            self.assertTrue(control.change('set')['ok'])
+        script=base64.b64decode(run.call_args.args[0][-1]).decode('utf-16-le')
+        encoded=re.search(r"FromBase64String\('([^']+)'\)",script).group(1)
+        payload=json.loads(base64.b64decode(encoded).decode('utf-8'))
+        self.assertFalse(payload['catchup'])
+        self.assertIn('<Interval>PT30M</Interval>',payload['xml'][0])
+        self.assertIn('<StartWhenAvailable>true</StartWhenAvailable>',payload['xml'][0])
 
     def test_failed_mutation_reports_rollback_and_unknown_result_honestly(self):
         with patch.object(control.os,'name','nt'),patch.object(control.subprocess,'run',return_value=SimpleNamespace(stdout='{"ok":false,"rollback_ok":false}')):

@@ -285,7 +285,7 @@ td.title{white-space:normal!important}
       <div>每周日自动发布，按当前推送配置发送。</div>
       <div class="field"><label for="scheduleTime">发布时间</label><input id="scheduleTime" type="time" value="09:00"></div>
       <div class="field"><label for="scheduleDays">提醒未来多少天的作业</label><input id="scheduleDays" type="number" min="1" max="30" value="7"></div>
-      <label><input id="scheduleCatchup" type="checkbox" checked>开启错过后的补推检查</label>
+      <div class="blinfo">首次发布后的补推检查已包含在每周任务中，无需另设凌晨任务。</div>
       <div class="blinfo">保存仅设置以后的定时任务，不会立即发布。取消会同时停用每周提醒和补推检查，保留配置及历史记录。</div>
       <div id="scheduleEditStatus" role="status"></div>
     </div>
@@ -522,7 +522,7 @@ function runTask(op, params, label, onDone, opts) {
         const p = t.progress;
         $('#taskLabel').textContent = label + (p && p.total
           ? ` · 课程 ${Math.min(p.done + p.failed, p.total)}/${p.total}（完成 ${p.done}，失败 ${p.failed}）`
-          : '');
+          : '') + (t.status === 'queued' ? ' · 等待前序任务结束' : '');
         $('#connState').textContent = '';
       }
       if (op === 'fetch' && t.progress && Date.now() - state.lastProgressRefresh > 2000) {
@@ -1388,6 +1388,15 @@ function refreshContentTask(keys, force) {
 }
 function autoFillVisibleContent() {
   if (state.autoFilling) return;
+  // Snapshot only upcoming rows in the displayed window. Each key is attempted
+  // once in this pass, so failed bodies cannot starve later batches.
+  const now = new Date();
+  const end = new Date(now.getTime() + Math.max(1, +$('#numDays').value || 7) * 86400000);
+  const pending = state.platformRows.filter(r => r.kind !== 'test'
+    && r.item_key && new Date(String(r.deadline || '').replace(' ', 'T')) >= now
+    && new Date(String(r.deadline || '').replace(' ', 'T')) <= end
+    && (!r.content_ready || r.content_stale || r.content_error)).map(r => r.item_key);
+  if (!pending.length) return;
   state.autoFilling = true;
   state.autoFillRound = 0;
   const next = () => {
@@ -1397,8 +1406,9 @@ function autoFillVisibleContent() {
       return;
     }
     state.autoFillRound += 1;
-    log(`自动补齐正文第 ${state.autoFillRound} 批（每批最多 12 条，列表仍可操作）…`);
-    runTask('content', { force: false, limit: 12 }, '补齐窗口内正文', async res => {
+    const keys = pending.splice(0, 12);
+    log(`自动补齐当前列表正文第 ${state.autoFillRound} 批（${keys.length} 条，列表仍可操作）…`);
+    runTask('content', { item_keys: keys, force: false, limit: 12 }, '补齐窗口内正文', async res => {
       for (const it of (res.items || [])) if (it.item_key) await loadContentItem(it.item_key);
       await refreshList({ silent: true });
       if (res.network || (!res.ok && !res.failed)) {
@@ -1407,12 +1417,12 @@ function autoFillVisibleContent() {
         return;
       }
       if (res.failed) log(`本批 ${res.failed} 条失败，不会自动无限重试；可在行内手动「刷新正文」。`);
-      if (!res.remaining) {
+      if (!pending.length) {
         state.autoFilling = false;
         log('正文自动补齐完成：当前窗口内可补条目已处理。');
         return;
       }
-      log(`正文队列剩余 ${res.remaining} 条，继续下一批…`);
+      log(`当前列表正文队列剩余 ${pending.length} 条，继续下一批…`);
       setTimeout(next, 250);
     }, { globalBusy: false, inlineOnly: true });
   };

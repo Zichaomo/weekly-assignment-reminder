@@ -493,7 +493,8 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
         return fn(text, eff_cfg)
     import image_delivery
     inline = image_delivery.inline_markdown(text, images)
-    bundle = image_delivery.bundle_key(text, images)
+    # Partial-send receipts must track the actual layout/chunk boundaries too.
+    bundle = image_delivery.bundle_key(text, images, rendered=inline)
     target = dedup_target(channel, cfg, audience)
     window = int(cfg.get('dedup_window_sec', 300) or 0)
     completed = set()

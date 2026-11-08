@@ -45,6 +45,7 @@ class DailyWorkflows(IsolatedCase):
         self.stack.enter_context(patch.object(task_run, 'TASK_LOG', self.root / 'task.jsonl'))
         self.stack.enter_context(patch.object(task_run, 'CONSOLE_LOG', self.root / 'console.log'))
         self.stack.enter_context(patch.object(task_run, 'last_fetch_record', return_value={}))
+        self.notices = self.stack.enter_context(patch.object(task_run.task_notice, 'launch', return_value=True))
         self.stack.enter_context(patch.object(notify, 'load_config', return_value={}))
         self.stack.enter_context(patch.object(fetch_log, 'log_fetch'))
         self.send = self.stack.enter_context(patch.object(weekly, 'send_one', side_effect=AssertionError('delivery forbidden')))
@@ -65,6 +66,14 @@ class DailyWorkflows(IsolatedCase):
                             'submitted':True}], tests=[], homework_status='ok',
                 tests_status='ok', index_version=version)
         cache_store.update_scan('daily', status='complete', finished_at=time.time())
+        self.seed_contents()
+
+    def seed_contents(self):
+        for item in cache_store.load_items():
+            cache_store.save_content(item['item_key'], {
+                'status':'ready', 'source_version':'fixture-v1', 'source_hash':'fixture',
+                'blocks':[{'id':'p1','type':'paragraph','text':'习题：1-2。'}],
+                'text':'习题：1-2。', 'asset_ids':[], 'assets':[]})
 
     def run_weekly(self, *args):
         with patch.object(sys, 'argv', ['weekly.py', *args]), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -105,6 +114,34 @@ class DailyWorkflows(IsolatedCase):
              patch.object(weekly, 'ensure_login', return_value=False):
             self.assertEqual(self.run_weekly('--no-send'), 1)
         self.alert.assert_not_called(); self.send.assert_not_called()
+
+    def test_weekly_refreshes_stale_bodies_even_with_fresh_list(self):
+        with cache_store.connection(write=True) as con:
+            con.execute('UPDATE assignment_contents SET source_checked_at=1')
+        self.write_config({'content':{'batch_limit':1}})
+        def refresh(extra):
+            self.assertIn('--content-after-scan',extra)
+            self.assertEqual(extra[extra.index('--content-window-days')+1],'20')
+            self.assertEqual(extra[extra.index('--content-limit')+1],'0')
+            self.seed_contents()
+            return {'ok':True,'homeworks':[{'course':'必修课程','title':'任务1',
+                'deadline':(datetime.now()+timedelta(days=2)).strftime('%Y-%m-%d %H:%M')}]}
+        self.fetch.side_effect=refresh
+        with patch.object(weekly,'ensure_login',return_value=True):
+            self.assertEqual(self.run_weekly('--no-send','--days','20'),0)
+        self.fetch.assert_called_once()
+        for name in ('last_message.txt','last_message_personal.txt'):
+            self.assertIn('习题：1-2。',(self.root/name).read_text(encoding='utf-8'))
+        self.send.assert_not_called(); self.alert.assert_not_called()
+
+    def test_weekly_cold_scan_requests_body_fill_without_sending(self):
+        self.fetch.side_effect=None
+        self.fetch.return_value={'ok':True,'homeworks':[]}
+        with patch.object(weekly,'load_fresh_publish_cache',return_value=(None,{})), \
+             patch.object(weekly,'ensure_login',return_value=True):
+            self.assertEqual(self.run_weekly('--no-send'),0)
+        self.assertIn('--content-after-scan',self.fetch.call_args.args[0])
+        self.fetch.assert_called_once(); self.send.assert_not_called(); self.alert.assert_not_called()
 
     def test_manual_fetch_renews_expired_login_once_then_retries(self):
         self.fetch.side_effect=[weekly.AuthenticationRequired('expired'),{'ok':True,'homeworks':[]}]
@@ -270,6 +307,20 @@ class DailyWorkflows(IsolatedCase):
              (None,{'publish_block_reasons':['缓存已过期']})]):
             self.assertEqual(self.run_weekly(),2)
         self.send.assert_not_called()
+
+    def test_task_notices_wrap_actual_execution_and_skip_dry_run(self):
+        for dry_run, code in ((False,0),(False,1),(True,0)):
+            self.notices.reset_mock()
+            args=['task_run.py','--force']+(['--dry-run'] if dry_run else [])
+            with patch.object(notify,'resolve_webhook',return_value=('https://unit.invalid/group','fixture')), patch.object(task_run.subprocess,'run',return_value=SimpleNamespace(returncode=code,stdout='',stderr='')), patch.object(task_run,'_alert'), patch.object(sys,'argv',args), redirect_stdout(io.StringIO()):
+                self.assertEqual(task_run.main(),code)
+            kinds=[call.args[0] for call in self.notices.call_args_list]
+            self.assertEqual(kinds,[] if dry_run else ['start','success' if code==0 else 'failure'])
+
+    def test_task_launch_failure_notifies_and_returns_failure(self):
+        with patch.object(notify,'resolve_webhook',return_value=('https://unit.invalid/group','fixture')), patch.object(task_run.subprocess,'run',side_effect=OSError('fixture')), patch.object(task_run,'_alert'), patch.object(sys,'argv',['task_run.py','--force']), redirect_stdout(io.StringIO()):
+            self.assertEqual(task_run.main(),1)
+        self.assertEqual([call.args[0] for call in self.notices.call_args_list],['start','failure'])
 
     def test_scheduled_already_pushed_skips_weekly(self):
         with patch.object(task_run,'push_status_today',return_value={'class':True,'personal':True,'personal_enabled':True}), \
