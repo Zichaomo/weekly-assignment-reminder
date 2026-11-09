@@ -1,0 +1,48 @@
+const {spawn}=require('child_process');
+const fs=require('fs'),path=require('path'),assert=require('assert/strict'),os=require('os');
+const {chromium}=require(process.env.PLAYWRIGHT_PATH||'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js');
+let child,browser,timer;
+const output=path.join(__dirname,'artifacts','run-history');
+async function main(){
+  fs.mkdirSync(output,{recursive:true});
+  timer=setTimeout(()=>{child?.kill();browser?.close();process.exitCode=1;},60000);
+  child=spawn(process.env.PYTHON||path.join(os.homedir(),'.workbuddy/binaries/python/envs/default/Scripts/python.exe'),['-B',path.join(__dirname,'browser_fixture_server.py')],{cwd:path.resolve(__dirname,'..'),env:{...process.env,PYTHONIOENCODING:'utf-8',HOMEWORK_RUN_HISTORY_FIXTURE:'1'},windowsHide:true});
+  let stderr='';child.stderr.on('data',b=>stderr+=b);
+  const info=await new Promise((resolve,reject)=>{let data='';const wait=setTimeout(()=>reject(Error('fixture timeout '+stderr)),10000);child.stdout.on('data',b=>{data+=b;const line=data.split(/\r?\n/).find(x=>x.startsWith('{'));if(line){clearTimeout(wait);resolve(JSON.parse(line));}});child.on('exit',()=>reject(Error(stderr)));});
+  const base='http://127.0.0.1:'+info.port;
+  browser=await chromium.launch({channel:'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1280,height:800}});
+  const external=[],errors=[];
+  await context.route('**/*',route=>{if(new URL(route.request().url()).origin!==base){external.push(true);return route.abort();}return route.continue();});
+  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(5000);
+  const open=async()=>{await page.locator('#menuBtn').click();await page.locator('#openLogs').click();await page.waitForSelector('#dlgLogs[open]');};
+  await page.goto(base);await page.waitForSelector('#list .item');await open();
+  await page.waitForFunction(()=>document.querySelector('#runHistory')?.textContent.includes('历史课程加载超时'));
+  assert((await page.locator('#runActive').innerText()).includes('获取正文'));
+  assert((await page.locator('#runActive').innerText()).includes('运行中'));
+  assert((await page.locator('#runHistory').innerText()).includes('检索北化在线'));
+  assert((await page.locator('[data-run="fixture-old-full"]').innerText()).includes('已完成 10/10 门课程'));
+  assert((await page.locator('[data-run="fixture-old-partial"]').innerText()).includes('已完成 6/10 门课程，失败 3 门'));
+  await page.waitForFunction(()=>getComputedStyle(document.querySelector('#dlgLogs')).opacity==='1');
+  await page.screenshot({path:path.join(output,'desktop.png')});
+  await page.reload();await page.waitForSelector('#list .item');await open();
+  await page.waitForFunction(()=>document.querySelector('#runHistory').textContent.includes('历史课程加载超时'));
+  assert((await page.locator('[data-run="fixture-old-full"]').innerText()).includes('已完成 10/10 门课程'));
+  assert((await page.locator('[data-run="fixture-old-partial"]').innerText()).includes('已完成 6/10 门课程，失败 3 门'));
+  await page.route('**/api/runs?*',async route=>{
+    const result=await route.fetch();const data=await result.json();
+    data.active[0].events=[{at:Date.now()/1000,message:'正在读取下一门课程 <script>unsafe</script>'}];
+    return route.fulfill({json:data});
+  });
+  await page.waitForFunction(()=>document.querySelector('#runActive').textContent.includes('正在读取下一门课程'));
+  assert.equal(await page.locator('#runActive script').count(),0);
+  await page.setViewportSize({width:900,height:640});
+  const box=await page.locator('#dlgLogs').boundingBox();
+  assert(box.x>=0&&box.y>=0&&box.x+box.width<=900&&box.y+box.height<=640);
+  assert(await page.locator('#logsClose').isVisible());
+  await page.screenshot({path:path.join(output,'compact.png')});
+  await page.locator('#logsClose').click();assert.equal(await page.locator('#dlgLogs').evaluate(d=>d.open),false);
+  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
+  console.log('Run history browser acceptance passed. External requests 0.');
+}
+main().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{clearTimeout(timer);await browser?.close();child?.kill();});

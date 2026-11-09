@@ -45,6 +45,7 @@ import weekly
 import notify
 import fetch_log
 import cache_store
+import run_history
 import content_pipeline
 from platform_lock import FetchLock, LockTimeout
 
@@ -97,6 +98,7 @@ def build_rows(platform_hw: list, manual_items: list, days: int,
             "hwtid": hw.get("hwtid"),
             "test_id": hw.get("test_id"),
             "submit_state": hw.get("submit_state"),
+            "submitted": hw.get("submitted"),
             "content_url": hw.get("content_url"),
             "submit_url": hw.get("submit_url"),
             "result_url": hw.get("result_url"),
@@ -189,6 +191,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
             try:
                 data = weekly.fetch(extra or None)
             except weekly.AuthenticationRequired:
+                run_history.emit('登录状态已过期，正在自动续登')
                 print('登录状态已过期，尝试自动续登一次…')
                 # login.py owns the shared platform lock itself. Holding it
                 # here while waiting on that subprocess would deadlock.
@@ -303,6 +306,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
 def run_refresh_courses():
     """刷新本地课程索引（我的课程总表 -> courses.json）。"""
     import scrape
+    run_history.emit('等待平台访问锁，准备刷新课程表')
     try:
         with FetchLock(wait_sec=120):
             with scrape.sync_playwright() as p:
@@ -318,7 +322,9 @@ def run_refresh_courses():
                         cache_store.invalidate_scope_scans(str(exc))
                         return {"ok": False, "error": str(exc)}
                     try:
+                        run_history.emit('正在读取平台全部课程')
                         index = scrape.collect_all_courses(page)
+                        run_history.emit(f'课程表读取完成，共 {len(index)} 门课程')
                     except Exception as e:  # noqa: BLE001
                         return {"ok": False, "error": f"拉取课程总表失败：{e}"}
                 finally:
@@ -851,6 +857,7 @@ def run_content(hwtid: str = "", item_keys=None, hwtids=None, force: bool = Fals
                 "hwtid": item.get("hwtid"), "title": item.get("title")}
 
     results = [cached_result(x) for x in fresh]
+    run_history.emit(f'正文任务共 {len(selected)} 条，复用缓存 {len(fresh)} 条，待获取 {len(batch)} 条')
     error = None
     if batch:
         try:
@@ -876,8 +883,10 @@ def run_content(hwtid: str = "", item_keys=None, hwtids=None, force: bool = Fals
                                     "cached": len(fresh), "failed": len(batch),
                                     "ok_count": 0, "remaining": remaining,
                                     "error": str(exc), "items": results}
-                        for item in batch:
+                        for number, item in enumerate(batch, 1):
+                            run_history.emit(f'正在获取正文 {number}/{len(batch)} · {item.get("course", "")} · {item.get("title", "")}')
                             res = scrape.fetch_content_for_item(ctx, item, force=force)
+                            run_history.emit('正文已获取' if res.get('ok') else '正文获取失败 · '+str(res.get('error') or '请重试'))
                             results.append({"item_key": item["item_key"],
                                             "hwtid": item.get("hwtid"),
                                             "title": item.get("title"), **res})

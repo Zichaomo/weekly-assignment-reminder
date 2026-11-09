@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>每周作业提醒</title>
+<base href="/ui/" />
+<script src="./js/icons.js"></script>
+<link rel="stylesheet" href="./css/app.css" />
+<link rel="stylesheet" href="./css/panels.css" />
+<link rel="stylesheet" href="./css/connected.css" />
+</head>
+<body>
+<div class="scene" aria-hidden="true">
+  <div class="arch"></div><div class="rays"></div>
+  <div class="leaf a"></div><div class="leaf b"></div><div class="leaf c"></div>
+  <div class="grain"></div>
+</div>
+
+<div class="stage">
+  <div class="window" role="application" aria-label="每周作业提醒">
+    <header class="titlebar">
+      <div class="brand"><span class="mark"><i data-lucide="bell-ring"></i></span>每周作业提醒</div>
+      <div class="status">
+        <span id="cacheStatus">正在读取本地缓存…</span>
+        <span class="hide-sm" id="scheduleStatus">正在读取定时状态…</span>
+      </div>
+      <div class="tb-spacer"></div>
+      <div class="anchor">
+        <button class="menu-btn" id="menuBtn" aria-haspopup="menu" aria-expanded="false"><i data-lucide="settings-2"></i>管理<i data-lucide="chevron-down"></i></button>
+        <div class="pop menu" id="menu" role="menu">
+          <button role="menuitem" id="openCourses"><i data-lucide="library"></i>课程管理</button>
+          <button role="menuitem" id="btnBlCourse" hidden>规则入口锚点</button>
+          <button role="menuitem" id="openSystem"><i data-lucide="alarm-clock"></i>定时发布</button>
+          <button role="menuitem" id="openBackend"><i data-lucide="server"></i>后台版本</button>
+          <button role="menuitem" id="openLogs"><i data-lucide="history"></i>运行记录</button>
+          <hr />
+          <button role="menuitem" id="exportViews">导出裁剪备份</button>
+          <button role="menuitem" id="shutdown">停止控制台服务</button>
+        </div>
+      </div>
+      <div class="winctl" aria-hidden="true">
+        <span><i data-lucide="minus"></i></span><span><i data-lucide="square"></i></span><span><i data-lucide="x"></i></span>
+      </div>
+    </header>
+
+    <div class="body">
+      <!-- 作业清单 -->
+      <section class="list-pane" aria-labelledby="listTitle">
+        <div class="pane-head">
+          <div class="row"><h1 id="listTitle">近期作业</h1><span class="today" id="today"></span></div>
+          <div class="stats" id="stats"></div>
+        </div>
+        <div class="filters">
+          <label class="search"><span class="sr-only">搜索课程或作业</span><i data-lucide="search"></i>
+            <input id="q" type="search" placeholder="搜索课程或作业" autocomplete="off" /></label>
+          <div class="chips">
+            <span class="chip days-chip" aria-pressed="true"><i data-lucide="calendar-range"></i><label>未来<input id="numDays" type="number" min="1" max="30" value="7" aria-label="未来天数" />天</label></span>
+            <label class="chip toggle" aria-pressed="false"><input id="chkAll" type="checkbox" role="switch" /><span class="sw" aria-hidden="true"></span>显示已过期</label>
+            <label class="chip toggle" aria-pressed="true"><input id="chkTests" type="checkbox" role="switch" checked /><span class="sw" aria-hidden="true"></span>抓在线测试</label>
+          </div>
+        </div>
+        <div class="list" id="list" role="listbox" aria-label="作业列表"></div>
+        <div class="coverage" id="coverage"></div>
+        <div class="list-foot" id="listFoot"></div>
+      </section>
+
+      <!-- 详情 -->
+      <section class="detail-pane" aria-label="作业详情">
+        <div class="actionbar">
+          <span class="crumb">作业详情</span>
+          <button class="btn ghost" id="fetchBtn"><i data-lucide="refresh-cw"></i>检索北化在线</button>
+          <button class="btn line" id="addBtn"><i data-lucide="plus"></i>添加作业</button>
+          <div class="anchor">
+            <button class="btn solid" id="pvBtn" aria-haspopup="dialog" aria-expanded="false"><i data-lucide="send"></i>预览提醒</button>
+            <div class="pop preview" id="preview" role="dialog" aria-label="提醒预览">
+              <div class="pv-head">
+                <div><h3>提醒预览</h3><p>发布前确认将要发送到群里的内容</p></div>
+                <button class="x" id="pvClose" aria-label="关闭预览"><i data-lucide="x"></i></button>
+              </div>
+              <div class="seg" id="seg" data-v="class" role="tablist">
+                <span class="thumb"></span>
+                <button role="tab" aria-selected="true" data-v="class">班级提醒 <b></b></button>
+                <button role="tab" aria-selected="false" data-v="personal">个人提醒 <b></b></button>
+              </div>
+              <div class="pv-meta" id="pvMeta"></div>
+              <p class="pv-warning" id="previewNotice" role="status">仅本地预览</p>
+              <div class="pv-body"><div class="bubble" id="bubble"></div></div>
+              <div class="pv-foot">
+                <span class="next" id="previewNext"></span>
+                <button class="btn ghost" id="copyBtn"><i data-lucide="copy"></i>复制</button>
+                <button class="btn solid" id="publish"><i data-lucide="send-horizontal"></i>提前发布</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="task-status" id="taskStatus" role="status" hidden></div>
+        <div class="detail" id="detail"></div>
+        <div class="detail-foot">
+          <span class="note" id="footNote"></span>
+          <button class="btn ghost" data-for="platform" id="openPlatform"><i data-lucide="external-link"></i>在北化在线打开</button>
+          <button class="btn line" data-for="platform" id="refreshContent"><i data-lucide="rotate-cw"></i>刷新正文</button>
+          <button class="btn ghost" data-for="platform" id="retryCourse">重试本课</button>
+          <button class="btn ghost danger" data-for="manual" id="delBtn" hidden><i data-lucide="trash-2"></i>删除</button>
+          <button class="btn line" data-for="manual" id="editBtn" hidden><i data-lucide="pencil-line"></i>编辑</button>
+          <button class="btn line" data-for="manual" id="doneBtn" hidden><i data-lucide="circle-check"></i>标记完成</button>
+          <button class="btn solid" id="reviewBtn"><i data-lucide="check"></i>确认推送内容</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- 课程管理 -->
+<dialog class="dlg dlg-courses" id="dlgCourses" aria-labelledby="cmTitle">
+  <header class="dlg-head">
+    <div><h3 id="cmTitle">课程管理</h3><p>决定哪些课程被抓取、推送到哪里</p></div>
+    <button class="x" data-close aria-label="关闭课程管理"><i data-lucide="x"></i></button>
+  </header>
+  <div class="tabs" id="cmTabs" role="tablist" data-i="0">
+    <span class="thumb"></span>
+    <button role="tab" data-tab="course"><i data-lucide="ban"></i>课程黑名单<b></b></button>
+    <button role="tab" data-tab="quiz"><i data-lucide="file-x-2"></i>测试黑名单<b></b></button>
+    <button role="tab" data-tab="elective"><i data-lucide="user-round"></i>选修课名单<b></b></button>
+  </div>
+  <div class="cm-body" role="tabpanel" aria-labelledby="cmTitle">
+    <p class="cm-desc" id="cmDesc"></p>
+    <div class="cm-tools">
+      <label class="search"><span class="sr-only">搜索课程</span><i data-lucide="search"></i>
+        <input id="cmQ" type="search" autofocus placeholder="搜索课程名称或编号" autocomplete="off" /></label>
+      <button class="btn line" id="refreshCourses"><i data-lucide="refresh-cw"></i>刷新课程表</button>
+    </div>
+    <form class="cm-add" id="cmAdd" hidden>
+      <label for="cmAddInput">按编号或名称添加</label>
+      <input id="cmAddInput" placeholder="例如 CST30815 或 课程名称" autocomplete="off" />
+      <button class="btn line" type="submit"><i data-lucide="plus"></i>添加</button>
+    </form>
+    <div class="cm-cols">
+      <section class="cm-col" aria-labelledby="cmAvailH">
+        <div class="cm-col-h" id="cmAvailH">可选课程<b class="num" id="cmAvailN"></b></div>
+        <ul class="cm-rows" id="cmAvail"></ul>
+      </section>
+      <section class="cm-col joined" aria-labelledby="cmJoinedH">
+        <div class="cm-col-h" id="cmJoinedH">已加入<b class="num" id="cmJoinedN"></b></div>
+        <ul class="cm-rows" id="cmJoined"></ul>
+      </section>
+    </div>
+  </div>
+  <footer class="dlg-foot">
+    <span class="note" id="cmEffect">抓取范围在下次检索生效；选修受众在后续预览和发布生效。</span>
+    <button class="btn solid" data-close>完成</button>
+  </footer>
+</dialog>
+
+<!-- 添加 / 编辑作业 -->
+<dialog class="dlg dlg-form" id="dlgForm" aria-labelledby="fmTitle">
+  <form id="hwForm" novalidate>
+    <header class="dlg-head">
+      <div><h3 id="fmTitle">添加作业</h3><p id="fmSub">补录群消息、课堂口头布置等平台上没有的作业</p></div>
+      <button class="x" type="button" data-close aria-label="关闭表单"><i data-lucide="x"></i></button>
+    </header>
+    <div class="fm-body">
+      <div class="field">
+        <label for="fCourse">科目</label>
+        <input id="fCourse" name="course" list="courseOptions" placeholder="输入科目，也可选择平台课程" /><datalist id="courseOptions"></datalist>
+      </div>
+      <div class="field">
+        <label for="fTitle">标题</label>
+        <input id="fTitle" name="title" placeholder="例如 单元练习" autocomplete="off" />
+      </div>
+      <div class="field">
+        <span class="lbl" id="fDueL">截止日期时间</span>
+        <div class="pair" role="group" aria-labelledby="fDueL">
+          <div class="date-field">
+            <input id="fDate" name="date" type="text" placeholder="yyyy/mm/dd" autocomplete="off" aria-label="截止日期" />
+            <button class="date-picker-button" id="fDateChoose" type="button" aria-label="选择截止日期"><i data-lucide="calendar-range"></i></button>
+            <input id="fDatePicker" type="date" class="native-date-picker" tabindex="-1" aria-hidden="true" />
+          </div>
+          <input id="fTime" name="time" type="time" aria-label="截止时间" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="fNote">备注 <em>选填</em></label>
+        <textarea id="fNote" name="note" rows="3" placeholder="要求、提交方式、消息来源等"></textarea>
+      </div>
+      <p class="fm-hint"><i data-lucide="info"></i>手动作业不会同步到北化在线，只进入提醒。</p>
+    </div>
+    <footer class="dlg-foot">
+      <span class="note"></span>
+      <button class="btn ghost" type="button" data-close>取消</button>
+      <button class="btn solid" type="submit"><i data-lucide="check"></i>保存</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- 图片查看 -->
+<dialog class="dlg dlg-view" id="dlgView" aria-labelledby="vwTitle">
+  <header class="dlg-head">
+    <div><h3 id="vwTitle">作业图片</h3><p id="viewMeta"></p></div>
+    <button class="x" data-close aria-label="关闭图片"><i data-lucide="x"></i></button>
+  </header>
+  <div class="vw-stage"><img id="viewImage" alt="作业原图" /></div>
+  <footer class="dlg-foot">
+    <span class="note" id="viewNote"></span>
+    <button class="btn line" id="viewCrop"><i data-lucide="crop"></i>裁剪图片</button>
+  </footer>
+</dialog>
+
+<!-- 裁剪 -->
+<dialog class="dlg dlg-crop" id="dlgCrop" aria-labelledby="crTitle">
+  <header class="dlg-head">
+    <div><h3 id="crTitle">裁剪图片</h3><p>框选需要发到群里的区域</p></div>
+    <button class="x" data-close aria-label="关闭裁剪"><i data-lucide="x"></i></button>
+  </header>
+  <div class="cr-stage">
+    <img id="cropImage" alt="待裁剪的作业原图" draggable="false" />
+    <div class="cr-rect" aria-hidden="true">
+      <i class="h tl" data-handle="tl"></i><i class="h tr" data-handle="tr"></i><i class="h bl" data-handle="bl"></i><i class="h br" data-handle="br"></i>
+    </div>
+  </div>
+  <div class="cr-info">
+    <span id="cropSize"></span><span id="cropOriginalSize"></span>
+  </div>
+  <div class="cr-tools"><label>区域 <select id="cropRegion" aria-label="当前裁剪区域"></select></label><button class="btn line" id="cropAdd">添加区域</button><button class="btn ghost" id="cropRemove">删除区域</button><button class="btn line" id="cropReset">恢复本图原图</button><span id="cropStatus" role="status"></span></div>
+  <footer class="dlg-foot">
+    <span class="note"><i data-lucide="info"></i>保存后，后续群提醒将使用裁剪结果。</span>
+    <button class="btn ghost" data-close>取消</button>
+    <button class="btn solid" id="cropSave"><i data-lucide="crop"></i>保存裁剪</button>
+  </footer>
+</dialog>
+
+<!-- 通用确认 -->
+<dialog class="dlg dlg-confirm" id="dlgConfirm" aria-labelledby="cfTitle" aria-describedby="cfBody">
+  <div class="cf-main">
+    <span class="cf-icon" id="cfIcon"></span>
+    <div><h3 id="cfTitle"></h3><p id="cfBody"></p></div>
+  </div>
+  <footer class="dlg-foot">
+    <button class="btn ghost" data-close>取消</button>
+    <button class="btn solid" id="cfOk"></button>
+  </footer>
+</dialog>
+
+<div class="toast" id="toast" popover="manual" role="status" aria-live="polite"><i data-lucide="info"></i><span></span></div>
+
+<script src="./js/app.js"></script>
+<script src="./js/panels.js"></script>
+<script src="./js/management.js"></script>
+<script src="./js/run_history.js"></script>
+<script src="/system_panel.js"></script>
+<script src="/course_rules.js"></script>
+</body>
+</html>

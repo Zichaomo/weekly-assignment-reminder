@@ -47,12 +47,13 @@ import console_runtime
 import schedule_status
 import schedule_control
 import course_rules
+import run_history
 
 LIFECYCLE_LOCK = threading.RLock()
 _RESTARTING = False
 
 PORT = int(os.environ.get("HOMEWORK_CONSOLE_PORT", "8277"))
-PAGE_FILE = ROOT / "console.html"
+PAGE_FILE = ROOT / "ui" / "index.html"
 
 # Playwright 会话不能并发（共享 storage_state / 课程上下文），长任务串行执行
 EXEC = ThreadPoolExecutor(max_workers=1)
@@ -251,17 +252,21 @@ def _task_status(result):
 
 
 def _task_worker(task_id, op, params):
+    token = run_history.current_task.set(task_id)
     try:
         with TASKS_LOCK:
             if task_id in TASKS:
                 TASKS[task_id]["status"] = "running"
         cache_store.update_task(task_id, "running",
                                 scan_id=(task_id if op == "fetch" else None))
+        run_history.emit('开始执行')
         result = run_task(op, params)
         status = _task_status(result)
         error = (result.get("error") if isinstance(result, dict) else None)
     except Exception as e:  # noqa: BLE001
         result, status, error = None, "error", f"{type(e).__name__}: {e}"
+    run_history.emit(error or {'done':'执行完成','partial':'部分完成，请查看结果','error':'执行失败'}.get(status, status))
+    run_history.current_task.reset(token)
     scan_id = None
     if isinstance(result, dict):
         scan_id = result.get("scan_id")
@@ -269,7 +274,12 @@ def _task_worker(task_id, op, params):
             scan_id = ((result.get("coverage") or {}).get("scan") or {}).get("scan_id")
     try:
         cache_store.update_task(task_id, status,
-                                result_summary={"scan_id": scan_id, "status": status},
+                                result_summary={"scan_id": scan_id, "status": status,
+                                    "error": run_history.redact(error),
+                                    **{key: result[key] for key in (
+                                        'elapsed_sec', 'timing', 'platform_count', 'manual_count',
+                                        'requested', 'updated', 'failed', 'sent', 'deduped')
+                                       if isinstance(result, dict) and key in result}},
                                 scan_id=scan_id)
     except Exception:  # noqa: BLE001
         pass
@@ -310,6 +320,66 @@ def runtime_busy():
             return True
     with cache_store.connection() as con:
         return bool(con.execute("SELECT 1 FROM task_registry WHERE status IN ('queued','running') LIMIT 1").fetchone())
+
+
+def run_history_snapshot(limit=50, before=None):
+    cache_store.recover_orphan_tasks()
+    limit = max(1, min(100, int(limit)))
+    prefix = cache_store.account_scope() + '|'
+    scope_sql = 'substr(signature,1,?)=?'
+    args = [len(prefix), prefix]
+    cursor_sql, cursor_args = '', []
+    if before:
+        try:
+            stamp, task_id = before.split('|', 1)
+            cursor_sql = ' AND (created_at,task_id)<(?,?)'
+            cursor_args = [float(stamp), task_id]
+        except (ValueError, AttributeError):
+            raise ValueError('运行记录游标无效')
+    with cache_store.connection() as con:
+        active = con.execute(
+            f"SELECT * FROM task_registry WHERE {scope_sql} AND status IN ('queued','running') ORDER BY created_at,task_id",
+            args).fetchall()
+        history = con.execute(
+            f"SELECT * FROM task_registry WHERE {scope_sql} AND status NOT IN ('queued','running'){cursor_sql} ORDER BY created_at DESC,task_id DESC LIMIT ?",
+            [*args, *cursor_args, limit+1]).fetchall()
+
+    def public(row):
+        try:
+            summary = json.loads(row['result_summary'] or '{}')
+        except ValueError:
+            summary = {'error': '执行进程已退出，任务中断'}
+        allowed = ('error','elapsed_sec','timing','platform_count','manual_count',
+                   'requested','updated','failed','sent','deduped')
+        summary = {key: summary[key] for key in allowed if isinstance(summary, dict) and key in summary}
+        if 'error' in summary:
+            summary['error'] = run_history.redact(summary['error'])
+        return {'task_id': row['task_id'], 'op': row['op'], 'status': row['status'],
+                'created_at': row['created_at'], 'started_at': row['started_at'],
+                'finished_at': row['finished_at'],
+                'elapsed_sec': round(max(0, (row['finished_at'] or time.time())-(row['started_at'] or row['created_at'])), 1),
+                'queue_sec': round(max(0, (row['started_at'] or row['finished_at'] or time.time())-row['created_at']), 1),
+                'summary': summary, 'events': run_history.events(row['task_id']),
+                'progress': cache_store.scan_progress(row['scan_id']) if row['scan_id'] else None}
+
+    cursor = None
+    if len(history) > limit:
+        last = history[limit-1]
+        cursor = f"{last['created_at']}|{last['task_id']}"
+    return {'ok': True, 'active': [public(row) for row in active],
+            'history': [public(row) for row in history[:limit]], 'next_cursor': cursor}
+
+
+def record_operation(op, started, result):
+    task_id = uuid.uuid4().hex[:12]
+    signature = f'{cache_store.account_scope()}|{op}|{task_id}'
+    cache_store.register_task(task_id, signature, op, {})
+    cache_store.update_task(task_id, 'running')
+    status = 'done' if result.get('ok', True) else 'error'
+    error = (result.get('error') or result.get('output')) if status == 'error' else ''
+    cache_store.update_task(task_id, status, result_summary={
+        'error': run_history.redact(error),
+        'elapsed_sec': round(time.time()-started, 3)})
 
 
 def task_progress(task: dict) -> dict | None:
@@ -368,6 +438,14 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 响应辅助
     def _send(self, code, body, mime="application/json; charset=utf-8", raw=None,
               headers=None):
+        operation = getattr(self, 'activity_op', None)
+        if operation and isinstance(body, dict):
+            self.activity_op = None
+            try:
+                record_operation(operation, self.activity_started,
+                                 {**body, 'ok': code < 400 and body.get('ok', True)})
+            except Exception:
+                pass
         if raw is not None:
             data = raw
         else:
@@ -432,6 +510,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"ok": False, "error": "console.html 不存在"})
             return self._send(200, None, "text/html; charset=utf-8",
                               raw=PAGE_FILE.read_bytes())
+
+        if path == '/legacy':
+            return self._send(200, None, 'text/html; charset=utf-8', raw=(ROOT/'console.html').read_bytes())
+        if path.startswith('/ui/'):
+            relative = unquote(path[len('/ui/'):])
+            fp = (ROOT / 'ui' / relative).resolve()
+            try:
+                fp.relative_to((ROOT / 'ui').resolve())
+            except ValueError:
+                return self._send(404, {'ok':False,'error':'not found'})
+            mime = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8',
+                    '.css':'text/css; charset=utf-8'}.get(fp.suffix)
+            if not mime or not fp.is_file():
+                return self._send(404, {'ok':False,'error':'not found'})
+            return self._send(200, None, mime, raw=fp.read_bytes())
 
         if path.startswith("/fonts/"):
             key = path.rsplit("/", 1)[-1]
@@ -543,6 +636,13 @@ class Handler(BaseHTTPRequestHandler):
                 res = hub.run_elective_list()
             return self._send(200, res)
 
+        if path == '/api/runs':
+            try:
+                result = run_history_snapshot(q.get('limit', ['50'])[0], q.get('before', [None])[0])
+            except ValueError as exc:
+                return self._send(400, {'ok': False, 'error': str(exc)})
+            return self._send(200, result)
+
         if path.startswith("/api/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             with TASKS_LOCK:
@@ -581,6 +681,13 @@ class Handler(BaseHTTPRequestHandler):
         global _RESTARTING
         u = urlparse(self.path)
         p = self._body()
+        operations = {'/api/manual':'手动作业', '/api/blacklist':'课程名单',
+                      '/api/course-rules':'课程正文规则', '/api/schedule':'定时设置',
+                      '/api/runtime/update':'更新后台', '/api/shutdown':'停止后台'}
+        self.activity_op = operations.get(u.path)
+        if u.path.startswith('/api/assignments/'):
+            self.activity_op = {'review':'正文确认', 'view':'保存裁剪'}.get(u.path.rsplit('/', 1)[-1])
+        self.activity_started = time.time()
 
         if u.path == '/api/course-rules/preview':
             return self._send(200, {'ok': True, **course_rules.preview(p)})
@@ -657,7 +764,8 @@ class Handler(BaseHTTPRequestHandler):
                     regions=p.get("regions") or [],
                     folded_block_ids=p.get("folded_block_ids") or [],
                     summary=str(p.get("summary") or ""),
-                    review_status=str(p.get("review_status") or "ok"))
+                    review_status=str(p.get("review_status") or "ok"),
+                    expected_view_revision=p.get('expected_view_revision'))
             except cache_store.VersionConflict as exc:
                 return self._send(409, {"ok": False, "error": str(exc),
                                         "code": "version_conflict"})

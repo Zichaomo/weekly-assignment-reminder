@@ -373,12 +373,13 @@ class ContentSelectionAndViewTests(IsolatedCase):
     def test_crop_save_validates_version_asset_and_geometry(self):
         item = self.seed_many(1)[0]
         key = item["item_key"]
-        asset_id = "a" * 64
+        asset = self.image_asset()
+        asset_id = asset['asset_id']
         saved = cache_store.save_content(key, {
             "status": "ready", "source_url": "https://course.buct.edu.cn/x",
             "source_hash": "h1", "source_version": "v1",
             "blocks": [{"id": "p1", "type": "paragraph", "text": "x"}],
-            "asset_ids": [asset_id], "assets": [], "text": "x"}, scope=self.scope)
+            "asset_ids": [asset_id], "assets": [asset], "text": "x"}, scope=self.scope)
         self.assertEqual(saved["source_version"], "v1")
         with self.assertRaises(cache_store.VersionConflict):
             cache_store.save_view(key, expected_version="old", regions=[])

@@ -1,7 +1,7 @@
 /* Local backend reload and read-only scheduled task status. */
 let backendInfo = null, backendUpdating = false, systemRefreshing = false;
 let scheduleInfo = null, scheduleChanging = false;
-const updateDraftFields = ['addC','addT','addD','addN','numDays','chkAll','chkTests'];
+const updateDraftFields = ['addC','addT','addD','addN','fCourse','fTitle','fDate','fTime','fNote','numDays','chkAll','chkTests'];
 function nextScheduleAction(task) {
   if (task.name !== 'BUCT-Homework-Weekly') return '补推检查';
   if (!task.schedule_time || !task.next_run) return '定时检查';
@@ -12,6 +12,7 @@ try {
   if (draft) for (const id of updateDraftFields) {
     if (!(id in draft)) continue;
     const el = $('#' + id);
+    if (!el) continue;
     if (el.type === 'checkbox') el.checked = draft[id]; else el.value = draft[id];
   }
   sessionStorage.removeItem('homeworkUpdateDraft');
@@ -68,6 +69,7 @@ async function refreshSystemStatus(force = false) {
     $('#scheduleText').textContent = $('#scheduleSummary').textContent = '定时任务状态暂时无法读取，请刷新状态。';
     $('#btnScheduleSet').disabled = $('#btnScheduleCancel').disabled = true;
   }
+  document.dispatchEvent(new CustomEvent('homework:schedule', { detail: schedule }));
   systemRefreshing = false;
 }
 $('#btnSystemRefresh').onclick = () => refreshSystemStatus(true);
@@ -75,6 +77,14 @@ $('#scheduleDetails').ontoggle = () => {
   $('#scheduleDetails summary').textContent = $('#scheduleDetails').open ? '收起定时状态' : '展开定时状态';
 };
 $('#btnBackendRefresh').onclick = () => refreshSystemStatus();
+function setScheduleEditor(open) {
+  const editor = $('#maskSchedule');
+  editor.classList.toggle('on', open);
+  if (editor instanceof HTMLDialogElement) {
+    if (open && !editor.open) editor.showModal();
+    if (!open && editor.open) editor.close();
+  }
+}
 $('#btnScheduleSet').onclick = async () => {
   await refreshSystemStatus(true);
   if (!scheduleInfo?.available) return;
@@ -83,9 +93,9 @@ $('#btnScheduleSet').onclick = async () => {
   $('#scheduleTime').value = weekly?.schedule_time || '09:00';
   $('#scheduleDays').value = weekly?.days || 7;
   $('#scheduleEditStatus').textContent = '';
-  $('#maskSchedule').classList.add('on');
+  setScheduleEditor(true);
 };
-$('#scheduleClose').onclick = () => { if (!scheduleChanging) $('#maskSchedule').classList.remove('on'); };
+$('#scheduleClose').onclick = () => { if (!scheduleChanging) setScheduleEditor(false); };
 async function changeSchedule(action) {
   if (!scheduleInfo?.available || scheduleChanging) return;
   const time = $('#scheduleTime').value;
@@ -101,7 +111,7 @@ async function changeSchedule(action) {
   scheduleChanging = false;
   $('#scheduleSave').disabled = $('#scheduleClose').disabled = false;
   if (result.ok) {
-    $('#maskSchedule').classList.remove('on');
+    setScheduleEditor(false);
     $('#scheduleActionStatus').textContent = result.note || '定时设置已更新。';
     log(result.note || '定时设置已更新。');
   } else {
@@ -116,7 +126,7 @@ $('#btnScheduleCancel').onclick = () => {
 };
 $('#btnUpdateBackend').onclick = async () => {
   if (!backendInfo || backendUpdating) return;
-  if (document.querySelector('.mask.on')) { log('请先完成或关闭正在编辑的内容，再更新后台。'); return; }
+  if (document.querySelector('.mask.on,dialog[open]:not(#dlgSystem):not(#dlgBackend)')) { log('请先完成或关闭正在编辑的内容，再更新后台。'); return; }
   backendUpdating = true; $('#btnUpdateBackend').disabled = true;
   $('#runtimeText').textContent = '正在更新后台，请稍候…';
   const old = backendInfo;
@@ -132,7 +142,7 @@ $('#btnUpdateBackend').onclick = async () => {
     if (now.ok && now.pid !== old.pid && !now.needs_update) {
       const draft = {};
       for (const id of updateDraftFields) {
-        const el = $('#' + id); draft[id] = el.type === 'checkbox' ? el.checked : el.value;
+        const el = $('#' + id); if (el) draft[id] = el.type === 'checkbox' ? el.checked : el.value;
       }
       sessionStorage.setItem('homeworkUpdateDraft', JSON.stringify(draft));
       location.reload(); return;

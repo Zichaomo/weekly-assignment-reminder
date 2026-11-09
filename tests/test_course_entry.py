@@ -8,6 +8,12 @@ DIRECT=BASE+'/meol/jpk/course/layout/newpage/index.jsp?courseId=123'
 GATEWAY=BASE+'/meol/lesson/enter_course.jsp?lid=123&t=hw'
 
 class CourseEntryTests(IsolatedCase):
+    def test_step_timeout_setting_caps_navigation_wait(self):
+        self.write_config({'scan':{'step_timeout_sec':1.25}})
+        self.assertLessEqual(scrape._budget_ms(time.monotonic()+90),1250)
+        self.assertLessEqual(scrape._budget_ms(time.monotonic()+90,cap_ms=500),500)
+        self.assertLessEqual(scrape._budget_ms(time.monotonic()+.1),100)
+
     def page(self, *, final=DIRECT, text='高等数学 课程作业 在线测试', error=False):
         page=FakePage(text=text,url='about:blank')
         def goto(url,**kwargs):

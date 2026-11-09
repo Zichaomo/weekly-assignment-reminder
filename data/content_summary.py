@@ -86,7 +86,7 @@ def summarize(item, rule=None):
         if images and all(im.get('status') == 'ready' and im.get('asset_id') for im in images):
             result.update(status='images', text='', origin='course_rule',
                           asset_ids=list(dict.fromkeys(im['asset_id'] for im in images)),
-                          reason='本课程正文图片按原图随提醒发送，无需人工确认')
+                          reason='本课程正文图片随提醒发送；有有效裁剪时使用裁剪图，无需人工确认')
             return result
     if mode == 'physics' and not _has_visual(blocks):
         kept = []

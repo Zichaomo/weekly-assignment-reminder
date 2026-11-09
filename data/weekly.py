@@ -28,6 +28,7 @@ from pathlib import Path
 import cache_store
 import content_summary
 import image_delivery
+import run_history
 
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
@@ -58,7 +59,7 @@ def fetch(extra_args: list = None) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=UTF8_ENV,
+        env={**UTF8_ENV, run_history.TASK_ENV: run_history.current_task.get()},
         cwd=str(ROOT),
         timeout=900,
     )
@@ -230,7 +231,10 @@ def format_message(items: list, days: int, title: str = None,
                 if len(body_lines) > limit:
                     blk.append('   ……（详情参见北化在线）')
             elif summary['status'] == 'images':
-                blk.append(f"   作业原图随提醒发送（{len(summary['asset_ids'])} 张）。")
+                regions = (it.get('view') or {}).get('regions') or []
+                count = sum(max(1, sum(r['asset_id'] == aid for r in regions)) for aid in summary['asset_ids'])
+                label = '作业图片' if regions else '作业原图'
+                blk.append(f"   {label}随提醒发送（{count} 张）。")
             elif summary['status'] in ('needs_review', 'unavailable', 'reference_only'):
                 blk.append('   详细要求见北化在线')
         return blk

@@ -427,6 +427,11 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_task_signature
             ON task_registry(signature, status, created_at DESC);
+        CREATE TABLE IF NOT EXISTS task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+            at REAL NOT NULL, message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id,id);
         """)
         columns = {str(r["name"]) for r in con.execute("PRAGMA table_info(task_registry)")}
         if "scan_id" not in columns:
@@ -545,8 +550,10 @@ def scan_progress(scan_id: str | None = None, scope: str | None = None) -> dict:
     return {
         "ok": True, "scan_id": row["scan_id"], "status": row["status"],
         "mode": row["mode"], "started_at": _iso(row["started_at"]),
-        "finished_at": _iso(row["finished_at"]), "done": len(completed),
-        "failed": len(failed), "total": int(row["course_total"] or len(expected)),
+        # Course rows are replaced by later scans. Per-run counters retain this
+        # scan's actual progress, including partial and interrupted attempts.
+        "finished_at": _iso(row["finished_at"]), "done": int(row["course_done"] or 0),
+        "failed": int(row["course_failed"] or 0), "total": int(row["course_total"] or len(expected)),
         "completed_courses": [by_lid[x]["course"] for x in completed],
         "failed_courses": [by_lid[x]["course"] for x in failed],
         "tests_requested": bool(row["tests_requested"]),
@@ -564,11 +571,25 @@ def _assignment_key(scope: str, lid: str, kind: str, platform_id: str | None,
     return f"platform:{scope}:{lid}:{kind}:unknown:{ident}", True
 
 
+def normalize_submission(item: dict) -> dict:
+    """Resolve the status from platform evidence before storing or reading rows."""
+    submitted = item.get('submitted')
+    if item.get('result_url'):
+        submitted = True
+    elif item.get('submit_url') or item.get('start_url'):
+        submitted = False
+    elif not isinstance(submitted, bool):
+        submitted = {'submitted':True, 'unsubmitted':False}.get(item.get('submit_state'))
+    status = 'submitted' if submitted is True else 'unsubmitted' if submitted is False else 'unknown'
+    return {**item, 'submitted':submitted, 'submit_state':status}
+
+
 def _upsert_assignments(con: sqlite3.Connection, scope: str, scan_id: str,
                         lid: str, course: str, kind: str, rows: list[dict],
                         now: float, complete: bool) -> tuple[list[str], str]:
     keys: list[str] = []
     for ordinal, item in enumerate(rows):
+        item = normalize_submission(item)
         platform_id = (item.get("hwtid") if kind == "homework"
                        else item.get("test_id"))
         platform_id = str(platform_id) if platform_id else None
@@ -840,6 +861,7 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
                 item.setdefault(key, value)
             item["submitted"] = (None if item.get("submitted") is None
                                  else bool(item.get("submitted")))
+            item.update(normalize_submission(item))
             content_generation = int(item.get("content_identity_generation") or 0)
             identity_current = (not item.get("content_status")
                                 or content_generation == generation)
@@ -881,6 +903,7 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
                         "folded_block_ids": _json(view["folded_json"], []),
                         "summary": view["summary"],
                         "review_status": view["review_status"],
+                        "revision": version_hash(dict(view)),
                         "updated_at": _iso(view["updated_at"])}
             elif not identity_current:
                 stale = con.execute(
@@ -1135,7 +1158,7 @@ def save_content_review(item_key: str, *, expected_version: str,
 
 def save_view(item_key: str, *, expected_version: str, regions: list[dict],
               folded_block_ids: list[str] | None = None, summary: str = "",
-              review_status: str = "ok") -> dict:
+              review_status: str = "ok", expected_view_revision: str | None = None) -> dict:
     init_db()
     regions = _validate_regions(regions)
     folded = [str(x) for x in (folded_block_ids or [])]
@@ -1152,6 +1175,15 @@ def save_view(item_key: str, *, expected_version: str, regions: list[dict],
             raise VersionConflict("正文尚未就绪")
         scope = (content["account_scope"] if content and content["account_scope"]
                  else account_scope())
+        if scope != account_scope():
+            raise VersionConflict("正文属于其他账号，不能保存裁剪")
+        previous = con.execute("SELECT * FROM content_views WHERE item_key=? AND source_version=? AND view_key='default'",
+                               (item_key, current)).fetchone()
+        revision = version_hash(dict(previous)) if previous else 'none'
+        if expected_view_revision is not None and expected_view_revision != revision:
+            raise VersionConflict("裁剪已在其他窗口更新，当前草稿保留，请重新加载后复核")
+        if review_status not in ('ok','needs_review'):
+            raise ValueError("裁剪复核状态无效")
         generation = _scope_identity_generation(scope, con)
         if int(content["identity_generation"] or 0) != generation:
             raise VersionConflict("正文属于旧账号缓存，需重新抓取并复核后再保存裁剪")
@@ -1164,13 +1196,28 @@ def save_view(item_key: str, *, expected_version: str, regions: list[dict],
         if regions:
             region_asset_ids = sorted({r["asset_id"] for r in regions})
             asset_rows = con.execute(
-                f"SELECT asset_id,crop_safe FROM assets WHERE asset_id IN "
+                f"SELECT * FROM assets WHERE asset_id IN "
                 f"({','.join('?' for _ in region_asset_ids)})",
                 tuple(region_asset_ids)).fetchall()
             unsafe = [r["asset_id"] for r in asset_rows if not int(r["crop_safe"] or 0)]
             if unsafe:
                 raise ValueError("该图片未经 Pillow 解码/方向校验，已禁用裁剪；"
                                  "请安装 Pillow 后刷新正文")
+            records = {r['asset_id']: dict(r) for r in asset_rows}
+            if len(records) != len(region_asset_ids):
+                raise ValueError('裁剪原图缓存缺失')
+            import crop_assets
+            for region in regions:
+                try:
+                    asset = crop_assets.generate(records[region['asset_id']], region['box'])
+                except ImportError as exc:
+                    raise ValueError('请安装 Pillow 后保存裁剪') from exc
+                con.execute('''INSERT OR IGNORE INTO assets
+                    (asset_id,sha256,path,mime,width,height,bytes,checked_at,original_path,display_path,crop_safe)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,1)''',
+                    (asset['asset_id'],asset['sha256'],asset['path'],asset['mime'],asset['width'],asset['height'],
+                     asset['bytes'],now,asset['path'],asset['path']))
+                region['delivery_asset_id'] = asset['asset_id']
         con.execute(
             """INSERT INTO content_views(item_key,source_version,view_key,
                regions_json,folded_json,summary,review_status,updated_at)
@@ -1280,7 +1327,7 @@ def update_task(task_id: str, status: str, *, result_summary: Any = None,
     sets = ["status=?"]
     vals: list[Any] = [status]
     if status == "running":
-        sets.append("started_at=?")
+        sets.append("started_at=COALESCE(started_at,?)")
         vals.append(now)
     if status in ("done", "partial", "error", "cancelled"):
         sets.append("finished_at=?")

@@ -11,8 +11,9 @@ ROOT = Path(__file__).resolve().parent
 def disk_version(root=ROOT):
     digest = hashlib.sha256()
     files = sorted(root.glob('*.py')) + sorted(root.glob('*.js')) + [root / 'console.html']
+    files += sorted(p for p in (root / 'ui').rglob('*') if p.is_file())
     for path in files:
-        digest.update(path.name.encode())
+        digest.update(path.relative_to(root).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()[:12]
 

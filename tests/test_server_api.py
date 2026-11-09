@@ -32,12 +32,13 @@ class ServerApiTests(IsolatedCase):
         cache_store.update_scan("api-scan", status="complete", finished_at=time.time())
         item = cache_store.load_items(self.scope)[0]
         self.key = item["item_key"]
-        self.asset_id = "c" * 64
+        asset = self.image_asset()
+        self.asset_id = asset['asset_id']
         cache_store.save_content(self.key, {
             "status": "ready", "source_url": "https://course.buct.edu.cn/x",
             "source_hash": "h", "source_version": "v1",
             "blocks": [{"id": "p1", "type": "paragraph", "text": "正文"}],
-            "asset_ids": [self.asset_id], "assets": [], "text": "正文"}, scope=self.scope)
+            "asset_ids": [self.asset_id], "assets": [asset], "text": "正文"}, scope=self.scope)
         import server
         self.server_mod = server
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -76,6 +77,34 @@ class ServerApiTests(IsolatedCase):
         self.assertTrue(data["ready"])
         self.assertEqual(data["source_version"], "v1")
         self.assertEqual(data["blocks"][0]["text"], "正文")
+
+    def test_runs_api_recovers_history_without_exposing_task_params(self):
+        cache_store.register_task('history-api', self.scope+'|fetch|api', 'fetch', {'key':'private-fixture'})
+        cache_store.update_task('history-api', 'error', result_summary={'error':'fixture timeout key=secret-fixture'})
+        status, data = self.get('/api/runs?limit=1')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['history'][0]['task_id'], 'history-api')
+        self.assertNotIn('private-fixture', json.dumps(data))
+        self.assertNotIn('secret-fixture', json.dumps(data))
+        self.assertEqual(self.get('/api/runs?before=invalid')[0], 400)
+
+    def test_local_mutation_result_appears_in_history(self):
+        with patch.object(self.server_mod, 'manual_action', return_value={'ok':False,'error':'fixture invalid deadline'}):
+            self.post('/api/manual', {'action':'add'})
+        status, data = self.get('/api/runs')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['history'][0]['op'], '手动作业')
+        self.assertEqual(data['history'][0]['status'], 'error')
+        self.assertEqual(data['history'][0]['summary']['error'], 'fixture invalid deadline')
+
+    def test_connected_entry_and_local_resources_and_traversal(self):
+        for path, content in [('/',b'/ui/'),('/ui/js/icons.js',b'renderLocalIcons'),
+                              ('/ui/css/connected.css',b'100dvh'),('/legacy',b'tbody')]:
+            with urlopen(self.base+path,timeout=5) as response:
+                self.assertEqual(response.status,200)
+                self.assertIn(content,response.read())
+        status,_=self.get('/ui/%2e%2e/course_rules.js')
+        self.assertEqual(status,404)
 
     def test_preview_finishes_while_platform_executor_is_occupied(self):
         release = threading.Event()

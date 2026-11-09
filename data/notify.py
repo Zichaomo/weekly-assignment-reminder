@@ -489,9 +489,16 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
     if channel != 'wecom':
         # Keep the reminder useful on text-only channels without claiming an
         # image was delivered. Original images are currently a WeCom feature.
-        text = re.sub(r'作业原图随提醒发送（\d+ 张）。', '图片作业详情参见北化在线。', text)
+        text = re.sub(r'作业(?:原图|图片)随提醒发送（\d+ 张）。', '图片作业详情参见北化在线。', text)
         return fn(text, eff_cfg)
     import image_delivery
+    try:
+        # Validate every selected asset before the first component is sent.
+        for entry in images:
+            image_delivery.delivery_bytes(entry)
+    except (ValueError, OSError):
+        print('ERROR: 图片版本、选区或资产已变化，请重新预览。', file=sys.stderr)
+        return False
     inline = image_delivery.inline_markdown(text, images)
     # Partial-send receipts must track the actual layout/chunk boundaries too.
     bundle = image_delivery.bundle_key(text, images, rendered=inline)
@@ -525,8 +532,9 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
             return False
     for i, entry in enumerate(images):
         try:
-            raw = image_delivery.original_bytes(entry)
-            caption = f"{entry['course']}｜{entry['title']}\n截止：{entry['deadline']}\n作业原图（{i+1}/{len(images)}）"
+            raw = image_delivery.delivery_bytes(entry)
+            label = '作业裁剪图' if entry.get('crop') else '作业原图'
+            caption = f"{entry['course']}｜{entry['title']}\n截止：{entry['deadline']}\n{label}（{i+1}/{len(images)}）"
             if not part(f'caption:{i}', lambda: send_wecom(caption, eff_cfg)):
                 return False
             if not part(f'image:{i}', lambda: send_wecom('', eff_cfg, image_bytes=raw)):

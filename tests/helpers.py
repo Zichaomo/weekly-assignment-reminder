@@ -47,6 +47,22 @@ class IsolatedCase(unittest.TestCase):
         os.environ["HOMEWORK_ACCOUNT_SCOPE"] = scope
         return scope
 
+    def image_asset(self):
+        import hashlib
+        import io
+        from PIL import Image
+        raw = io.BytesIO()
+        Image.new('RGB', (100, 80), 'white').save(raw, format='PNG')
+        data = raw.getvalue()
+        aid = hashlib.sha256(data).hexdigest()
+        directory = Path(cache_store.cache_settings()['assets_dir'])
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (aid + '.png')
+        path.write_bytes(data)
+        return {'asset_id':aid,'sha256':aid,'path':str(path),'original_path':str(path),
+                'display_path':str(path),'mime':'image/png','width':100,'height':80,
+                'bytes':len(data),'crop_safe':True}
+
 
 class FakePage:
     def __init__(self, text="", url="https://course.buct.edu.cn/meol/lesson/enter_course.jsp?lid=11&t=hw",

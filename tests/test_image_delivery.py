@@ -97,6 +97,107 @@ class OriginalImageDelivery(IsolatedCase):
         self.assertEqual(delivery.collect(group),[]);self.assertEqual(delivery.collect(personal),self.images)
         self.assertIn('作业原图随提醒发送',weekly.format_message([self.item],7))
 
+    def save_crop(self, box=None, revision=None):
+        return cache_store.save_view(self.key, expected_version='v1',
+            expected_view_revision=revision, regions=[{'asset_id':self.aid,
+            'box':box or [0,0,0.5,1]}])
+
+    def test_saved_crop_is_persistent_selected_and_original_unchanged(self):
+        self.save_crop()
+        plan = delivery.collect([cache_store.get_item(self.key)])
+        self.assertTrue(plan[0]['crop'])
+        raw = delivery.delivery_bytes(plan[0])
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as image:
+            self.assertEqual(image.size,(2,3))
+        self.assertEqual(self.path.read_bytes(),self.raw)
+        record = cache_store.asset_record(plan[0]['delivery_asset_id'])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),record['sha256'])
+        self.assertIn('作业图片随提醒发送',weekly.format_message([cache_store.get_item(self.key)],7))
+        self.assertIsNone(delivery.inline_markdown('anything',plan))
+
+    def test_crop_revision_conflict_and_restore_reject_old_manifests(self):
+        self.save_crop(revision='none')
+        item = cache_store.get_item(self.key)
+        cropped = delivery.collect([item])
+        with self.assertRaises(cache_store.VersionConflict):
+            self.save_crop(revision='none')
+        with self.assertRaises(ValueError):
+            delivery.delivery_bytes(self.images[0])
+        cache_store.save_view(self.key,expected_version='v1',regions=[],
+                              expected_view_revision=item['view']['revision'])
+        restored = delivery.collect([cache_store.get_item(self.key)])
+        self.assertFalse(restored[0].get('crop'))
+        self.assertEqual(delivery.delivery_bytes(restored[0]),self.raw)
+        with self.assertRaises(ValueError):
+            delivery.delivery_bytes(cropped[0])
+
+    def test_crop_upload_retry_and_dedup_use_exact_saved_bytes(self):
+        self.save_crop()
+        plan=delivery.collect([cache_store.get_item(self.key)])
+        raw=delivery.delivery_bytes(plan[0]);calls=[]
+        def send(text,cfg,**kw):
+            calls.append(kw.get('image_bytes'))
+            return len(calls)!=3
+        with patch.object(notify,'send_wecom',side_effect=send),patch.object(notify.time,'sleep'), \
+             patch.object(delivery.urllib.request,'urlopen',side_effect=AssertionError('crop must never use remote URL')):
+            cfg={**self.cfg,'_image_manifest':plan}
+            self.assertFalse(notify.dispatch('裁剪提醒','wecom',cfg))
+            self.assertTrue(notify.dispatch('裁剪提醒','wecom',cfg))
+            self.assertTrue(notify.dispatch('裁剪提醒','wecom',cfg))
+        self.assertEqual(calls,[None,None,raw,raw])
+
+    def test_identical_resave_dedups_but_actual_crop_change_gets_new_bundle(self):
+        self.save_crop()
+        first=delivery.collect([cache_store.get_item(self.key)])
+        self.save_crop()
+        second=delivery.collect([cache_store.get_item(self.key)])
+        self.assertNotEqual(first[0]['view_revision'],second[0]['view_revision'])
+        self.assertEqual(delivery.bundle_key('text',first),delivery.bundle_key('text',second))
+        self.save_crop([0,0,1,1])
+        third=delivery.collect([cache_store.get_item(self.key)])
+        self.assertNotEqual(delivery.bundle_key('text',second),delivery.bundle_key('text',third))
+
+    def test_crop_coordinates_follow_exif_corrected_original_pixels(self):
+        from PIL import Image, ImageOps
+        image=Image.new('RGB',(6,4));image.putdata([(n*9,n*3,n*5) for n in range(24)])
+        out=io.BytesIO();exif=Image.Exif();exif[274]=6
+        image.save(out,format='JPEG',exif=exif);raw=out.getvalue()
+        aid=hashlib.sha256(raw).hexdigest();path=self.path.with_name(aid+'.jpg');path.write_bytes(raw)
+        cache_store.save_content(self.key,{'status':'ready','source_version':'rotated',
+            'blocks':[{'type':'image','asset_id':aid,'status':'ready'}], 'asset_ids':[aid],
+            'assets':[{'asset_id':aid,'sha256':aid,'path':str(path),'original_path':str(path),
+                       'mime':'image/jpeg','width':4,'height':6,'bytes':len(raw),'crop_safe':True}]})
+        cache_store.save_view(self.key,expected_version='rotated',regions=[{'asset_id':aid,'box':[.25,0,1,.5]}])
+        plan=delivery.collect([cache_store.get_item(self.key)])
+        with Image.open(io.BytesIO(delivery.delivery_bytes(plan[0]))) as actual, Image.open(io.BytesIO(raw)) as source:
+            expected=ImageOps.exif_transpose(source).crop((1,0,4,3))
+            self.assertEqual(actual.size,(3,3));self.assertEqual(actual.tobytes(),expected.tobytes())
+        self.assertEqual(path.read_bytes(),raw)
+
+    def test_crop_changed_or_missing_fails_before_text_and_scope_switch_rejected(self):
+        self.save_crop()
+        plan=delivery.collect([cache_store.get_item(self.key)])
+        path=cache_store.asset_record(plan[0]['delivery_asset_id'])['path']
+        from pathlib import Path
+        Path(path).write_bytes(b'tampered')
+        with patch.object(notify,'send_wecom',side_effect=AssertionError('must preflight all images')):
+            self.assertFalse(notify.dispatch('reminder','wecom',{**self.cfg,'_image_manifest':plan}))
+        self.use_explicit_account('different-account')
+        with self.assertRaises(cache_store.VersionConflict):self.save_crop()
+        with self.assertRaises(ValueError):delivery.delivery_bytes(plan[0])
+
+    def test_multiple_crop_regions_are_sent_in_order_and_text_channel_is_honest(self):
+        cache_store.save_view(self.key,expected_version='v1',regions=[
+            {'asset_id':self.aid,'box':[0,0,.5,1]},
+            {'asset_id':self.aid,'box':[.5,0,1,1]}])
+        item=cache_store.get_item(self.key);plan=delivery.collect([item])
+        self.assertEqual([e['box'] for e in plan],[[0,0,.5,1],[.5,0,1,1]])
+        text=weekly.format_message([item],7)
+        self.assertIn('作业图片随提醒发送（2 张）',text)
+        with patch.dict(notify.SENDERS,{'clipboard':lambda message,cfg: '随提醒发送' not in message}):
+            self.assertTrue(notify.dispatch(text,'clipboard',{**self.cfg,'_image_manifest':plan}))
+
     def test_changed_stale_missing_or_wrong_scope_images_are_rejected(self):
         bad=dict(self.images[0],source_version='old')
         with self.assertRaises(ValueError):delivery.original_bytes(bad)

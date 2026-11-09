@@ -243,7 +243,8 @@ def collect_all_courses(page) -> dict:
 
 
 def _budget_ms(deadline: float, cap_ms: int = 60000) -> int:
-    return max(1, min(int(cap_ms), int((deadline - time.monotonic()) * 1000)))
+    step_ms = max(1, int(cache_store.cache_settings()['step_timeout_sec'] * 1000))
+    return max(1, min(int(cap_ms), step_ms, int((deadline - time.monotonic()) * 1000)))
 
 
 def _ensure_budget(deadline: float, step: str) -> None:
@@ -1057,6 +1058,7 @@ def sweep_all_courses(ctx, page, debug=False, delay=None, skip_lids=None,
         if want_tests and lid in auto_test_skip:
             test_notes["auto_skipped"].append(name)
         try:
+            print(f"  正在扫描 {name}…", file=sys.stderr)
             rows, trows, notes, statuses = fetch_course_both(
                 ctx, page, lid, name, debug, want_homework=True,
                 want_tests=want_t, return_status=True)
@@ -2796,17 +2798,7 @@ def _run_scan(args):
         #   result_url 有           -> 平台上存在我的记录
         for item in list(homeworks) + list(tests):
             item.setdefault("kind", "homework")
-            if item.get("submit_url"):
-                item["submitted"] = bool(item.get("result_url"))
-            elif item.get("result_url"):
-                item["submitted"] = True
-            else:
-                item["submitted"] = None      # 未知：截止后入口会消失
-            item["submit_state"] = (
-                "unsubmitted" if item["submitted"] is False
-                else "submitted" if item["submitted"] is True
-                else "unknown"
-            )
+            item.update(cache_store.normalize_submission(item))
 
         # 可疑覆盖检测：有课程抓取失败、或返回 0 条，都可能造成漏报，显式告警
         zero = [p["course"] for p in per_course if p["total"] == 0 and not p["error"]]
@@ -2890,4 +2882,15 @@ def _run_scan(args):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import run_history
+    task_id = os.environ.get(run_history.TASK_ENV)
+    if task_id:
+        from contextlib import redirect_stderr
+        stream = run_history.TaskStream(sys.stderr, task_id)
+        try:
+            with redirect_stderr(stream):
+                sys.exit(main())
+        finally:
+            stream.flush()
+    else:
+        sys.exit(main())

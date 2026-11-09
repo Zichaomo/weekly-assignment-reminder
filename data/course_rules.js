@@ -4,7 +4,11 @@
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const button = document.createElement('button');
   button.id = 'btnCourseRules'; button.className = 'btn ghost'; button.textContent = '课程正文规则';
+  const icon = document.createElement('i');
+  icon.dataset.lucide = 'file-text';
+  button.prepend(icon);
   el('btnBlCourse').before(button);
+  window.renderLocalIcons?.();
   const style = document.createElement('style');
   style.textContent = `#ruleMask .modal{width:min(1100px,96vw);max-height:94vh}#ruleMask .rule-layout{display:grid;grid-template-columns:310px 1fr;gap:24px}#ruleMask .rule-list{max-height:450px;overflow:auto}#ruleMask .rule-row{display:block;width:100%;text-align:left;padding:14px;margin:6px 0;border:1px solid var(--line,#ddd);background:transparent;border-radius:6px;cursor:pointer;color:inherit}#ruleMask .rule-row.active{border-color:var(--accent,#9c4334);background:#f7eee5}#ruleMask small{display:block;color:#777;margin-top:6px}#ruleMask label{display:block;margin:12px 0 5px}#ruleMask input,#ruleMask select,#ruleMask textarea{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:4px;background:var(--paper,#fff);color:inherit;font:inherit}#ruleMask pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f2ec;padding:14px;min-height:70px;font:inherit}#ruleMask .rule-options{display:grid;grid-template-columns:1fr 1fr;gap:14px}#ruleMask .rule-status{min-height:24px;color:#945132;margin:12px 0} @media(max-width:720px){#ruleMask .rule-layout{grid-template-columns:1fr}#ruleMask .rule-list{max-height:180px}}`;
   document.head.append(style);
@@ -23,7 +27,7 @@
     <footer><button id="ruleReset" class="btn ghost">恢复默认</button><button id="ruleSave" class="btn accent">保存规则</button></footer></div>`;
   document.body.append(mask);
   let state, current, samples = [], dirty = false, busy = false;
-  const help = {auto:'仅提取能明确识别的任务；遇到不确定要求时提示查看平台。',reference:'不附正文或原图，统一提示“详细要求见北化在线”。',physics:'去除已知通用提交套话，保留其余文字；含图片、表格或附件时采用保守识别。',full:'保留全部纯文字，只清理行边空白和空行；含图片、表格或附件时采用保守识别。',images:'正文图片均已缓存时随提醒发送原图；否则采用保守识别。'};
+  const help = {auto:'仅提取能明确识别的任务；遇到不确定要求时提示查看平台。',reference:'不附正文或原图，统一提示“详细要求见北化在线”。',physics:'去除已知通用提交套话，保留其余文字；含图片、表格或附件时采用保守识别。',full:'保留全部纯文字，只清理行边空白和空行；含图片、表格或附件时采用保守识别。',images:'正文图片均已缓存时随提醒发送；有已保存裁剪则使用裁剪图，否则使用原图。图片未就绪时采用保守识别。'};
   async function request(url, data) {
     const response = await fetch(url, data ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)} : {});
     const result = await response.json();

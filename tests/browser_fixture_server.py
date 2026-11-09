@@ -53,6 +53,10 @@ def main():
     import manual
     import scrape
     import server
+    import weekly
+    import notify
+    local_publish = hub.run_publish
+    local_submit = server.submit_task
 
     # Hard isolation: no real config, platform fetch, browser launch, or send
     # entry point may run inside the fixture.
@@ -103,6 +107,10 @@ def main():
     hub.MANUAL_FILE = tmp / "manual.json"
     manual.MANUAL_FILE = tmp / "manual.json"
     hub.MANUAL_FILE.write_text("[]", encoding="utf-8")
+    hub.ROOT = weekly.ROOT = tmp
+    hub.fetch_log.log_fetch = lambda *a, **kw: None
+    notify.load_config = lambda: {'channel':'none'}
+    notify.dispatch = blocked('notify.dispatch')
     index = {"101": "fixture课程 A"}
     scrape.COURSES_FILE.write_text(json.dumps(
         {"refreshed_at": "fixture", "courses": index, "meta": {}},
@@ -119,8 +127,9 @@ def main():
     cache_store.commit_course_scan(
         "smoke-scan", lid="101", course="fixture课程 A",
         homeworks=[{"hwtid": "9001", "title": "fixture作业（脱敏）",
-                    "deadline": deadline, "submit_url": None, "result_url": None,
-                    "submitted": False},
+                    "deadline": deadline, "submit_url": 'https://course.buct.edu.cn/fixture-submit',
+                    "result_url": 'https://course.buct.edu.cn/fixture-result',
+                    "submit_state": 'submitted', "submitted": True},
                    {"hwtid":"9002", "title":"fixture有效摘要", "deadline":
                     (datetime.now()+timedelta(days=6)).strftime('%Y-%m-%d %H:%M')},
                    {"hwtid":"9003", "title":"fixture通用说明", "deadline":
@@ -189,6 +198,45 @@ def main():
                if entry['hwtid']=='9002' else '<p>提交图片</p><p>一页作为一张照片，正放，不要倒置。</p>')
         result=content_pipeline.ingest_html(raw,'https://course.buct.edu.cn/fixture')
         cache_store.save_content(entry['item_key'],result,scope=scope)
+
+    def preview_only(op, params):
+        if op != 'preview':
+            raise FixtureIsolationError('only local preview is enabled')
+        return local_publish(int(params.get('days',7)), True, 'none')
+
+    def submit_preview_only(op, params):
+        if op != 'preview':
+            raise FixtureIsolationError('platform/send task forbidden')
+        return local_submit(op, params)
+
+    server.run_task = preview_only
+    server.submit_task = submit_preview_only
+
+    if os.environ.get('HOMEWORK_RUN_HISTORY_FIXTURE') == '1':
+        history_lids = [str(number) for number in range(1, 11)]
+        for scan_id, done, failed, status in [
+            ('fixture-full-scan', 10, 0, 'complete'),
+            ('fixture-partial-scan', 6, 3, 'partial'),
+            ('fixture-new-scan', 10, 0, 'complete'),
+        ]:
+            cache_store.begin_scan(scan_id, mode='fixture', expected_lids=history_lids,
+                                   tests_requested=True, course_index_version='fixture')
+            for number, lid in enumerate(history_lids[:done+failed]):
+                cache_store.commit_course_scan(
+                    scan_id, lid=lid, course='历史课程'+lid, homeworks=[], tests=[],
+                    homework_status='empty' if number < done else 'error',
+                    tests_status='empty', index_version='fixture')
+            cache_store.update_scan(scan_id, status=status, finished_at=time.time())
+        for task_id, scan_id, status in [
+            ('fixture-old-full', 'fixture-full-scan', 'done'),
+            ('fixture-old-partial', 'fixture-partial-scan', 'partial'),
+        ]:
+            cache_store.register_task(task_id, scope+'|fetch|'+task_id, 'fetch', {})
+            cache_store.update_task(task_id, status, scan_id=scan_id)
+        cache_store.register_task('fixture-history', scope+'|fetch|history', 'fetch', {})
+        cache_store.update_task('fixture-history', 'error', result_summary={'error':'历史课程加载超时'})
+        cache_store.register_task('fixture-live', scope+'|content|live', 'content', {})
+        cache_store.update_task('fixture-live', 'running')
 
     class FixtureHandler(server.Handler):
         def _do_GET(self):

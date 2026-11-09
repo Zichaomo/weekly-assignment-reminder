@@ -129,7 +129,7 @@ async function main() {
     assert.strictEqual(config.status(), 200);
     assert.strictEqual((await config.json()).channel, 'none', 'fixture channel must be none');
 
-    await page.goto(base + '/', { waitUntil: 'domcontentloaded' });
+    await page.goto(base + '/legacy', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#tbody tr[data-key]', { timeout: 10000 });
     assert.strictEqual(events.taskPosts.length, 0, 'cold open must not start a task');
     assert.strictEqual(await page.locator('#tbody > tr > td.empty').count(), 0,
