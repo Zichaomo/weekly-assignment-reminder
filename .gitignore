@@ -88,8 +88,9 @@ data/task_run.log
 # 补推检测日志（登录触发，每次登录都会留下一次判定记录）
 data/task_catchup.log
 
-# Local delegation logs and homework cache
-.deepastra-work/
+# Local agent instructions, delegation transcripts, and homework cache
+AGENTS*.md
+.deepastra*/
 data/cache/
 data/schedule_requests/
 data/push_parts.jsonl
