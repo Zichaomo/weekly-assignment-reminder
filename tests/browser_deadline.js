@@ -2,10 +2,8 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { chromium } = require(process.env.PLAYWRIGHT_PATH ||
-  'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js');
+const { PYTHON, chromium } = require('./browser_runtime');
 const root = path.resolve(__dirname, '..');
 const output = path.join(__dirname, 'artifacts', 'deadline');
 const checks = [];
@@ -21,8 +19,7 @@ async function check(name, run) {
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   timeout = setTimeout(() => { fixture?.kill(); browser?.close(); process.exitCode = 1; }, 90000);
-  fixture = spawn(process.env.PYTHON || path.join(os.homedir(),
-    '.workbuddy/binaries/python/envs/default/Scripts/python.exe'),
+  fixture = spawn(PYTHON,
   ['-B', path.join(__dirname, 'browser_fixture_server.py')], {
     cwd: root, env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true,
   });

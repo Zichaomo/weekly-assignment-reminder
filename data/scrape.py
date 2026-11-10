@@ -79,7 +79,7 @@ LOCK_WAIT_SEC = 120
 BASE = "https://course.buct.edu.cn"
 SSO_LOGIN = BASE + "/meol/homepage/common/sso_login.jsp"
 ROOT = Path(__file__).resolve().parent
-PROFILE_DIR = Path.home() / ".workbuddy" / "profiles" / "buct-course-edge"
+PROFILE_DIR = ROOT / "browser-profile"
 STATE_FILE = ROOT / "storage_state.json"
 DEBUG_DIR = ROOT / "debug"
 
@@ -147,18 +147,8 @@ def make_context(p, headless=True):
 
 
 def logged_in(page, ctx) -> bool:
-    """已登录页面里仍保留「非统一身份认证登录」（切换账号入口），不能用来判定。"""
-    try:
-        names = {c["name"].upper() for c in ctx.cookies()}
-        if "CASTGC" in names or "TGC" in names:
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        t = page.inner_text("body", timeout=3000) or ""
-    except Exception:  # noqa: BLE001
-        return False
-    return ("在线总时长" in t) or ("登录时间" in t)
+    """Compatibility entry point for the shared platform-page check."""
+    return page_authenticated(page)
 
 
 def dump(page, name: str, debug: bool):
@@ -1267,7 +1257,7 @@ def page_is_login(page) -> bool:
     except ValueError:
         return True
     # Match the destination path, not a return URL embedded in its query.
-    if (path.endswith("/login") or "sso_login" in path
+    if (path.endswith(("/login", "/login.jsp")) or "sso_login" in path
             or "experimental-auth-endpoint" in path):
         return True
     try:
@@ -1576,8 +1566,8 @@ def page_authenticated(page) -> bool:
         host = (parts.hostname or "").lower().rstrip(".")
     except Exception:  # noqa: BLE001
         return False
-    if not (host == "buct.edu.cn" or host.endswith(".buct.edu.cn")
-            or host in ("127.0.0.1", "localhost", "::1")):
+    # Portal authentication alone does not establish a THEOL session.
+    if host not in ("course.buct.edu.cn", "127.0.0.1", "localhost", "::1"):
         return False
     text = _body_text(page)
     if any(marker in text for marker in AUTH_PAGE_MARKERS):

@@ -240,9 +240,8 @@ def bind_identity(marker: str, scope: str | None = None,
         changed = bool(old and old != digest)
         if changed and not allow_change:
             raise AccountIdentityConflict(
-                "检测到平台账号与本地缓存身份不一致。为避免串账号复用，"
-                "请切换 config.json 的 account_scope 后重新扫描；如确认要更换当前范围，"
-                "先备份再设置 HOMEWORK_ACCOUNT_CHANGE=1 执行一次。")
+                "检测到平台账号与本地缓存身份不一致。请在管理菜单的学校账号面板"
+                "勾选另一个学校账号并保存，然后重新登录、刷新课程表和检索。")
         if changed:
             # Old snapshots belong to another account.  Keep them readable
             # offline, but no old scan or course coverage may be reused.

@@ -196,7 +196,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
                 # login.py owns the shared platform lock itself. Holding it
                 # here while waiting on that subprocess would deadlock.
                 if not weekly.ensure_login(check=False):
-                    raise weekly.AuthenticationRequired('自动登录未成功，请双击 login.bat 完成登录，再重新检索。')
+                    raise weekly.AuthenticationRequired('自动登录未成功，请在管理菜单的学校账号面板完成登录，再重新检索。')
                 if scan_id:
                     retry_id = uuid.uuid4().hex[:12]
                     extra = list(extra)
@@ -212,7 +212,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
         except Exception as e:  # noqa: BLE001
             if isinstance(e, weekly.AuthenticationRequired):
                 error_code = 'auth_required'
-                error = '北化在线登录已失效，自动续登后仍未成功。请双击 login.bat 完成登录，再重新检索。'
+                error = '北化在线登录已失效，自动续登后仍未成功。请在管理菜单的学校账号面板完成登录，再重新检索。'
             else:
                 error = f"北化在线检索失败：{e}"
             lowered = str(e).lower()
@@ -315,7 +315,7 @@ def run_refresh_courses():
                 try:
                     page.goto(scrape.SSO_LOGIN, wait_until="domcontentloaded", timeout=60000)
                     if not scrape.wait_authenticated(page, ctx, timeout=12):
-                        return {"ok": False, "error": "未登录或会话已过期，请运行 login.py"}
+                        return {"ok": False, "error": "未登录或会话已过期，请在管理菜单的学校账号面板完成登录"}
                     try:
                         scrape.bind_page_identity(page)
                     except cache_store.AccountIdentityConflict as exc:
@@ -873,7 +873,7 @@ def run_content(hwtid: str = "", item_keys=None, hwtids=None, force: bool = Fals
                             return {"ok": False, "requested": len(selected),
                                     "cached": len(fresh), "ok_count": 0,
                                     "failed": 0, "remaining": remaining,
-                                    "error": "未登录或会话已过期，请运行 login.py",
+                                    "error": "未登录或会话已过期，请在管理菜单的学校账号面板完成登录",
                                     "items": results}
                         try:
                             scrape.bind_page_identity(page)

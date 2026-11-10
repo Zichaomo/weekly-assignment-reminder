@@ -28,15 +28,36 @@
       <div class="tb-spacer"></div>
       <div class="anchor">
         <button class="menu-btn" id="menuBtn" aria-haspopup="menu" aria-expanded="false"><i data-lucide="settings-2"></i>管理<i data-lucide="chevron-down"></i></button>
-        <div class="pop menu" id="menu" role="menu">
-          <button role="menuitem" id="openCourses"><i data-lucide="library"></i>课程管理</button>
-          <button role="menuitem" id="btnBlCourse" hidden>规则入口锚点</button>
-          <button role="menuitem" id="openSystem"><i data-lucide="alarm-clock"></i>定时发布</button>
-          <button role="menuitem" id="openBackend"><i data-lucide="server"></i>后台版本</button>
-          <button role="menuitem" id="openLogs"><i data-lucide="history"></i>运行记录</button>
-          <hr />
-          <button role="menuitem" id="exportViews">导出裁剪备份</button>
-          <button role="menuitem" id="shutdown">停止控制台服务</button>
+        <div class="pop menu" id="menu" role="menu" aria-label="管理功能">
+          <div class="menu-guide">
+            <button role="menuitem" id="openSetup"><i data-lucide="info"></i>部署指引</button>
+          </div>
+          <div class="menu-columns">
+            <section class="menu-group" data-menu-group="account" role="group" aria-labelledby="menuAccountTitle">
+              <h2 class="menu-group-title" id="menuAccountTitle">账号与推送</h2>
+              <div class="menu-group-items">
+                <button role="menuitem" id="openAccount"><i data-lucide="settings-2"></i>学校账号</button>
+                <button role="menuitem" id="openWecom"><i data-lucide="bell-ring"></i>企微推送</button>
+                <button role="menuitem" id="openSystem"><i data-lucide="alarm-clock"></i>定时发布</button>
+              </div>
+            </section>
+            <section class="menu-group" data-menu-group="content" role="group" aria-labelledby="menuContentTitle">
+              <h2 class="menu-group-title" id="menuContentTitle">课程与内容</h2>
+              <div class="menu-group-items">
+                <button role="menuitem" id="openCourses"><i data-lucide="library"></i>课程管理</button>
+                <button role="menuitem" id="btnBlCourse" hidden>规则入口锚点</button>
+                <button role="menuitem" id="exportViews"><i data-lucide="download"></i>导出裁剪备份</button>
+              </div>
+            </section>
+            <section class="menu-group" data-menu-group="system" role="group" aria-labelledby="menuSystemTitle">
+              <h2 class="menu-group-title" id="menuSystemTitle">系统与维护</h2>
+              <div class="menu-group-items">
+                <button role="menuitem" id="openBackend"><i data-lucide="server"></i>后台版本</button>
+                <button role="menuitem" id="openLogs"><i data-lucide="history"></i>运行记录</button>
+                <button role="menuitem" id="shutdown" class="menu-danger"><i data-lucide="x"></i>停止控制台服务</button>
+              </div>
+            </section>
+          </div>
         </div>
       </div>
       <div class="winctl" aria-hidden="true">
@@ -246,6 +267,7 @@
 <script src="./js/app.js"></script>
 <script src="./js/panels.js"></script>
 <script src="./js/management.js"></script>
+<script src="./js/settings.js"></script>
 <script src="./js/run_history.js"></script>
 <script src="/system_panel.js"></script>
 <script src="/course_rules.js"></script>

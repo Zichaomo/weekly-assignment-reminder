@@ -1,7 +1,10 @@
 ﻿Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$python = Join-Path $env:USERPROFILE ".workbuddy\binaries\python\envs\default\Scripts\python.exe"
+$python = Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw "Python 3.14 interpreter not found: $python"
+}
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:platformRows = @()
 

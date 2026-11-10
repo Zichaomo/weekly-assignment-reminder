@@ -10,23 +10,27 @@
      脚本**不关窗口**，提示你在这个窗口里手动拖一下滑块；脚本同时继续轮询，
      一登录成功立刻把会话落盘。
 
-密码不落盘：只保存登录后的 cookie / storage_state（复用 profile 里 Edge 自己存的密码）。
+控制台保存的账号密码由当前 Windows 用户 DPAPI 加密，登录优先读取该凭据。
+Edge 自动填充和密码库提供兼容兜底，认证成功后保存 cookie / storage_state。
 
 用法:
     python login.py              # 自动登录优先，卡住则转人工（同一窗口，默认）
     python login.py --manual     # 跳过自动填充，直接人工登录
     python login.py --no-wait    # 自动提交后只等 45 秒，不成不转人工（给定时任务用）
     python login.py --check      # 只检查 storage_state.json 是否仍有效
-    python login.py --headless   # 无头（只能跑 --check 场景）
+    python login.py --headless   # 无头执行（定时自动登录使用）
+    python login.py --fresh      # 在新上下文中重新认证
 """
 import argparse
 import sys
 import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from platform_lock import FetchLock, LockTimeout
+import scrape
+import local_settings
 
 # Windows 下子进程 stdout 默认 GBK，父进程按 utf-8 读会乱码，统一强制 utf-8
 for _stream in (sys.stdout, sys.stderr):
@@ -37,10 +41,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 BASE = "https://course.buct.edu.cn"
 LOGIN_URL = BASE + "/meol/homepage/common/sso_login.jsp"   # 免密入口（不是 /meol）
-HOME_URL = BASE + "/meol"
 
 ROOT = Path(__file__).resolve().parent
-PROFILE_DIR = Path.home() / ".workbuddy" / "profiles" / "buct-course-edge"
+PROFILE_DIR = ROOT / "browser-profile"
 STATE_FILE = ROOT / "storage_state.json"
 SHOT_FILE = ROOT / "login_result.png"
 
@@ -53,8 +56,8 @@ POLL_STEP = 2
 def launch_ctx(p, headless=False, retries=3):
     """本机 Edge 偶发启动即崩，重试几次。
 
-    注意：登录必须用持久 profile —— Edge 的「自动填充账号密码」存在 profile 里，
-    换成 storage_state 或临时 context 都拿不到自动填充。
+    持久 profile 可复用 Edge 保存的自动填充资料。
+    控制台重新认证使用独立临时上下文和已保存的账号凭据。
     """
     last = None
     for i in range(retries):
@@ -80,67 +83,9 @@ def launch_ctx(p, headless=False, retries=3):
 
 
 # ---------------------------------------------------------------- 登录判定
-def collect_text(page) -> str:
-    """主 frame + 所有子 frame 的文本。"""
-    try:
-        text = page.inner_text("body", timeout=3000) or ""
-    except Exception:  # noqa: BLE001
-        text = ""
-    for fr in page.frames:
-        if fr is page.main_frame:
-            continue
-        try:
-            text += "\n" + (fr.inner_text("body", timeout=2000) or "")
-        except Exception:  # noqa: BLE001
-            pass
-    return text
-
-
 def is_logged_in(page) -> bool:
-    """登录判定。
-
-    硬指标一：平台内页出现「在线总时长 / 登录时间」（登录后才有的个人页信息）。
-    硬指标二：CAS 登录成功后下发 CASTGC / TGC（Ticket Granting Cookie）。
-
-    注意：门户首页（portal.buct.edu.cn）无论登录与否 body 都可能为空（SPA），
-    不能凭空 body 判登录；登录页本身会显示「忘记/修改密码」等字样，要排除。
-    """
-    url = (page.url or "").lower()
-    # 停在任一登录页就一定是「未登录」：旧 CAS / 旧门户 iframe / 新版 sidportal
-    if ("cas/login" in url or "experimental-auth-endpoint" in url
-            or "sidportal" in url and "/login" in url):
-        return False
-
-    text = ""
-    try:
-        text = collect_text(page)
-    except Exception:  # noqa: BLE001
-        pass
-    if "在线总时长" in text or "登录时间" in text:
-        return True
-
-    try:
-        names = {c["name"].upper() for c in page.context.cookies()}
-    except Exception:  # noqa: BLE001
-        names = set()
-
-    if "CASTGC" in names or "TGC" in names:
-        # 有票据也可能还停在登录页（票据是门户的），用登录页特征排除
-        if "忘记/修改密码" in text or "涉密不上网" in text:
-            return False
-        return True
-
-    if "course.buct.edu.cn" in url:
-        if "非统一身份认证登录" in text or "统一身份认证登录" in text:
-            return False
-        if "personal.do" in url:
-            return True
-        return any(m in text for m in ("我的课程", "注销", "退出", "个人中心"))
-
-    # 门户首页：未登录也会显示，不能据此判已登录
-    if "非统一身份认证登录" in text or "统一身份认证登录" in text:
-        return False
-    return any(m in text for m in ("我的课程", "注销", "退出", "个人中心"))
+    """Use the same authenticated platform-page evidence as scraping."""
+    return scrape.page_authenticated(page)
 
 
 def _logged_in_via_state() -> bool:
@@ -149,35 +94,23 @@ def _logged_in_via_state() -> bool:
     必须与 scrape.py 同路径（launch + new_context(storage_state=...)），
     不能查持久 profile —— 那是另一份登录态，会误报 NEED_LOGIN。
 
-    ⚠️ 这里绝不能写 `page.goto(HOME_URL)`（/meol）做二次判定：
-    那个地址是**未登录首页**，一旦被重定向过去，就算会话完全有效也会被判成 NEED_LOGIN
-    ——每周日的定时任务会因此误报「登录态失效」并发出告警。只认 SSO 入口 + 平台内页特征。
+    从 SSO 入口等待平台页面证据，等待上限与抓取入口一致。
+    /meol 根地址可能返回未登录首页，不能用于二次判定。
     """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel="msedge", args=["--no-sandbox"])
-        ctx = browser.new_context(storage_state=str(STATE_FILE))
-        page = ctx.new_page()
-        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3500)
-        ok = is_logged_in(page)
-        if not ok:
-            # 兜底：SSO 入口若停在门户壳上，直接看平台内页的个人信息字样
+    try:
+        if local_settings.needs_login() or not STATE_FILE.is_file():
+            return False
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, channel="msedge", args=["--no-sandbox"])
             try:
-                txt = ""
-                for fr in page.frames:
-                    try:
-                        txt += (fr.inner_text("body", timeout=2500) or "")
-                    except Exception:  # noqa: BLE001
-                        pass
-                ok = ("在线总时长" in txt) or ("登录时间" in txt)
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            ctx.close()
-            browser.close()
-        except Exception:  # noqa: BLE001
-            pass
-        return ok
+                ctx = browser.new_context(storage_state=str(STATE_FILE), ignore_https_errors=True)
+                page = ctx.new_page()
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+                return scrape.wait_authenticated(page, ctx, timeout=12)
+            finally:
+                browser.close()
+    except (OSError, ValueError, PlaywrightError):
+        return False
 
 
 # ---------------------------------------------------------------- 自动登录
@@ -379,6 +312,7 @@ def auto_submit(page) -> str:
     nopass   —— 表单在，但账号密码拿不到（自动填充为空，Edge 密码库里也没有）
     noclick  —— 填了密码但没点到登录按钮
 
+    控制台凭据优先，缺省时使用 Edge 自动填充及密码库。
     2026-10 平台改版后新增了两步：
       1. 登录页默认停在「企业微信扫码」标签 —— 必须切到「用户名密码」；
       2. Edge 的自动填充绑在**旧域名** origin 上，新域名填不上 ——
@@ -404,6 +338,18 @@ def auto_submit(page) -> str:
     except Exception:  # noqa: BLE001
         return "noframe"
 
+    user, password = local_settings.credentials()
+    if user and password:
+        try:
+            u_loc.fill(user)
+            p_loc.fill(password)
+        except Exception as exc:
+            print(f"填入已保存凭据失败（{type(exc).__name__}）")
+            return 'nopass'
+        _sync_values(fr, user, password)
+        print('已填入控制台保存的学校账号凭据')
+        return _click_submit(page, fr, p_loc)
+
     # ---- 第一步：点一下用户名，看 Edge 自动填充会不会灌值 ----
     u_val = ""
     for _ in range(5):
@@ -427,8 +373,7 @@ def auto_submit(page) -> str:
             p_val = read_value(p_loc)
             if p_val:
                 break
-        print(f"  Edge 自动填充：账号 {u_val}，"
-              f"密码 {'*' * min(len(p_val), 8) if p_val else '（空）'}")
+        print('  Edge 已自动填充学校账号' if p_val else '  Edge 密码自动填充为空')
 
     # ---- 第二步：填充拿不到就用 Edge 密码库（新版域名必然走这里）----
     if not u_val or not p_val:
@@ -439,11 +384,10 @@ def auto_submit(page) -> str:
             u_loc.fill(user)
             p_loc.fill(pwd)
         except Exception as e:  # noqa: BLE001
-            print(f"  填入凭据失败（{type(e).__name__}: {e}）")
+            print(f"  填入凭据失败（{type(e).__name__}）")
             return "nopass"
         u_val, p_val = read_value(u_loc), read_value(p_loc)
-        print(f"  已用 Edge 密码库填入：账号 {u_val}，"
-              f"密码 {'*' * min(len(p_val), 8) if p_val else '（空）'}")
+        print('  已用 Edge 密码库填入学校账号凭据')
     if not u_val or not p_val:
         return "nopass"
 
@@ -455,8 +399,12 @@ def auto_submit(page) -> str:
 def save_state(ctx, page, why: str) -> bool:
     """落盘会话 + 截图。"""
     time.sleep(1.5)
+    if not is_logged_in(page):
+        print("保存前未能确认北化在线登录成功，请完成登录后重试。")
+        return False
     try:
         ctx.storage_state(path=str(STATE_FILE))
+        local_settings.mark_logged_in()
     except Exception as e:  # noqa: BLE001
         print(f"保存会话失败：{e}")
         return False
@@ -468,6 +416,11 @@ def save_state(ctx, page, why: str) -> bool:
     except Exception:  # noqa: BLE001
         pass
     return True
+
+
+def launch_fresh(p, headless=False):
+    browser = p.chromium.launch(headless=headless, channel='msedge', args=['--no-sandbox'])
+    return browser.new_context(ignore_https_errors=True, locale='zh-CN', viewport=None)
 
 
 def launch_any(p, headless=False):
@@ -490,10 +443,13 @@ def launch_any(p, headless=False):
 
 
 # ---------------------------------------------------------------- 主流程
-def run_auto(headless=False, no_wait=False) -> int:
+def run_auto(headless=False, no_wait=False, fresh=False) -> int:
     """自动登录优先；卡住则不关窗口，转人工，同一窗口继续等。"""
     with sync_playwright() as p:
-        ctx = launch_any(p, headless=headless)
+        if fresh or local_settings.needs_login():
+            ctx = launch_fresh(p, headless=headless)
+        else:
+            ctx = launch_any(p, headless=headless)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         time.sleep(4)
@@ -508,7 +464,7 @@ def run_auto(headless=False, no_wait=False) -> int:
         if is_new_sso(page):
             print("  平台已改版为 sidportal 统一身份认证（无 iframe）——")
             print("  自动切到「用户名密码」标签，填账号密码后点「立即登录」。")
-            print("  凭据优先取 Edge 自动填充；取不到则从 Edge 密码库解密（不落盘）。")
+            print("  优先读取控制台保存的凭据，随后尝试 Edge 自动填充和密码库。")
         else:
             print("  Edge 会自动填充账号密码，脚本自动点「登录」。")
         print("=" * 64)
@@ -536,8 +492,8 @@ def run_auto(headless=False, no_wait=False) -> int:
         while True:
             time.sleep(POLL_STEP)
 
+            dismiss_device_dialog(page)
             if is_logged_in(page):
-                dismiss_device_dialog(page)
                 time.sleep(1.5)
                 if is_logged_in(page):
                     ok = save_state(ctx, page, "自动登录成功")
@@ -603,7 +559,8 @@ def run_auto(headless=False, no_wait=False) -> int:
 def run_manual(headless=False) -> int:
     """纯人工登录（保留原来的行为）。"""
     with sync_playwright() as p:
-        ctx = launch_ctx(p, headless=headless)
+        ctx = (launch_fresh(p, headless=headless) if local_settings.needs_login()
+               else launch_ctx(p, headless=headless))
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
 
@@ -646,9 +603,10 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="只检查会话是否有效")
     ap.add_argument("--auto", action="store_true", help="自动登录（默认行为，保留此参数兼容旧用法）")
     ap.add_argument("--manual", action="store_true", help="跳过自动填充，直接人工登录")
+    ap.add_argument('--fresh', action='store_true', help='使用新的浏览器上下文重新认证')
     ap.add_argument("--no-wait", action="store_true",
                     help="自动提交后只等 45 秒，不成不转人工（给定时任务用）")
-    ap.add_argument("--headless", action="store_true", help="无头模式（无法登录，只能验证脚本）")
+    ap.add_argument("--headless", action="store_true", help="无头执行，适用于会话检查和后台自动登录")
     args = ap.parse_args()
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -661,8 +619,8 @@ def main() -> int:
                 return 0 if ok else 1
             if args.manual:
                 return run_manual(headless=args.headless)
-            return run_auto(headless=args.headless, no_wait=args.no_wait)
-    except LockTimeout as exc:
+            return run_auto(headless=args.headless, no_wait=args.no_wait, fresh=args.fresh)
+    except (LockTimeout, ValueError) as exc:
         print(f"NEED_LOGIN: {exc}")
         return 1
 

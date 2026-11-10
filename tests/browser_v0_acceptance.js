@@ -3,10 +3,8 @@
 const assert = require('assert/strict');
 const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { chromium } = require(process.env.PLAYWRIGHT_PATH ||
-  'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js');
+const { PYTHON, chromium } = require('./browser_runtime');
 
 const root = path.resolve(__dirname, '..');
 const output = path.join(__dirname, 'artifacts', 'v0-fidelity');
@@ -36,9 +34,7 @@ async function main() {
     browser?.close();
     process.exitCode = 1;
   }, 90000);
-  const python = process.env.PYTHON || path.join(os.homedir(),
-    '.workbuddy/binaries/python/envs/default/Scripts/python.exe');
-  fixture = spawn(python, ['-B', path.join(__dirname, 'browser_fixture_server.py')], {
+  fixture = spawn(PYTHON, ['-B', path.join(__dirname, 'browser_fixture_server.py')], {
     cwd: root,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', HOMEWORK_PUBLISH_FRESH_SEC: '-1' },
     windowsHide: true,

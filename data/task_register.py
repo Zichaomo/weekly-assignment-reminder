@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """把「每周定时推送」注册成 Windows 计划任务（2026-10-16）。
 
-第一部分：每周日固定时间跑一次，把作业提醒推到企业微信（**默认测试群**）。
+第一部分：每周日固定时间跑一次，按配置渠道推送作业提醒。
 第二部分（周日开机补推）不在这里，见 task_catchup.py。
 
 设计要点（都是踩过的坑）：
-  · **必须用装了 playwright 的那个解释器**：系统 python 没装，抓取会直接失败。
-    这里自动探测 %USERPROFILE%\\.workbuddy\\binaries\\python\\envs\\default 下的 python，
-    找不到就报错，绝不静默用一个跑不起来的解释器去注册任务。
+  · **使用当前运行脚本的解释器**，与 Web 设置、后台子进程保持一致。
+    注册前应在该环境安装 playwright 和 Pillow。
   · **只跑一次、不重复**：schtasks 的 /SC WEEKLY /D SUN 就是「每周日」，
     不需要自己在脚本里判断星期几。
   · **错过就补**（StartWhenAvailable）：周日那一刻电脑没开机/休眠，开机后补跑一次。
@@ -50,14 +49,7 @@ TASK_CATCHUP = ROOT / "task_catchup.py"
 
 
 def find_python() -> str:
-    """找装了 playwright 的解释器（就是本项目一直用的那个）。"""
-    cands = [
-        Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default" / "Scripts" / "python.exe",
-        Path(sys.executable),
-    ]
-    for c in cands:
-        if c.exists():
-            return str(c)
+    """Keep scheduled execution in the environment used to register the task."""
     return sys.executable
 
 

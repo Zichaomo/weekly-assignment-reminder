@@ -25,7 +25,7 @@ setlocal
 rem Keep the console code page at the system ANSI page (936 on zh-CN) so that
 rem helper tools behave consistently. No non-ASCII is printed either way.
 chcp 936 >nul 2>&1
-set "PY=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+set "PY=%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
 set "SRV=%~dp0data\server.py"
 set "VBS=%~dp0data\run_hidden.vbs"
 set "FOCUS=%~dp0data\focus_console.py"

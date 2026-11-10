@@ -26,7 +26,7 @@ import tempfile
 from ctypes import wintypes
 from pathlib import Path
 
-PROFILE_DIR = Path.home() / ".workbuddy" / "profiles" / "buct-course-edge"
+PROFILE_DIR = Path(__file__).resolve().parent / "browser-profile"
 LOCAL_STATE = PROFILE_DIR / "Local State"
 LOGIN_DB = PROFILE_DIR / "Default" / "Login Data"
 
@@ -34,7 +34,7 @@ LOGIN_DB = PROFILE_DIR / "Default" / "Login Data"
 def _candidate_profiles() -> list:
     """可能存着北化密码的 Edge 用户目录，按优先级排列。
 
-    为什么不止一个：自动登录用的是专用 profile（buct-course-edge），
+    为什么不止一个：自动登录用的是项目专用 profile（data/browser-profile），
     但你很可能在**日常 Edge** 里手动登录过一次 —— 那种情况下密码存在
     默认用户目录里。两个地方都找，才不会出现「明明存了却读不到」。
     """
@@ -55,12 +55,6 @@ def _candidate_profiles() -> list:
 ORIGIN_PREFERENCE = ("sidportal.buct.edu.cn", "portal.buct.edu.cn",
                      "experimental-auth-endpoint.buct.edu.cn",
                      "course.buct.edu.cn", "buct.edu.cn")
-
-try:
-    import win32crypt
-except Exception:  # noqa: BLE001
-    win32crypt = None
-
 
 # ---------------------------------------------------------------- AES-256-GCM
 _BCRYPT = ctypes.WinDLL("bcrypt") if hasattr(ctypes, "WinDLL") else None
@@ -165,16 +159,12 @@ def aes_gcm_decrypt(key: bytes, blob: bytes) -> bytes:
 
 # ---------------------------------------------------------------- 取凭据
 def _master_key(local_state: Path) -> bytes:
-    if win32crypt is None:
-        raise RuntimeError("缺少 pywin32（win32crypt），无法解密 Edge 密码库")
+    from local_settings import _protect
     state = json.loads(local_state.read_text(encoding="utf-8"))
     enc = base64.b64decode(state["os_crypt"]["encrypted_key"])
     if enc.startswith(b"DPAPI"):
         enc = enc[5:]
-    ok, key = win32crypt.CryptUnprotectData(enc, None, None, None, 0)
-    if not ok:
-        raise RuntimeError("DPAPI 解出主密钥失败")
-    return key
+    return _protect(enc, decrypt=True)
 
 
 def _read_logins(login_db: Path) -> list:

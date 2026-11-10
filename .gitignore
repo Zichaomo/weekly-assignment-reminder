@@ -1,6 +1,7 @@
 # ── 敏感凭据：绝不能提交 ──────────────────────────
 # webhook 的 key= 就是群发口令，任何人拿到都能往群里发消息
 data/config.json
+data/settings-*.tmp
 # 登录会话（CAS 票据 TGC / JSESSIONID），能直接进你的北化在线账号
 data/storage_state.json
 
@@ -21,11 +22,13 @@ data/login-normal.html
 data/_notify_payload.txt
 
 # ── 调试产物 ──────────────────────────────────────
+/debug.log
 data/debug/
 tests/artifacts/
 
-# ── WorkBuddy 会话数据（含项目记忆 / 账号信息，属本地私有）──
-.workbuddy/
+# ── 本机浏览器资料与历史会话归档 ──────────────────
+data/browser-profile/
+.local-state/
 
 # ── Python / 打包 ─────────────────────────────────
 __pycache__/

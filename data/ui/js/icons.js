@@ -10,6 +10,7 @@
     'calendar-range':'M3 5h18v16H3ZM7 2v6M17 2v6M3 10h18M7 14h4M14 17h3',
     send:'m22 2-7 20-4-9-9-4ZM22 2 11 13',
     copy:'M8 8h13v13H8ZM16 8V3H3v13h5',
+    download:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3',
     'trash-2':'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',
     library:'M4 3v18M9 3v18M14 3v18M18 3l4 18',
     'settings-2':'M3 6h8M15 6h6M3 18h4M11 18h10M11 3v6M7 15v6',

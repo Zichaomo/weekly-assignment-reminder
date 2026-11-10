@@ -1,12 +1,12 @@
 const {spawn}=require('child_process');
-const fs=require('fs'),path=require('path'),assert=require('assert/strict'),os=require('os');
-const {chromium}=require(process.env.PLAYWRIGHT_PATH||'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js');
+const fs=require('fs'),path=require('path'),assert=require('assert/strict');
+const {PYTHON,chromium}=require('./browser_runtime');
 let child,browser,timer;
 const output=path.join(__dirname,'artifacts','run-history');
 async function main(){
   fs.mkdirSync(output,{recursive:true});
   timer=setTimeout(()=>{child?.kill();browser?.close();process.exitCode=1;},60000);
-  child=spawn(process.env.PYTHON||path.join(os.homedir(),'.workbuddy/binaries/python/envs/default/Scripts/python.exe'),['-B',path.join(__dirname,'browser_fixture_server.py')],{cwd:path.resolve(__dirname,'..'),env:{...process.env,PYTHONIOENCODING:'utf-8',HOMEWORK_RUN_HISTORY_FIXTURE:'1'},windowsHide:true});
+  child=spawn(PYTHON,['-B',path.join(__dirname,'browser_fixture_server.py')],{cwd:path.resolve(__dirname,'..'),env:{...process.env,PYTHONIOENCODING:'utf-8',HOMEWORK_RUN_HISTORY_FIXTURE:'1'},windowsHide:true});
   let stderr='';child.stderr.on('data',b=>stderr+=b);
   const info=await new Promise((resolve,reject)=>{let data='';const wait=setTimeout(()=>reject(Error('fixture timeout '+stderr)),10000);child.stdout.on('data',b=>{data+=b;const line=data.split(/\r?\n/).find(x=>x.startsWith('{'));if(line){clearTimeout(wait);resolve(JSON.parse(line));}});child.on('exit',()=>reject(Error(stderr)));});
   const base='http://127.0.0.1:'+info.port;

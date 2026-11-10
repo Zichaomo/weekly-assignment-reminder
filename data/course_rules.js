@@ -8,6 +8,7 @@
   icon.dataset.lucide = 'file-text';
   button.prepend(icon);
   el('btnBlCourse').before(button);
+  if (el('menu')?.contains(button)) button.setAttribute('role', 'menuitem');
   window.renderLocalIcons?.();
   const style = document.createElement('style');
   style.textContent = `#ruleMask .modal{width:min(1100px,96vw);max-height:94vh}#ruleMask .rule-layout{display:grid;grid-template-columns:310px 1fr;gap:24px}#ruleMask .rule-list{max-height:450px;overflow:auto}#ruleMask .rule-row{display:block;width:100%;text-align:left;padding:14px;margin:6px 0;border:1px solid var(--line,#ddd);background:transparent;border-radius:6px;cursor:pointer;color:inherit}#ruleMask .rule-row.active{border-color:var(--accent,#9c4334);background:#f7eee5}#ruleMask small{display:block;color:#777;margin-top:6px}#ruleMask label{display:block;margin:12px 0 5px}#ruleMask input,#ruleMask select,#ruleMask textarea{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccc;border-radius:4px;background:var(--paper,#fff);color:inherit;font:inherit}#ruleMask pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f2ec;padding:14px;min-height:70px;font:inherit}#ruleMask .rule-options{display:grid;grid-template-columns:1fr 1fr;gap:14px}#ruleMask .rule-status{min-height:24px;color:#945132;margin:12px 0} @media(max-width:720px){#ruleMask .rule-layout{grid-template-columns:1fr}#ruleMask .rule-list{max-height:180px}}`;

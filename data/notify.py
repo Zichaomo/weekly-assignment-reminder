@@ -172,9 +172,10 @@ def recent_duplicate(text: str, window_sec: int, target: str = ""):
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
-    if CONFIG_FILE.exists():
+    config_file = Path(os.environ.get('HOMEWORK_CONFIG_PATH') or CONFIG_FILE)
+    if config_file.exists():
         try:
-            cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+            cfg.update(json.loads(config_file.read_text(encoding="utf-8")))
         except Exception as e:  # noqa: BLE001
             print(f"WARN: config.json 解析失败({e})，用默认配置", file=sys.stderr)
     return cfg

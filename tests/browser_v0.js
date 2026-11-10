@@ -1,14 +1,14 @@
 // Real connected UI against an isolated backend. Only exact loopback origin is allowed.
 const {spawn}=require('child_process');
-const fs=require('fs'),path=require('path'),assert=require('assert'),os=require('os');
-const {chromium}=require(process.env.PLAYWRIGHT_PATH||'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js');
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const {PYTHON,chromium}=require('./browser_runtime');
 const ROOT=path.resolve(__dirname,'..');
 const output=path.join(__dirname,'artifacts','v0-connected');fs.mkdirSync(output,{recursive:true});
 let child,browser,info,timer;
 const errors=[],external=[],posts=[];
 async function main(){
   timer=setTimeout(()=>{child?.kill();browser?.close();process.exitCode=1;},100000);
-  child=spawn(process.env.PYTHON||path.join(os.homedir(),'.workbuddy/binaries/python/envs/default/Scripts/python.exe'),['-B',path.join(__dirname,'browser_fixture_server.py')],{cwd:ROOT,env:{...process.env,PYTHONIOENCODING:'utf-8'},windowsHide:true});
+  child=spawn(PYTHON,['-B',path.join(__dirname,'browser_fixture_server.py')],{cwd:ROOT,env:{...process.env,PYTHONIOENCODING:'utf-8'},windowsHide:true});
   let stderr='';child.stderr.on('data',b=>stderr+=b);
   info=await new Promise((resolve,reject)=>{let data='';const timeout=setTimeout(()=>reject(Error('fixture timeout '+stderr)),15000);child.stdout.on('data',b=>{data+=b;const line=data.split(/\r?\n/).find(x=>x.startsWith('{'));if(line){clearTimeout(timeout);resolve(JSON.parse(line));}});child.on('exit',()=>reject(Error(stderr)));});
   const base='http://127.0.0.1:'+info.port;

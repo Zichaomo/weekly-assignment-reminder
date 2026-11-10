@@ -7,10 +7,7 @@ const path = require('path');
 const assert = require('assert');
 
 const ROOT = path.resolve(__dirname, '..');
-const PLAYWRIGHT = process.env.PLAYWRIGHT_PATH ||
-  'C:/Users/MECHREVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
-const PYTHON = process.env.PYTHON || 'D:/Miniconda3/python.exe';
-const { chromium } = require(PLAYWRIGHT);
+const { PYTHON, chromium } = require('./browser_runtime');
 
 function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 

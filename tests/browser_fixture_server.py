@@ -83,6 +83,8 @@ def main():
     server.schedule_control.change = blocked('schedule mutation')
     server.run_task = blocked("server.run_task")
     hub.run_publish = blocked("hub.run_publish")
+    import edge_cred
+    edge_cred.get_saved_credentials = blocked('real browser credentials')
     hub.run_content = blocked("hub.run_content")
     hub.run_refresh_courses = blocked("hub.run_refresh_courses")
     if hasattr(os, "startfile"):

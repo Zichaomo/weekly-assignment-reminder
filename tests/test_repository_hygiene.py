@@ -8,6 +8,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryHygieneTests(unittest.TestCase):
+    def test_runtime_credentials_and_diagnostic_files_are_ignored(self):
+        paths = ['debug.log', 'data/config.json', 'data/storage_state.json',
+                 'data/settings-fixture.tmp', 'data/browser-profile/Local State',
+                 '.local-state/runtime-migration/task.xml',
+                 'tests/artifacts/management-menu/menu-guide-centered.png']
+        result = subprocess.run(
+            ['git', 'check-ignore', '--no-index', '-z', '--stdin'],
+            input='\0'.join(paths) + '\0', capture_output=True, text=True,
+            encoding='utf-8', cwd=ROOT, timeout=10,
+        )
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertEqual(set(result.stdout.strip('\0').split('\0')), set(paths))
+
     def test_local_agent_files_are_ignored_even_when_previously_tracked(self):
         paths = [
             'AGENTS.md',

@@ -48,6 +48,8 @@ import schedule_status
 import schedule_control
 import course_rules
 import run_history
+import local_settings
+from platform_lock import FetchLock, LockTimeout
 
 LIFECYCLE_LOCK = threading.RLock()
 _RESTARTING = False
@@ -138,7 +140,7 @@ def capture_text(fn, *args, **kwargs):
 
 def load_channel():
     try:
-        cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        cfg = hub.notify.load_config()
         return cfg.get("channel", "未知")
     except Exception:  # noqa: BLE001
         return "未知"
@@ -216,7 +218,24 @@ def run_task(op, params):
             force=bool(params.get("force")),
             limit=params.get("limit"))
     if op == "refresh-courses":
-        return hub.run_refresh_courses()
+        result = hub.run_refresh_courses()
+        if result.get('ok'):
+            with FetchLock(wait_sec=120):
+                local_settings.mark_courses_refreshed()
+        return result
+    if op in ('login', 'check-login'):
+        command = [sys.executable, str(ROOT / 'login.py')]
+        command += ['--check'] if op == 'check-login' else ['--auto', '--fresh']
+        try:
+            result = subprocess.run(command, cwd=ROOT, capture_output=True,
+                                    env=dict(os.environ, PYTHONIOENCODING='utf-8'),
+                                    timeout=90 if op == 'check-login' else 600,
+                                    creationflags=0x08000000 if os.name == 'nt' else 0)
+        except subprocess.TimeoutExpired:
+            return {'ok': False, 'error': '登录操作超时，请在学校账号面板重试并完成验证码'}
+        return {'ok': result.returncode == 0,
+                'error': '' if result.returncode == 0 else '尚未验证登录成功，请重新登录并完成验证码',
+                'login_verified': result.returncode == 0}
     return {"ok": False, "error": f"未知任务：{op}"}
 
 
@@ -432,6 +451,21 @@ def manual_action(action, p):
 class Handler(BaseHTTPRequestHandler):
     server_version = "HomeworkConsole/2.0"
 
+    def _settings_origin_allowed(self, mutation=False):
+        host = self.headers.get('Host', '')
+        try:
+            parsed = urlsplit('http://' + host)
+            if parsed.hostname not in ('127.0.0.1', 'localhost', '::1') or parsed.username or parsed.path:
+                return False
+        except ValueError:
+            return False
+        origin = self.headers.get('Origin')
+        if origin and origin != 'http://' + host:
+            return False
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site':
+            return False
+        return not mutation or self.headers.get('Content-Type', '').split(';')[0] == 'application/json'
+
     def log_message(self, fmt, *args):  # 静默访问日志
         pass
 
@@ -504,6 +538,14 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         u = urlparse(self.path)
         path, q = u.path, parse_qs(u.query)
+
+        settings_reads = {'/api/settings/account': local_settings.account_status,
+                          '/api/settings/wecom': local_settings.wecom_status,
+                          '/api/setup': local_settings.setup_status}
+        if path in settings_reads:
+            if not self._settings_origin_allowed():
+                return self._send(403, {'ok': False, 'error': '请从本机控制台访问设置'})
+            return self._send(200, {'ok': True, **settings_reads[path]()})
 
         if path in ("/", "/console.html"):
             if not PAGE_FILE.exists():
@@ -689,6 +731,26 @@ class Handler(BaseHTTPRequestHandler):
             self.activity_op = {'review':'正文确认', 'view':'保存裁剪'}.get(u.path.rsplit('/', 1)[-1])
         self.activity_started = time.time()
 
+        settings_writes = {'/api/settings/account': local_settings.save_account,
+                           '/api/settings/wecom': local_settings.save_wecom,
+                           '/api/setup': local_settings.complete_setup}
+        if u.path in settings_writes:
+            if not self._settings_origin_allowed(mutation=True):
+                return self._send(403, {'ok': False, 'error': '请从本机控制台保存设置'})
+            with LIFECYCLE_LOCK:
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok': False, 'error': '请等待当前任务结束后再保存设置'})
+                try:
+                    with FetchLock(wait_sec=0):
+                        result = settings_writes[u.path](p)
+                except (local_settings.Conflict, LockTimeout) as exc:
+                    return self._send(409, {'ok': False, 'error': str(exc)})
+                except ValueError as exc:
+                    return self._send(400, {'ok': False, 'error': str(exc)})
+                self.activity_op = {'/api/settings/account': '学校账号设置',
+                                    '/api/settings/wecom': '企微推送设置', '/api/setup': '部署指引'}[u.path]
+                return self._send(200, {'ok': True, **result})
+
         if u.path == '/api/course-rules/preview':
             return self._send(200, {'ok': True, **course_rules.preview(p)})
         if u.path == '/api/course-rules':
@@ -731,8 +793,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/tasks":
             op = p.get("op", "")
-            if op not in ("fetch", "preview", "publish", "content", "refresh-courses"):
+            if op not in ("fetch", "preview", "publish", "content", "refresh-courses", "login", "check-login"):
                 return self._send(400, {"ok": False, "error": f"未知任务：{op}"})
+            if op in ('login', 'check-login'):
+                if not self._settings_origin_allowed(mutation=True):
+                    return self._send(403, {'ok': False, 'error': '请从本机控制台执行登录'})
+                p = {}
             keys = p.get("item_keys") or []
             ids = p.get("hwtids") or []
             if not isinstance(keys, list) or not isinstance(ids, list) \

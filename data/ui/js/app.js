@@ -249,7 +249,7 @@ async function refreshList(){
     renderCacheStatus();
   }
 }
-const taskLabels = { preview:'本地预览', publish:'发布提醒', fetch:'检索北化在线', content:'获取正文', 'refresh-courses':'刷新课程表' };
+const taskLabels = { preview:'本地预览', publish:'发布提醒', fetch:'检索北化在线', content:'获取正文', 'refresh-courses':'刷新课程表', login:'学校登录', 'check-login':'检查登录' };
 function taskProgressText(task) {
   const progress = task.progress || {};
   const done = progress.done ?? progress.course_done;
@@ -273,7 +273,7 @@ async function pollTask(id,op,options={}){
   const label = taskLabels[op] || op;
   state.tasks.set(id,{op,text:label+' · 排队中'});showTaskStatus();
   sessionStorage.setItem('homeworkUiTasks',JSON.stringify([...state.tasks].map(([id,t])=>({id,op:t.op}))));
-  const deadline=Date.now()+180000;
+  const deadline=Date.now()+(op === 'login' ? 660000 : 180000);
   try {
     while(Date.now()<deadline){
       const task=requireOk(await api('/api/tasks/'+encodeURIComponent(id)));
