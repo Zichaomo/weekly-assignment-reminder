@@ -246,17 +246,18 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector('#list').textContent.includes('过期手动任务'));
   });
   await page.locator('#list .item').filter({ hasText: primary.title }).click();
-  await check('deadline has the three-column timeline, minute countdown and urgency color', async () => {
+  await check('deadline has the Till two-column layout, full-width thin bar and original urgency color', async () => {
+    assert.equal(await page.locator('.deadline > .deadline-info').count(), 1);
     assert.equal(await page.locator('.deadline .timeline').count(), 1);
     assert.equal(await page.locator('.deadline .timeline').isVisible(), true);
     assert.match(await page.locator('.deadline').innerText(), /11月9日.*周一.*23:59/s);
-    assert.match(await page.locator('.count .k').innerText(), /今天截止/);
+    assert.equal(await page.locator('.count .k').innerText(), '还剩');
     assert.match(await page.locator('.count .v').innerText(), /13\s*小时\s*59\s*分/);
     assert.equal(await page.locator('.count .v').evaluate(element => getComputedStyle(element).color), 'rgb(177, 83, 47)');
     const fraction = await page.locator('.timeline .bar').evaluate(element =>
       element.firstElementChild.getBoundingClientRect().width / element.getBoundingClientRect().width);
     assert(Math.abs(fraction - (1 - (13 * 60 + 59) / (7 * 24 * 60))) < .02);
-    assert.match(await page.locator('.timeline .scale').innerText(), /现在.*11月9日.*10:00.*7\s*天后/s);
+    assert.equal(await page.locator('.timeline .scale').count(), 0);
   });
   await check('detail restores audience badges, source time and the image section without an empty origin card', async () => {
     assert.equal(await page.locator('.flags .done').count(), 1);

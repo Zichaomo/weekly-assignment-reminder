@@ -91,11 +91,16 @@ function visibleRows() {
 }
 function deadlineMarkup(row) {
   const parts = deadlineParts(row);
-  const now = new Date();
+  const remaining = parts.remain.split(' ').map(token => /^\d+$/.test(token)
+    ? `<span class="deadline-number">${token}</span>` : esc(token)).join(' ');
   return `
-    <div><div class="k">截止时间</div><div class="v">${parts.date ? monthDay(parts.date) + ' ' + weekday(parts.date) : '未设截止'} <span class="num">${parts.date ? timeText(parts.date) : ''}</span></div></div>
-    ${parts.date ? `<div class="timeline" aria-hidden="true"><div class="bar ${parts.heat}"><i style="width:${parts.progress}%"></i></div><div class="scale"><span>现在 · ${monthDay(now)} ${timeText(now)}</span><span>${selectedDays()} 天后</span></div></div>` : ''}
-    <div class="count"><div class="k">${parts.date ? parts.expired ? '已经截止' : parts.relative + '截止 · 还剩' : '截止时间未设定'}</div><div class="v ${parts.heat}">${parts.remain}</div></div>`;
+    <div class="deadline-info">
+      <div><div class="k">截止时间</div>${parts.date
+        ? `<time class="v deadline-date" datetime="${parts.date.toISOString()}">${monthDay(parts.date)} ${weekday(parts.date)} ${timeText(parts.date)}</time>`
+        : '<div class="v">未设截止</div>'}</div>
+      ${parts.date ? `<div class="count"><div class="k">${parts.expired ? '状态' : '还剩'}</div><div class="v ${parts.heat}">${remaining}</div></div>` : ''}
+    </div>
+    ${parts.date ? `<div class="timeline"><div class="bar ${parts.heat}" role="progressbar" aria-label="临近截止的时间进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(parts.progress.toFixed(3))}" aria-valuetext="${parts.expired ? '已逾期' : '剩余 ' + parts.remain}"><i style="width:${parts.progress}%"></i></div></div>` : ''}`;
 }
 function render(){
   state.renderedDay = new Date().toDateString();
