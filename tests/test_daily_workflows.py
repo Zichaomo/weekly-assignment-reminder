@@ -193,6 +193,28 @@ class DailyWorkflows(IsolatedCase):
             self.assertFalse(weekly.ensure_login())
         self.assertEqual(run.call_count,1)
 
+    def test_publish_failure_exposes_separate_audience_errors_in_history(self):
+        import run_history
+        cfg = {'channel': 'wecom', 'wecom_webhook': 'https://unit.invalid/class',
+               'personal': {'enabled': True, 'channel': 'wecom', 'wecom_webhook': 'https://unit.invalid/personal'}}
+        def fail(message, channel, config, audience='class'):
+            config.setdefault('_delivery_errors', []).append('模拟代理连接失败 ' + audience)
+            return False
+        with patch.object(notify, 'load_config', return_value=cfg), \
+             patch.object(notify, 'dispatch', side_effect=fail), \
+             patch.object(notify, 'log_push'), patch.object(notify, 'recent_duplicate', return_value=None):
+            result = hub.run_publish(7, False, None)
+        self.assertFalse(result['ok'])
+        self.assertIn('模拟代理连接失败 class', result['error'])
+        self.assertIn('模拟代理连接失败 personal', result['error'])
+        self.assertIn('personal', result['personal']['error'])
+        cache_store.register_task('publish-error', 'fixture-publish-error', 'publish', {})
+        with patch.object(server, 'run_task', return_value=result), patch.dict(server.TASKS, {'publish-error': {}}, clear=True):
+            server._task_worker('publish-error', 'publish', {})
+        summary = json.loads(cache_store.task_record('publish-error')['result_summary'])
+        self.assertIn('模拟代理连接失败', summary['error'])
+        self.assertTrue(any('模拟代理连接失败' in event['message'] for event in run_history.events('publish-error')))
+
     def test_known_expired_session_skips_redundant_check(self):
         from types import SimpleNamespace
         with patch.object(weekly.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run:

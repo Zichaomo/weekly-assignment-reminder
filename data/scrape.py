@@ -52,10 +52,11 @@ for _stream in (sys.stdout, sys.stderr):
 # Playwright 只在需要开浏览器时才用得上；黑名单这类纯本地命令不该被它拖累
 # （用系统 python 跑时没有 playwright，之前会直接 ModuleNotFoundError 崩掉）。
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
     HAVE_PLAYWRIGHT = True
 except Exception:  # noqa: BLE001
     sync_playwright = None
+    PlaywrightTimeoutError = TimeoutError
     HAVE_PLAYWRIGHT = False
 
 
@@ -626,9 +627,18 @@ def enter_course_page(page, lid: str, name: str, deadline: float) -> bool:
             if '认证上下文失效' in str(exc):
                 raise
         _ensure_budget(deadline, '回退课程入口')
-    page.goto(f'{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw',
-              wait_until='domcontentloaded', timeout=_budget_ms(deadline))
-    return False
+    for attempt in range(2):
+        try:
+            page.goto(f'{BASE}/meol/lesson/enter_course.jsp?lid={lid}&t=hw',
+                      wait_until='domcontentloaded', timeout=_budget_ms(deadline))
+            return False
+        except PlaywrightTimeoutError:
+            if page_is_login(page):
+                raise RuntimeError('认证上下文失效：课程入口跳到了登录页') from None
+            if attempt == 1:
+                raise
+            _ensure_budget(deadline, '重试课程入口')
+            print(f'  {name}: 课程入口超时，重试 1/1', file=sys.stderr)
 
 
 def fetch_course_both(ctx, page, lid: str, name: str, debug: bool = False,

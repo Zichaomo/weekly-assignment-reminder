@@ -149,6 +149,83 @@ class ServerApiTests(IsolatedCase):
                                                    'expected_revision':saved['revision']})
         self.assertEqual(status, 200)
 
+    def test_publish_api_recovers_refused_proxy_for_text_and_supplement_images(self):
+        import base64
+        import errno
+        import io
+        from pathlib import Path
+        from datetime import datetime, timedelta
+        from unittest.mock import Mock
+        from urllib.error import URLError
+        import assignment_supplements
+        import notify
+        supplement = cache_store.get_item(self.key)['supplement']
+        asset = cache_store.asset_record(self.asset_id)
+        assignment_supplements.save(self.key, {
+            'expected_revision': supplement['revision'],
+            'expected_identity_generation': supplement['identity_generation'], 'text': '',
+            'images': [{'data': base64.b64encode(Path(asset['path']).read_bytes()).decode()}]})
+        with cache_store.connection(write=True) as con:
+            con.execute('UPDATE assignments SET deadline=? WHERE item_key=?',
+                        ((datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d %H:%M'), self.key))
+            con.execute('UPDATE assets SET source_url=? WHERE asset_id=?',
+                        ('https://images.unit.invalid/supplement.png', self.asset_id))
+        item = cache_store.get_item(self.key)
+        config = {'channel': 'wecom', 'wecom_webhook': 'https://unit.invalid/class',
+                  'personal': {'enabled': True, 'channel': 'wecom', 'wecom_webhook': 'https://unit.invalid/personal'}}
+        direct = Mock()
+        payloads = []
+        def response(request, **kwargs):
+            if request.get_method() == 'GET':
+                return io.BytesIO(Path(asset['path']).read_bytes())
+            payloads.append(json.loads(request.data))
+            return io.BytesIO(b'{"errcode":0}')
+        direct.open.side_effect = response
+        client_opener = notify.urllib.request.build_opener(notify.urllib.request.ProxyHandler({}))
+        hub = self.server_mod.hub
+        with patch.object(hub.weekly, 'load_fresh_publish_cache', return_value=({'homeworks': [item]}, {'publishable': True})), \
+             patch.object(hub.weekly, 'load_manual', return_value=[]), \
+             patch.object(hub.weekly, '_elective_lids_from_disk', return_value=set()), \
+             patch.object(hub, 'ROOT', self.root), patch.object(hub.fetch_log, 'log_fetch'), \
+             patch.object(notify, 'load_config', return_value=config), \
+             patch.object(notify, 'PUSH_LOG', self.root / 'push.jsonl'), \
+             patch.object(notify, 'PART_LOG', self.root / 'parts.jsonl'), \
+             patch.object(notify.urllib.request, '_opener', client_opener), \
+             patch.object(notify.time, 'sleep'), patch.dict('os.environ', {notify.WECOM_ENV: ''}), \
+             patch.object(notify.urllib.request, 'getproxies', return_value={'https': 'http://127.0.0.1:7890'}), \
+             patch.object(notify.urllib.request, 'proxy_bypass', return_value=False), \
+             patch.object(notify.urllib.request, 'urlopen', side_effect=URLError(ConnectionRefusedError(errno.ECONNREFUSED, 'fixture proxy'))), \
+             patch.object(notify.urllib.request, 'build_opener', return_value=direct):
+            status, submitted = self.post('/api/tasks', {'op': 'publish', 'days': 7})
+            self.assertEqual(status, 200)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                _, task = self.get('/api/tasks/' + submitted['task_id'])
+                if task['status'] not in ('queued', 'running'):
+                    break
+                time.sleep(.02)
+            self.assertEqual(task['status'], 'done')
+            self.assertTrue(task['result']['ok'])
+            self.assertTrue(task['result']['sent'])
+            self.assertTrue(task['result']['personal']['sent'])
+        self.assertEqual(sum(payload['msgtype'] == 'markdown_v2' for payload in payloads), 2)
+        self.assertEqual(len(payloads), 2)
+
+    def test_course_rule_samples_report_long_bodies_and_clear_after_rule_save(self):
+        cache_store.save_content(self.key, {'status': 'ready', 'source_version': 'long-body',
+            'blocks': [{'id': 'p1', 'type': 'paragraph', 'text': '甲\n乙\n丙\n丁'}],
+            'text': '甲\n乙\n丙\n丁'}, scope=self.scope)
+        _, samples = self.get('/api/course-rules/samples')
+        sample = next(row for row in samples['items'] if row['item_key'] == self.key)
+        self.assertTrue(sample['needs_rule'])
+        self.assertEqual(sample['line_count'], 4)
+        _, state = self.get('/api/course-rules')
+        rule = dict(id='long-rule', course='课程1', match='exact', mode='full', lines=4)
+        self.assertEqual(self.post('/api/course-rules', {'action': 'save', 'rule': rule,
+            'expected_revision': state['revision']})[0], 200)
+        _, samples = self.get('/api/course-rules/samples')
+        self.assertFalse(next(row for row in samples['items'] if row['item_key'] == self.key)['needs_rule'])
+
     def test_version_conflict_is_409_and_bad_geometry_is_400(self):
         status, data = self.view({"expected_version": "old", "regions": []})
         self.assertEqual(status, 409)

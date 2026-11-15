@@ -111,6 +111,7 @@ def build_rows(platform_hw: list, manual_items: list, days: int,
             "content_error": hw.get("content_error"),
             "content_text": hw.get("content_text") or "",
             "content_summary": hw.get("content_summary"),
+            "supplement": hw.get("supplement"),
             "content_review_stale": bool(hw.get("content_review_stale")),
             "content_blocks": hw.get("content_blocks") or [],
             "asset_ids": hw.get("asset_ids") or [],
@@ -474,6 +475,8 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
 
     cfg = dict(notify.load_config())
     cfg['_image_manifest'] = class_images
+    class_errors = []
+    cfg['_delivery_errors'] = class_errors
     ch = (channel or cfg.get("channel", "clipboard")).lower()
 
     # 去重：同一目标上、窗口内推过完全一样的内容就跳过
@@ -508,19 +511,22 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
                         "note": f"{window} 秒内已向个人小群推过相同内容，已跳过"}
         else:
             try:
+                personal_errors = []
                 p_sent = notify.dispatch(msg_personal, p_ch,
-                    {**cfg, '_image_manifest':personal_images}, audience="personal")
+                    {**cfg, '_image_manifest':personal_images, '_delivery_errors':personal_errors}, audience="personal")
                 notify.log_push("hub", p_ch, msg_personal, p_sent,
                                 note="" if p_sent else "send-failed",
                                 target=p_target, audience="personal")
                 personal = {"ok": p_sent, "sent": p_sent, "channel": p_ch,
                             "count": len(personal_items),
                             "note": "" if p_sent else "推送失败"}
+                if not p_sent:
+                    personal['error'] = run_history.redact('；'.join(personal_errors) or '个人提醒发送失败，请检查推送渠道')
             except Exception as e:  # noqa: BLE001
                 notify.log_push("hub", p_ch, msg_personal, False,
                                 note=f"exception:{type(e).__name__}",
                                 target=p_target, audience="personal")
-                personal = {"ok": False, "sent": False, "error": f"推送异常：{e}"}
+                personal = {"ok": False, "sent": False, "error": run_history.redact(f"推送异常：{e}")}
     else:
         personal = {"ok": True, "skipped": True, "note": pwhy}
 
@@ -536,6 +542,13 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
         "channel": ch, "personal": personal,
         "coverage": coverage,
     }
+    if not out['ok']:
+        failures = []
+        if not sent:
+            failures.append('班级提醒发送失败。' + ('；'.join(class_errors) or '请检查推送渠道'))
+        if not personal.get('ok'):
+            failures.append('个人提醒发送失败。' + (personal.get('error') or personal.get('note', '')))
+        out['error'] = run_history.redact('；'.join(failures))
     out.update(_data_source_fields(data_source, prefetched_age_sec))
     out["data_fetched_at"] = ((coverage or {}).get("updated_at")
                               if data_source == "cache" else None)

@@ -240,6 +240,12 @@ def main():
         cache_store.register_task('fixture-live', scope+'|content|live', 'content', {})
         cache_store.update_task('fixture-live', 'running')
 
+    if os.environ.get('HOMEWORK_RULE_REMINDER_FIXTURE') == '1':
+        text = '绘制测量曲线\n保留计算过程\n提交图片\n说明误差来源'
+        cache_store.save_content(item['item_key'], {
+            'status': 'ready', 'source_version': 'rule-reminder-v1', 'text': text,
+            'blocks': [{'id': 'long-body', 'type': 'paragraph', 'text': text}]}, scope=scope)
+
     class FixtureHandler(server.Handler):
         def _do_GET(self):
             if urlparse(self.path).path == "/favicon.ico":

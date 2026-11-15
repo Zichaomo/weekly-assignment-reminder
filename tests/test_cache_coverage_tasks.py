@@ -403,6 +403,22 @@ class ContentSelectionAndViewTests(IsolatedCase):
 
 
 class TaskRegistryTests(IsolatedCase):
+    def test_fetch_with_failed_course_is_partial_even_with_usable_cache(self):
+        import server
+        result = {'ok': True, 'cache': {'publishable': True},
+                  'warnings': {'failed_courses': ['电路原理实验']}}
+        self.assertEqual(server._task_status(result), 'partial')
+
+    def test_fetch_cache_coverage_is_used_for_task_status(self):
+        import server
+        self.assertEqual(server._task_status({'ok': True, 'cache': {'publishable': False}}),
+                         'partial')
+        self.assertEqual(server._task_status({'ok': True, 'cache': {'publishable': True}}),
+                         'done')
+        self.assertEqual(server._task_status({'ok': True, 'coverage': {'publishable': False}}),
+                         'partial')
+        self.assertEqual(server._task_status({'ok': True}), 'done')
+
     def test_dedupe_scan_id_and_orphan_recovery(self):
         tid, deduped = cache_store.register_task("task-a", "sig", "fetch", {})
         self.assertFalse(deduped)

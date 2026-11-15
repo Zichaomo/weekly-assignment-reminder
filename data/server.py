@@ -261,8 +261,10 @@ def _task_status(result):
     if not isinstance(result, dict):
         return "error"
     if result.get("ok"):
-        cov = result.get("coverage") or {}
-        if (cov and not cov.get("publishable")) or result.get("failed") or result.get("partial"):
+        cov = result.get("coverage") or result.get("cache") or {}
+        failed_courses = (result.get("warnings") or {}).get("failed_courses")
+        if ((cov and not cov.get("publishable")) or result.get("failed")
+                or result.get("partial") or failed_courses):
             return "partial"
         return "done"
     if result.get("failed") or result.get("cache_blocked"):
@@ -504,7 +506,8 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         if n <= 0:
             return {}
-        if n > 2_000_000:
+        limit = 18_000_000 if urlparse(self.path).path.endswith('/supplement') else 2_000_000
+        if n > limit:
             raise ValueError("请求体过大")
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
@@ -589,7 +592,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {'ok': True, **course_rules.snapshot()})
         if path == '/api/course-rules/samples':
             return self._send(200, {'ok': True, 'items': [
-                {'item_key': x['item_key'], 'course': x.get('course'), 'title': x.get('title')}
+                {'item_key': x['item_key'], 'course': x.get('course'), 'title': x.get('title'),
+                 'needs_rule': bool((x.get('content_summary') or {}).get('needs_rule')),
+                 'line_count': (x.get('content_summary') or {}).get('line_count', 0)}
                 for x in cache_store.load_items()
                 if x.get('kind') not in ('manual', 'test') and x.get('source') != 'manual']})
 
@@ -621,6 +626,15 @@ class Handler(BaseHTTPRequestHandler):
                                include_expired=include_expired)
             res["first_screen_ms"] = round((time.perf_counter() - t0) * 1000, 1)
             return self._send(200, res)
+
+        if path.startswith('/api/assignments/') and path.endswith('/supplement'):
+            key = unquote(path[len('/api/assignments/'):-len('/supplement')])
+            item = cache_store.get_item(key)
+            if not item:
+                return self._send(404, {'ok': False, 'error': '作业条目不存在'})
+            if item['kind'] != 'homework':
+                return self._send(400, {'ok': False, 'error': '请选择平台作业补充要求'})
+            return self._send(200, {'ok': True, 'supplement': item['supplement']})
 
         if path.startswith("/api/assignments/") and path.endswith("/content"):
             key = unquote(path[len("/api/assignments/"):-len("/content")])
@@ -728,7 +742,7 @@ class Handler(BaseHTTPRequestHandler):
                       '/api/runtime/update':'更新后台', '/api/shutdown':'停止后台'}
         self.activity_op = operations.get(u.path)
         if u.path.startswith('/api/assignments/'):
-            self.activity_op = {'review':'正文确认', 'view':'保存裁剪'}.get(u.path.rsplit('/', 1)[-1])
+            self.activity_op = {'review':'正文确认', 'view':'保存裁剪', 'supplement':'补充作业'}.get(u.path.rsplit('/', 1)[-1])
         self.activity_started = time.time()
 
         settings_writes = {'/api/settings/account': local_settings.save_account,
@@ -808,6 +822,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "task_id": task_id,
                                     "deduped": deduped,
                                     "status": "already-active" if deduped else "queued"})
+
+        if u.path.startswith('/api/assignments/') and u.path.endswith('/supplement'):
+            import assignment_supplements
+            key = unquote(u.path[len('/api/assignments/'):-len('/supplement')])
+            if not cache_store.get_item(key):
+                return self._send(404, {'ok': False, 'error': '作业条目不存在'})
+            with LIFECYCLE_LOCK:
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok': False, 'error': '请等待当前任务结束后再保存补充'})
+                try:
+                    result = assignment_supplements.save(key, p)
+                except cache_store.VersionConflict as exc:
+                    return self._send(409, {'ok': False, 'error': str(exc), 'code': 'version_conflict'})
+            return self._send(200, {'ok': True, 'supplement': result})
 
         if u.path.startswith("/api/assignments/") and u.path.endswith("/review"):
             key = unquote(u.path[len("/api/assignments/"):-len("/review")])

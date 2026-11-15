@@ -170,6 +170,12 @@ function renderDetail(){
         <span class="on"><i data-lucide="user"></i>进入个人提醒</span>
       </div>
       <div class="sec"><div class="sec-h">任务摘要</div><p class="summary">${esc(summary)}</p></div>
+      ${!isManual(r) && r.kind !== 'test' ? `
+      <section class="sec" id="assignmentSupplement" aria-label="作业补充">
+        <div class="sec-h">作业补充<button class="btn line sm" id="supplementBtn"><i data-lucide="plus"></i>${r.supplement?.text || r.supplement?.images?.length ? '编辑补充' : '补充作业'}</button></div>
+        <p class="supplement-body">${esc(r.supplement?.text || (r.supplement?.images?.length ? '' : '可添加课堂要求、题号或 PPT 截图。'))}</p>
+        <div class="supplement-gallery">${(r.supplement?.images || []).map(image => `<button class="supplement-picture" data-supplement-view="${esc(image.asset_id)}" aria-label="查看补充截图"><img src="${assetUrl(image.asset_id)}" alt="作业补充截图" /></button>`).join('')}</div>
+      </section>` : ''}
       <div class="sec"><div class="sec-h">${isManual(r) ? '补录原文' : '北化在线原文'}${isManual(r) ? '' : '<button class="link" data-refresh-content><i data-lucide="rotate-cw"></i>刷新正文</button>'}</div>
         <div class="origin" id="origin"></div><span class="source-time" id="contentTime"></span>
       </div>
@@ -302,14 +308,20 @@ function renderPreviewMessage(container, message, images) {
   container.replaceChildren();
   const groups = new Map();
   for (const image of images) {
-    if (!groups.has(image.item_key)) groups.set(image.item_key, []);
-    groups.get(image.item_key).push(image);
+    const key = image.item_key + (image.supplement ? ':supplement' : ':platform');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(image);
   }
   // Match the original console and WeCom layout: replace each image marker in
   // place, so its pictures stay before the next homework and the final count.
+  const lines = message.split('\n');
+  const headingPosition = group => lines.findIndex(line =>
+    line === `• ${group[0].course}｜${group[0].title}` ||
+    line === `• ${group[0].course} 🎓选修｜${group[0].title}`);
   const ordered = [...groups.values()].sort((left, right) =>
-    message.indexOf('｜' + left[0].title) - message.indexOf('｜' + right[0].title));
-  const parts = message.split(/^   作业(?:原图|图片)随提醒发送（\d+ 张）。$/m);
+    headingPosition(left) - headingPosition(right)
+      || Number(Boolean(left[0].supplement)) - Number(Boolean(right[0].supplement)));
+  const parts = message.split(/^(?: {3}|\u3000{2})(?:作业(?:原图|图片)|补充图片)随提醒发送（\d+ 张）。$/m);
   const appendImage = entry => {
     const image = document.createElement('img');
     image.src = assetUrl(entry.delivery_asset_id || entry.asset_id);

@@ -7,14 +7,77 @@ import cache_store
 import content_pipeline as cp
 import hub
 import weekly
+import course_rules
 
 
 def item(text, **extra):
+    extra.setdefault('course', '自动识别测试课程')
     return dict(content_ready=True, content_blocks=cp.parse_blocks(text,'https://course.buct.edu.cn/'),
                 source_version='v1', **extra)
 
 
+class DefaultContentPolicy(IsolatedCase):
+    def test_unmatched_short_body_sends_all_wording_and_submission_instructions(self):
+        body = '绘制测量曲线。\n提交图片\n保留 meanwhile  blink 参数。'
+        source = item('<pre>' + body + '</pre>', course='新课程')
+        summary = cs.summarize(source)
+        self.assertEqual(summary['status'], 'ready')
+        self.assertEqual(summary['text'], body)
+        self.assertFalse(summary.get('needs_rule'))
+        message = weekly.format_message([source], 7)
+        for line in body.splitlines():
+            self.assertIn(line, message)
+
+    def test_unmatched_four_line_body_sends_only_portal_reference(self):
+        source = item(''.join('<p>习题：1-' + str(n) + '。</p>' for n in range(1, 5)),
+                      course='新课程')
+        summary = cs.summarize(source)
+        self.assertEqual(summary['status'], 'reference_only')
+        self.assertEqual(summary['text'], '详细要求见北化在线')
+        self.assertTrue(summary['needs_rule'])
+        self.assertEqual(summary['line_count'], 4)
+        message = weekly.format_message([source], 7)
+        self.assertIn('详细要求见北化在线', message)
+        self.assertNotIn('习题：1-1', message)
+
+    def test_blank_lines_are_ignored_and_legacy_text_uses_the_same_threshold(self):
+        for text, status in [('甲\n\n乙\n  \n丙', 'ready'), ('甲\n乙\n丙\n丁', 'reference_only')]:
+            source = dict(course='新课程', content_ready=True, content_text=text)
+            self.assertEqual(cs.summarize(source)['status'], status)
+
+    def test_single_long_line_is_kept_in_full(self):
+        text = '请附上计算过程。' * 200
+        summary = cs.summarize(item('<p>' + text + '</p>', course='新课程'))
+        self.assertEqual(summary['status'], 'ready')
+        self.assertEqual(summary['text'], text)
+
+    def test_explicit_full_rule_and_manual_confirmation_take_priority(self):
+        import course_rules
+        rule = dict(id='new', course='新课程', match='exact', mode='full', lines=5)
+        course_rules.change({'action': 'save', 'expected_revision': course_rules.snapshot()['revision'],
+                             'rule': rule})
+        source = item('<pre>甲\n乙\n丙\n丁</pre>', course='新课程')
+        summary = cs.summarize(source)
+        self.assertEqual(summary['status'], 'ready')
+        self.assertFalse(summary.get('needs_rule'))
+        self.assertIn('丁', weekly.format_message([source], 7))
+        source['course'] = '另一个新课程'
+        source['content_review'] = {'source_version': 'v1', 'mode': 'include', 'text': '已确认要求'}
+        self.assertEqual(cs.summarize(source)['text'], '已确认要求')
+
+    def test_missing_or_stale_body_does_not_request_a_rule(self):
+        source = item('<pre>甲\n乙\n丙\n丁</pre>', course='新课程', content_stale=True)
+        self.assertEqual(cs.summarize(source)['status'], 'unavailable')
+        self.assertFalse(cs.summarize(source).get('needs_rule'))
+
+
 class SummaryRules(IsolatedCase):
+    def setUp(self):
+        super().setUp()
+        course_rules.change({'action': 'save', 'expected_revision': course_rules.snapshot()['revision'],
+            'rule': {'id': 'fixture-auto', 'course': '自动识别测试课程', 'match': 'exact',
+                     'mode': 'auto', 'lines': 3}})
+
     def test_embedded_course_keeps_all_requirements_and_only_trims_line_edges(self):
         x = item('<pre>  课下作业一\n\n　 有四个按键 B1，B2，B3，B4。  \n'
                  '  电脑串口助手发送 meanwhile  blink flow，实现流水灯与闪烁灯。\n'
@@ -49,7 +112,7 @@ class SummaryRules(IsolatedCase):
             self.assertEqual(cs.summarize(x)['status'], 'needs_review')
         x = item('<p>控制灯的方向</p>')
         x['course'] = '其他嵌入式课程'
-        self.assertEqual(cs.summarize(x)['status'], 'needs_review')
+        self.assertEqual(cs.summarize(x)['status'], 'ready')
         x['course'] = '嵌入式系统创新应用与实践'
         x['content_review'] = {'source_version':'v1', 'mode':'omit', 'text':''}
         self.assertEqual(cs.summarize(x)['origin'], 'manual')
@@ -59,7 +122,7 @@ class SummaryRules(IsolatedCase):
 
     def test_long_body_message_keeps_first_three_lines_and_other_assignments(self):
         x = item(''.join('<p>习题：1-'+str(n)+'。</p>' for n in range(1, 5)))
-        x.update(course='嵌入式', title='长任务', deadline='2099-01-02 23:59')
+        x.update(course='嵌入式系统创新应用与实践', title='长任务', deadline='2099-01-02 23:59')
         other = item('<p>习题：6-9、6-10。</p>')
         other.update(course='电路', title='另一个任务', deadline='2099-01-02 23:59')
         full_text = cs.summarize(x)['text']
@@ -86,7 +149,7 @@ class SummaryRules(IsolatedCase):
         x['content_review'] = {'source_version':'v1', 'mode':'include',
                               'text':'第一项\n\n第二项\n  \n第三项\n第四项'}
         msg = weekly.format_message([x], 7)
-        self.assertIn('第一项\n   第二项\n   第三项\n   ……（详情参见北化在线）', msg)
+        self.assertIn('第一项\n\u3000\u3000第二项\n\u3000\u3000第三项\n\u3000\u3000……（详情参见北化在线）', msg)
         self.assertNotIn('第四项', msg)
         self.assertIn('第四项', cs.summarize(x)['text'])
 
@@ -163,7 +226,7 @@ class SummaryRules(IsolatedCase):
 
     def test_generic_body_does_not_remove_title_or_deadline_from_message(self):
         x=item('<p>提交图片</p><p>一页作为一张照片，正放，不要倒置。</p>')
-        x.update(course='实验课程',title='本周实验报告',deadline='2099-01-02 23:59')
+        x.update(title='本周实验报告',deadline='2099-01-02 23:59')
         msg=weekly.format_message([x],7)
         self.assertIn('本周实验报告',msg);self.assertIn('2099-01-02',msg)
         self.assertNotIn('正放，不要倒置',msg)
@@ -179,7 +242,7 @@ class SummaryRules(IsolatedCase):
         self.use_explicit_account('summary-fixture')
         version='idx';dl=(datetime.now()+timedelta(days=2)).strftime('%Y-%m-%d %H:%M')
         cache_store.begin_scan('s',mode='test',expected_lids=['1'],tests_requested=False,course_index_version=version)
-        cache_store.commit_course_scan('s',lid='1',course='物理',homeworks=[{'hwtid':'1','title':'本周作业','deadline':dl}],tests=[],homework_status='ok',tests_status='disabled',index_version=version)
+        cache_store.commit_course_scan('s',lid='1',course='普通物理',homeworks=[{'hwtid':'1','title':'本周作业','deadline':dl}],tests=[],homework_status='ok',tests_status='disabled',index_version=version)
         cache_store.update_scan('s',status='complete',finished_at=time.time())
         key=cache_store.load_items()[0]['item_key']
         x=item('<p>提交图片</p><p>习题：1-2、1-3。</p>')
@@ -245,7 +308,7 @@ class ManualContentReview(IsolatedCase):
         self.assertNotIn('待确认', msg)
         self.assertEqual(current['content_summary']['status'], 'generic_only')
         self.save('auto')
-        self.assertEqual(cache_store.get_item(self.key)['content_summary']['status'], 'needs_review')
+        self.assertEqual(cache_store.get_item(self.key)['content_summary']['status'], 'ready')
         self.assertNotIn('content_review', cache_store.get_item(self.key))
 
     def test_same_source_refresh_keeps_confirmation_but_changes_invalidate_it(self):

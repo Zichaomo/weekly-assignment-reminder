@@ -266,14 +266,14 @@ async function main() {
     assert(attempted.every(k=>k.startsWith('window-')));
     await page.evaluate(()=>refreshList({silent:true}));
     assert((await effectiveRow.locator('.effective-summary').innerText()).includes('习题：10-11、10-13、10-21。'));
-    assert(!(await effectiveRow.locator('.content-brief').innerText()).includes('提交图片'));
+    assert((await effectiveRow.locator('.content-brief').innerText()).includes('提交图片'));
     assert.strictEqual(await effectiveRow.locator('.content-detail').count(), 0, 'full body starts folded');
     await effectiveRow.locator('[data-act="content"]').click();
     assert((await effectiveRow.locator('.content-detail').innerText()).includes('提交图片'), 'original boilerplate remains accessible');
     await effectiveRow.locator('[data-act="content"]').click();
     const genericRow = page.locator('#tbody tr[data-key]').filter({ hasText: 'fixture通用说明' });
-    assert((await genericRow.locator('.effective-summary').innerText()).includes('没有具体题目'));
-    assert(!(await genericRow.locator('.content-brief').innerText()).includes('正放，不要倒置'));
+    assert((await genericRow.locator('.effective-summary').innerText()).includes('正放，不要倒置'));
+    assert((await genericRow.locator('.content-brief').innerText()).includes('正放，不要倒置'));
     const summaryShot = path.join(ROOT, 'tests', 'artifacts', 'browser-smoke-summary.png');
     fs.mkdirSync(path.dirname(summaryShot), { recursive: true });
     await effectiveRow.screenshot({ path: summaryShot });

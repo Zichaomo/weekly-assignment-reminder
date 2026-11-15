@@ -4,11 +4,15 @@ import io
 import json
 import re
 import urllib.request
-from urllib.parse import urlsplit, quote
+from urllib.parse import quote
 from pathlib import Path
 
 import cache_store
 import content_summary
+
+# Ideographic spaces remain visible in Markdown and ordinary text messages.
+DETAIL_INDENT = '\u3000\u3000'
+IMAGE_MARKER = re.compile(r'^(?: {3}|\u3000{2})(作业原图|作业图片|补充图片)随提醒发送（(\d+) 张）。$', re.M)
 
 
 def collect(items):
@@ -16,8 +20,16 @@ def collect(items):
     for item in items:
         if item.get('kind') in ('test', 'manual') or item.get('source') == 'manual':
             continue
+        supplement = item.get('supplement') or {}
+        supplement_plan = []
+        for image in supplement.get('images', []):
+            supplement_plan.append({k: item.get(k) for k in ('item_key', 'course', 'title', 'deadline')}
+                        | {'asset_id': image['asset_id'], 'supplement': True,
+                           'supplement_revision': supplement['revision'],
+                           'identity_generation': supplement['identity_generation']})
         summary = content_summary.summarize(item)
         if summary['status'] != 'images':
+            plan.extend(supplement_plan)
             continue
         for aid in summary['asset_ids']:
             base = {k:item.get(k) for k in ('item_key', 'source_version', 'course', 'title', 'deadline')}
@@ -44,10 +56,13 @@ def collect(items):
                         'crop':True,'box':region['box'],'view_revision':view.get('revision')})
             else:
                 plan.append(base | {'asset_id':aid,'view_revision':view.get('revision')})
+        plan.extend(supplement_plan)
     return plan
 
 
 def delivery_bytes(entry):
+    if entry.get('supplement'):
+        return original_bytes(entry)
     item = cache_store.get_item(entry['item_key'])
     if not item or item.get('source_version') != entry['source_version']:
         raise ValueError('图片正文版本或账号已变化')
@@ -77,10 +92,15 @@ def delivery_bytes(entry):
 
 def original_bytes(entry):
     item = cache_store.get_item(entry['item_key'])
-    if not item or item.get('source_version') != entry['source_version']:
+    if not item:
+        raise ValueError('图片所属作业或账号已变化')
+    if entry.get('supplement'):
+        if entry not in collect([item]):
+            raise ValueError('补充内容或账号已变化，请重新预览')
+    elif item.get('source_version') != entry['source_version']:
         raise ValueError('图片正文版本已变化')
     summary = content_summary.summarize(item)
-    if summary['status'] != 'images' or entry['asset_id'] not in summary['asset_ids']:
+    if not entry.get('supplement') and (summary['status'] != 'images' or entry['asset_id'] not in summary['asset_ids']):
         raise ValueError('图片已过期、获取失败或不再属于当前发送内容')
     record = cache_store.asset_record(entry['asset_id'])
     if not record:
@@ -125,49 +145,94 @@ def text_chunks(text, limit=1800):
     return chunks
 
 
-def inline_markdown(text, images):
-    """Use only anonymously verified, byte-identical platform image URLs."""
+def message_parts(text, images):
+    """Replace each image marker with its selected images in message order."""
+    groups = {}
+    for entry in images:
+        groups.setdefault((entry['item_key'], bool(entry.get('supplement'))), []).append(entry)
+    parts, pending, used = [], [], set()
+    heading = ''
+    for line in text.replace('\r\n', '\n').replace('\r', '\n').splitlines(keepends=True):
+        content = line.rstrip('\n')
+        if content.startswith('• '):
+            heading = content
+        match = IMAGE_MARKER.fullmatch(content)
+        if not match:
+            pending.append(line)
+            continue
+        candidates = []
+        for key, entries in groups.items():
+            first = entries[0]
+            if key in used or key[1] != (match[1] == '补充图片'):
+                continue
+            title = str(first.get('title') or '')
+            course = first.get('course')
+            matches = (heading in (f'• {course}｜{title}', f'• {course} 🎓选修｜{title}')
+                       if course else heading.endswith('｜' + title))
+            if matches:
+                candidates.append(key)
+        if len(candidates) != 1:
+            raise ValueError('作业图片与正文位置不匹配，请重新预览')
+        key = candidates[0]
+        if len(groups[key]) != int(match[2]):
+            raise ValueError('作业图片数量已变化，请重新预览')
+        if pending:
+            parts.append({'type': 'text', 'text': ''.join(pending)})
+            pending = []
+        parts.extend({'type': 'image', 'entry': entry} for entry in groups[key])
+        used.add(key)
+    if pending:
+        parts.append({'type': 'text', 'text': ''.join(pending)})
+    if groups and not used:
+        # Older custom messages can carry a manifest without image markers.
+        for entries in groups.values():
+            first = entries[0]
+            caption = (f"\n{first.get('course', '')}｜{first.get('title', '')}\n"
+                       f"{DETAIL_INDENT}截止：{first.get('deadline') or '未标注'}\n")
+            parts.append({'type': 'text', 'text': caption})
+            parts.extend({'type': 'image', 'entry': entry} for entry in entries)
+        return parts
+    if len(used) != len(groups):
+        raise ValueError('作业图片缺少对应的正文位置，请重新预览')
+    return parts
+
+
+def inline_markdown(text, images, *, hosting=None):
+    """Embed publicly readable URLs matching the exact selected image bytes."""
     if not images:
         return None
-    # Crops have no anonymous platform URL. Use the existing local byte upload
-    # channel for the entire bundle; never substitute an original URL.
-    if any(e.get('crop') for e in images):
-        return None
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    marker = r'^   作业原图随提醒发送（\d+ 张）。$'
-    if len(re.findall(marker, text, re.M)) != len({e['item_key'] for e in images}):
-        return None
-    groups = {}
+    urls = {}
+    import image_hosting
     try:
+        parts = message_parts(text, images)
         for entry in images:
             raw = delivery_bytes(entry)
-            record = cache_store.asset_record(entry['asset_id'])
-            url = record['source_url']
-            parts = urlsplit(url)
-            if parts.scheme != 'https' or parts.hostname != 'course.buct.edu.cn' or parts.username:
+            asset_id = entry.get('delivery_asset_id') or entry['asset_id']
+            url = image_hosting.image_url(entry, raw, hosting)
+            if not url:
                 return None
-            with urllib.request.urlopen(urllib.request.Request(url,
-                    headers={'User-Agent':'Mozilla/5.0'}), timeout=10) as response:
-                downloaded = response.read(len(raw)+1)
-            if downloaded != raw:
-                return None
-            groups.setdefault(entry['item_key'], []).append((entry, quote(url, safe=':/?=&%')))
+            urls[asset_id] = quote(url, safe=':/?=&%')
+    except image_hosting.HostingError:
+        raise
     except (ValueError, OSError):
         return None
-    ordered = sorted(groups.values(), key=lambda group:text.find('｜'+group[0][0]['title']))
-    if len(re.findall(marker, text, re.M)) != len(ordered):
-        return None
     # Escape literal source text before introducing the image Markdown.
-    body = re.sub(r'([\\`*_{}\[\]<>])', r'\\\1', text)
-    cursor = iter(ordered)
-    body = re.sub(marker, lambda _: '\n\n' + '\n\n'.join(
-        f'![作业原图]({url})' for entry, url in next(cursor)) + '\n\n', body, flags=re.M)
+    fragments = []
+    for part in parts:
+        if part['type'] == 'text':
+            fragments.append(re.sub(r'([\\`*_{}\[\]<>])', r'\\\1', part['text']))
+        else:
+            entry = part['entry']
+            url = urls[entry.get('delivery_asset_id') or entry['asset_id']]
+            fragments.append(f'\n\n![作业原图]({url})\n\n')
+    body = ''.join(fragments)
     body = re.sub(r'\n{3,}', '\n\n', body).strip()
     # Keep text compact with Markdown hard line breaks. Only images get new
     # paragraph boundaries; retain the source's original section spacing.
     body = re.sub(r'(?<!\n)\n(?!\n)', '  \n', body)
-    # Keep each homework with its image when the API's 4096-byte limit requires
-    # more than one message. An oversized individual item uses separate images.
+    # Keep each homework with its images when measuring the API byte limit.
+    # The sender reports when the requested single message exceeds capacity.
     chunks, current = [], ''
     for block in re.split(r'(?=^• )', body, flags=re.M):
         if len(block.encode('utf-8')) > 4000:

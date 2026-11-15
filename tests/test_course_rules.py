@@ -13,7 +13,7 @@ class CourseRulesTests(IsolatedCase):
     def test_defaults_and_precedence(self):
         self.assertEqual(rules.resolve('大学物理实验(II)')['mode'], 'reference')
         self.assertEqual(rules.resolve('普通物理(Ⅱ)')['mode'], 'physics')
-        self.assertEqual(rules.resolve('其他课')['mode'], 'auto')
+        self.assertEqual(rules.resolve('其他课')['mode'], 'full')
         self.save(dict(id='specific', course='普通物理(Ⅱ)', match='exact', mode='full', lines=2))
         self.assertEqual(rules.resolve('普通物理(Ⅱ)')['mode'], 'full')
         self.assertEqual(rules.resolve('普通物理(I)')['mode'], 'physics')
@@ -55,3 +55,45 @@ class CourseRulesTests(IsolatedCase):
             self.save(dict(id='duplicate',course='普通物理',match='prefix',mode='auto',lines=3))
         with self.assertRaises(ValueError):
             rules.preview({'rule':rules.DEFAULTS[0], 'item_key':'missing-private-item'})
+
+    def test_omit_mode_can_be_saved_previewed_and_loaded(self):
+        rule = dict(id='digital', course='数字电子技术', match='exact', mode='omit', lines=3)
+        state = self.save(rule)
+        self.assertEqual(state['modes']['omit'], '去除全部作业正文')
+        self.assertEqual(rules.resolve('数字电子技术')['mode'], 'omit')
+        preview = rules.preview({'rule': rule, 'text': '第一周作业提交这里'})
+        self.assertEqual(preview['status'], 'omitted')
+        self.assertEqual(preview['push_text'], '')
+        self.assertFalse(preview['needs_rule'])
+        summary = content_summary.summarize({'course': '数字电子技术',
+            'content_review': {'source_version': 'v1', 'mode': 'include', 'text': '旧人工确认'},
+            'source_version': 'v1', 'content_ready': True, 'content_text': '平台正文'})
+        self.assertEqual(summary['status'], 'omitted')
+        self.assertEqual(summary['text'], '')
+
+    def test_physics_preview_lists_exact_removed_quotes(self):
+        rule = dict(id='example', course='课程', match='exact', mode='physics', lines=3)
+        preview = rules.preview({'rule': rule,
+            'text': '第一周作业提交这里\n提交图片\n一页作为一张照片，正放，不要倒置。\n习题：11-10、11-11。'})
+        self.assertEqual(preview['push_text'], '习题：11-10、11-11。')
+        self.assertEqual([entry['text'] for entry in preview['removed_excerpts']], [
+            '第一周作业提交这里', '提交图片', '一页作为一张照片，正放，不要倒置。'])
+        for entry in preview['removed_excerpts']:
+            source = '第一周作业提交这里\n提交图片\n一页作为一张照片，正放，不要倒置。\n习题：11-10、11-11。'
+            self.assertEqual(source[entry['start']:entry['end']].strip(), entry['text'])
+        preview = rules.preview({'rule': rule, 'text': '注意本次额外提交测量图片。'})
+        self.assertEqual(preview['removed_excerpts'], [])
+        self.assertEqual(preview['push_text'], '注意本次额外提交测量图片。')
+
+    def test_omit_mode_suppresses_unavailable_and_stale_body_fallback(self):
+        rule = dict(id='omit', course='课程', match='exact', mode='omit', lines=3)
+        self.save(rule)
+        for extra in ({}, {'content_stale': True}, {'content_error': 'failed'},
+                      {'content_identity_stale': True}, {'content_review_stale': True}):
+            item = dict(course='课程', title='作业', deadline='2099-01-01 23:59', **extra)
+            summary = content_summary.summarize(item)
+            self.assertEqual(summary['status'], 'omitted')
+            message = weekly.format_message([item], 7)
+            self.assertIn('课程｜作业', message)
+            self.assertIn('⏰', message)
+            self.assertNotIn('详细要求见北化在线', message)

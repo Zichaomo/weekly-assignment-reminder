@@ -1,8 +1,8 @@
-"""Conservative, source-backed homework excerpts. No model or network calls."""
+"""Source-backed homework text and course-specific delivery rules."""
 import re
 import course_rules
 
-RULE_VERSION = '2026-10-30.1'
+RULE_VERSION = '2026-11-15.2'
 QUESTION_LIST = re.compile(r'\d+\s*[-－—]\s*\d+(?:\s*[,，、]\s*\d+\s*[-－—]\s*\d+)*\s*[。.]?')
 SUBMISSION_SLOT = re.compile(r'(?:(?:第[一二三四五六七八九十百零两\d]+[周章节次])|本周)?\s*作业\s*(?:请)?\s*提交(?:在)?(?:这里|此处)[。！!]?')
 ANCHOR = re.compile(r'^(?:习题|题号|页码|作业范围|本次要求|本周要求|本次作业|本周作业|完成|解答|求解|证明|计算|阅读|预习|复习|第[一二三四五六七八九十百\d]+[章节页题])')
@@ -57,7 +57,12 @@ def summarize(item, rule=None):
     mode = rule['mode']
     result = {'status': 'unavailable', 'text': '', 'excerpts': [], 'push_lines': rule['lines'],
               'rule_version': RULE_VERSION, 'source_version': item.get('source_version'),
-              'reason': '正文尚未就绪'}
+              'reason': '正文尚未就绪', 'needs_rule': False, 'line_count': 0,
+              'removed_excerpts': []}
+    if mode == 'omit':
+        result.update(status='omitted', origin='course_rule',
+                      reason='课程规则已去除平台正文，提醒保留标题、截止时间与手动补充。')
+        return result
     if mode == 'reference':
         result.update(status='reference_only', text='详细要求见北化在线', origin='course_rule',
                       reason='课程规则设为仅提示查看北化在线完整要求')
@@ -97,9 +102,13 @@ def summarize(item, rule=None):
                 generic = (SUBMISSION_SLOT.fullmatch(quote) or
                     (not EXCEPTION.search(clean) and not CONCRETE.search(clean)
                      and any(p.fullmatch(clean) for p in GENERIC)))
-                if quote and not generic:
-                    kept.append({'block_id': block_id, 'start':match.start(),
-                                 'end':match.end(), 'text':quote})
+                if quote:
+                    excerpt = {'block_id': block_id, 'start': match.start(),
+                               'end': match.end(), 'text': quote}
+                    if generic:
+                        result['removed_excerpts'].append(excerpt)
+                    else:
+                        kept.append(excerpt)
         if kept:
             result.update(status='ready', text='\n'.join(x['text'] for x in kept),
                           excerpts=kept, origin='course_rule', reason='去除已知通用提交说明，保留其余全部要求')
@@ -108,18 +117,24 @@ def summarize(item, rule=None):
         return result
     # The user confirmed that every textual requirement in this course matters.
     # Keep wording, internal spaces, command arguments and list numbering intact.
-    if mode == 'full' and not _has_visual(blocks):
+    if mode == 'full':
         import content_pipeline
         raw = content_pipeline.flatten_blocks_text(blocks) if blocks else item.get('content_text', '')
         text = '\n'.join(line.strip() for line in raw.splitlines() if line.strip())
-        if text:
+        result['line_count'] = len(text.splitlines())
+        if not rule.get('id') and result['line_count'] > 3:
+            result.update(status='reference_only', text='详细要求见北化在线', origin='default',
+                          needs_rule=True, reason='正文超过三行，需要补充课程推送规则')
+            return result
+        if text and not _has_visual(blocks):
             excerpts = []
             for block_id, source in pieces:
                 for match in re.finditer(r'[^\r\n]+', source):
                     if match.group().strip():
                         excerpts.append({'block_id': block_id, 'start': match.start(),
                                          'end': match.end(), 'text': match.group().strip()})
-            result.update(status='ready', text=text, excerpts=excerpts, origin='course_rule',
+            result.update(status='ready', text=text, excerpts=excerpts,
+                          origin='course_rule' if rule.get('id') else 'default',
                           reason='本课程保留全部文字要求，仅清理行首行尾空白及空行')
             return result
     selected, unknown, generic = [], [], 0

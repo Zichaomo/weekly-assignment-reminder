@@ -45,7 +45,7 @@ class CoursePolicies(IsolatedCase):
         x=self.body('课程','<p>陌生要求。</p>')
         msg=weekly.format_message([x],7)
         self.assertIn('本周作业',msg);self.assertIn('2099-01-01',msg)
-        self.assertIn('详细要求见北化在线',msg);self.assertNotIn('待确认',msg)
+        self.assertIn('陌生要求。',msg);self.assertNotIn('待确认',msg)
 
     def test_class_duplicate_does_not_hide_personal_failure(self):
         from datetime import datetime, timedelta
@@ -132,20 +132,23 @@ class OriginalImageDelivery(IsolatedCase):
         with self.assertRaises(ValueError):
             delivery.delivery_bytes(cropped[0])
 
-    def test_crop_upload_retry_and_dedup_use_exact_saved_bytes(self):
+    def test_hosted_crop_retry_and_dedup_send_one_native_message(self):
         self.save_crop()
         plan=delivery.collect([cache_store.get_item(self.key)])
         raw=delivery.delivery_bytes(plan[0]);calls=[]
+        with cache_store.connection(write=True) as con:
+            con.execute('UPDATE assets SET source_url=? WHERE asset_id=?',
+                        ('https://images.unit.invalid/crop.png', plan[0]['delivery_asset_id']))
         def send(text,cfg,**kw):
-            calls.append(kw.get('image_bytes'))
-            return len(calls)!=3
+            calls.append(kw)
+            return len(calls)!=1
         with patch.object(notify,'send_wecom',side_effect=send),patch.object(notify.time,'sleep'), \
-             patch.object(delivery.urllib.request,'urlopen',side_effect=AssertionError('crop must never use remote URL')):
+             patch.object(delivery.urllib.request,'urlopen',side_effect=lambda *a, **kw: io.BytesIO(raw)):
             cfg={**self.cfg,'_image_manifest':plan}
             self.assertFalse(notify.dispatch('裁剪提醒','wecom',cfg))
             self.assertTrue(notify.dispatch('裁剪提醒','wecom',cfg))
             self.assertTrue(notify.dispatch('裁剪提醒','wecom',cfg))
-        self.assertEqual(calls,[None,None,raw,raw])
+        self.assertEqual(calls,[{'markdown': True}, {'markdown': True}])
 
     def test_identical_resave_dedups_but_actual_crop_change_gets_new_bundle(self):
         self.save_crop()
@@ -249,7 +252,7 @@ class OriginalImageDelivery(IsolatedCase):
         for line in text.splitlines():
             if line.strip() and '作业原图随提醒发送' not in line:
                 self.assertIn(line.strip(),rendered_lines)
-        self.assertIn('• 英语 📌手动｜U校园 新视野U5  \n   ⏰',body)
+        self.assertIn('• 英语 📌手动｜U校园 新视野U5  \n\u3000\u3000⏰',body)
         self.assertRegex(body,r'\n\n!\[作业原图\]\([^\n]+\)\n\n')
         self.assertLess(body.index('图片任务'),body.index('![作业原图]'))
         self.assertLess(body.index('![作业原图]'),body.index('下一项作业'))
@@ -278,17 +281,23 @@ class OriginalImageDelivery(IsolatedCase):
             self.assertTrue(notify.dispatch('same reminder','wecom',self.cfg))
         self.assertEqual(sent,['old layout','new layout'])
 
-    def test_inline_unavailable_public_url_falls_back_to_original_upload(self):
+    def test_inline_unavailable_public_url_reports_link_requirement(self):
         text=weekly.format_message([self.item],7)
         requests=[]
         def response(req, **kwargs):
             requests.append(req)
             return io.BytesIO(b'login page' if req.get_method()=='GET' else b'{"errcode":0}')
         with patch.object(notify.urllib.request,'urlopen',side_effect=response),patch.object(notify.time,'sleep'):
-            self.assertTrue(notify.dispatch(text,'wecom',self.cfg))
+            self.assertFalse(notify.dispatch(text,'wecom',self.cfg))
         posts=[json.loads(req.data) for req in requests if req.get_method()=='POST']
-        self.assertEqual([p['msgtype'] for p in posts],['text','text','image'])
-        self.assertEqual(base64.b64decode(posts[-1]['image']['base64']),self.raw)
+        self.assertEqual(posts,[])
+
+    def test_missing_inline_link_does_not_change_message_type(self):
+        with patch.object(delivery, 'inline_markdown', return_value=None), \
+             patch.object(notify, 'send_wecom', return_value=True) as send, \
+             patch.object(notify.time, 'sleep'):
+            self.assertFalse(notify.dispatch(weekly.format_message([self.item], 7), 'wecom', self.cfg))
+        send.assert_not_called()
 
     def test_http_payload_is_byte_exact_and_personal_target_ignores_class_env(self):
         requests=[]
@@ -296,29 +305,29 @@ class OriginalImageDelivery(IsolatedCase):
         def response(req,**kwargs):
             requests.append(req)
             timeouts.append(kwargs['timeout'])
-            obj=io.BytesIO(b'{"errcode":0}')
+            obj=io.BytesIO(self.raw if req.get_method()=='GET' else b'{"errcode":0}')
             return obj
         with patch.object(notify.urllib.request,'urlopen',side_effect=response), \
              patch.object(notify.time,'sleep'),patch.dict('os.environ',{notify.WECOM_ENV:'https://unit.invalid/env-class'}):
             self.assertTrue(notify.dispatch('提醒','wecom',self.cfg,'personal'))
-        self.assertTrue(all(r.full_url=='https://unit.invalid/personal' for r in requests))
-        payloads=[json.loads(r.data) for r in requests]
-        self.assertEqual([x['msgtype'] for x in payloads],['text','text','image'])
-        self.assertEqual(timeouts,[20,20,60])
-        image=payloads[-1]['image']
-        self.assertEqual(base64.b64decode(image['base64']),self.raw)
-        self.assertEqual(image['md5'],hashlib.md5(self.raw).hexdigest())
+        posts=[r for r in requests if r.get_method()=='POST']
+        self.assertTrue(all(r.full_url=='https://unit.invalid/personal' for r in posts))
+        payloads=[json.loads(r.data) for r in posts]
+        self.assertEqual([x['msgtype'] for x in payloads],['markdown_v2'])
+        self.assertEqual(timeouts,[10,20])
+        self.assertIn('![作业原图]',payloads[0]['markdown_v2']['content'])
 
-    def test_partial_failure_retries_only_unsent_image(self):
+    def test_failed_native_message_retries_and_then_deduplicates(self):
         calls=[]
         def send(text,cfg,**kwargs):
-            calls.append(kwargs.get('image_bytes'))
-            return len(calls)!=3
-        with patch.object(notify,'send_wecom',side_effect=send),patch.object(notify.time,'sleep'):
+            calls.append(kwargs)
+            return len(calls)!=1
+        with patch.object(notify,'send_wecom',side_effect=send),patch.object(notify.time,'sleep'), \
+             patch.object(notify.urllib.request,'urlopen',side_effect=lambda *a, **kw: io.BytesIO(self.raw)):
             self.assertFalse(notify.dispatch('提醒','wecom',self.cfg))
             self.assertTrue(notify.dispatch('提醒','wecom',self.cfg))
             self.assertTrue(notify.dispatch('提醒','wecom',self.cfg))
-        self.assertEqual(calls,[None,None,self.raw,self.raw])
+        self.assertEqual(calls,[{'markdown':True},{'markdown':True}])
         self.assertFalse((self.root/'push_log.jsonl').exists(),'component successes must not mark whole task complete')
 
     def test_none_never_sends_and_long_text_stays_within_payload_limit(self):

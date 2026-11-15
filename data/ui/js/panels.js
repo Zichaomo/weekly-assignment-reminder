@@ -130,6 +130,7 @@ function drawCrop(){
   $('#cropOriginalSize').textContent=`原图 ${img.naturalWidth} × ${img.naturalHeight} px`;
 }
 async function openImage(id,cropping){
+  $('#viewCrop').hidden=false;
   const r=currentItem();if(!r)return;
   const c=requireOk(await api(itemUrl(r,'content')));if(!c.asset_ids.includes(id))throw new Error('图片不属于当前正文');
   const safe=imageMeta(c.blocks,id)?.crop_safe!==false;

@@ -205,39 +205,47 @@ def format_message(items: list, days: int, title: str = None,
     def deadline_line(it) -> str:
         dt = it.get("_deadline_dt")
         if not dt:
-            return f"   ⏰ 截止 {it.get('deadline') or '未标注'}"
+            return f"⏰ 截止 {it.get('deadline') or '未标注'}"
         delta = dt - now
         if delta.total_seconds() < 0:
-            return f"   ⏰ {dt:%m-%d %H:%M} 截止（已逾期）"
+            return f"⏰ {dt:%m-%d %H:%M} 截止（已逾期）"
         if dt.date() == now.date():
-            return f"   ⏰ 今天 {dt:%H:%M} 截止"
+            return f"⏰ 今天 {dt:%H:%M} 截止"
         if dt.date() == (now + timedelta(days=1)).date():
-            return f"   ⏰ 明天 {dt:%H:%M} 截止"
+            return f"⏰ 明天 {dt:%H:%M} 截止"
         d, h = delta.days, delta.seconds // 3600
         left = f"还剩 {d} 天" if (d > 2 or h == 0) else f"还剩 {d} 天 {h} 小时"
-        return f"   ⏰ {dt:%m-%d %H:%M} 截止（{left}）"
+        return f"⏰ {dt:%m-%d %H:%M} 截止（{left}）"
 
     def block(it) -> list:
-        blk = [f"• {it.get('course', '未命名课程')}{mark_of(it)}｜{it.get('title', '作业')}",
-               deadline_line(it)]
-        if it.get("note"):
-            blk.append(f"   备注：{it['note']}")
-        if it.get('kind') not in ('manual', 'test') and it.get('source') != 'manual':
-            summary = content_summary.summarize(it)
+        heading = f"• {it.get('course', '未命名课程')}{mark_of(it)}｜{it.get('title', '作业')}"
+        details = [deadline_line(it)]
+        platform_homework = it.get('kind') not in ('manual', 'test') and it.get('source') != 'manual'
+        summary = content_summary.summarize(it) if platform_homework else {}
+        if it.get("note") and summary.get('status') != 'omitted':
+            details.append(f"备注：{it['note']}")
+        if platform_homework:
             if summary['status'] == 'ready':
                 body_lines = [line for line in summary['text'].splitlines() if line.strip()]
                 limit = summary.get('push_lines', 3)
-                blk.extend('   ' + line for line in body_lines[:limit])
+                details.extend(body_lines[:limit])
                 if len(body_lines) > limit:
-                    blk.append('   ……（详情参见北化在线）')
+                    details.append('……（详情参见北化在线）')
             elif summary['status'] == 'images':
                 regions = (it.get('view') or {}).get('regions') or []
                 count = sum(max(1, sum(r['asset_id'] == aid for r in regions)) for aid in summary['asset_ids'])
                 label = '作业图片' if regions else '作业原图'
-                blk.append(f"   {label}随提醒发送（{count} 张）。")
+                details.append(f"{label}随提醒发送（{count} 张）。")
             elif summary['status'] in ('needs_review', 'unavailable', 'reference_only'):
-                blk.append('   详细要求见北化在线')
-        return blk
+                details.append('详细要求见北化在线')
+            supplement = it.get('supplement') or {}
+            if supplement.get('text'):
+                details.append('补充要求')
+                details.append(supplement['text'])
+            if supplement.get('images'):
+                details.append(f"补充图片随提醒发送（{len(supplement['images'])} 张）。")
+        return [heading] + [image_delivery.DETAIL_INDENT + line
+                            for detail in details for line in detail.splitlines()]
 
     picked = sorted(items, key=lambda x: (x.get("_deadline_dt") or datetime.max))
     near, later = [], []

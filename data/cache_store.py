@@ -418,6 +418,12 @@ def init_db() -> None:
             text TEXT NOT NULL DEFAULT '', valid INTEGER NOT NULL DEFAULT 1,
             updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS assignment_supplements (
+            item_key TEXT PRIMARY KEY REFERENCES assignments(item_key),
+            identity_generation INTEGER NOT NULL,
+            text TEXT NOT NULL DEFAULT '', images_json TEXT NOT NULL DEFAULT '[]',
+            revision INTEGER NOT NULL, updated_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_registry (
             task_id TEXT PRIMARY KEY, signature TEXT NOT NULL, op TEXT NOT NULL,
             params_json TEXT NOT NULL, status TEXT NOT NULL,
@@ -942,6 +948,9 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
                     item['content_review_stale'] = True
             import content_summary
             item['content_summary'] = content_summary.summarize(item)
+            if item['kind'] == 'homework':
+                import assignment_supplements
+                item['supplement'] = assignment_supplements.load(con, item['item_key'], generation)
             out.append(item)
     return out
 

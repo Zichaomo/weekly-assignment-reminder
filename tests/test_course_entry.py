@@ -1,5 +1,6 @@
 import time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from helpers import FakePage, IsolatedCase
 import scrape
 
@@ -67,3 +68,55 @@ class CourseEntryTests(IsolatedCase):
         with self.assertRaisesRegex(RuntimeError,'预算'):
             scrape.enter_course_page(page,'123','高等数学',time.monotonic()-1)
         self.assertEqual(page.gotos,[DIRECT])
+
+    def test_gateway_timeout_retries_once_with_the_remaining_course_budget(self):
+        self.write_config({'scan': {'direct_course_entry': False}})
+        page = self.page()
+        page.goto.side_effect = [PlaywrightTimeoutError('slow gateway'), None]
+        with patch.object(scrape.time, 'monotonic', side_effect=[100, 111, 111]):
+            self.assertFalse(scrape.enter_course_page(page, '123', '高等数学', 120))
+        self.assertEqual(page.goto.call_count, 2)
+        self.assertEqual([call.args[0] for call in page.goto.call_args_list], [GATEWAY, GATEWAY])
+        self.assertEqual([call.kwargs['timeout'] for call in page.goto.call_args_list], [12000, 9000])
+
+    def test_gateway_timeout_is_not_retried_after_course_budget_expires(self):
+        self.write_config({'scan': {'direct_course_entry': False}})
+        page = self.page()
+        page.goto.side_effect = PlaywrightTimeoutError('slow gateway')
+        with patch.object(scrape.time, 'monotonic', side_effect=[100, 121]):
+            with self.assertRaisesRegex(RuntimeError, '预算'):
+                scrape.enter_course_page(page, '123', '高等数学', 120)
+        self.assertEqual(page.goto.call_count, 1)
+
+    def test_gateway_timeout_retry_is_bounded(self):
+        self.write_config({'scan': {'direct_course_entry': False}})
+        page = self.page()
+        page.goto.side_effect = PlaywrightTimeoutError('slow gateway')
+        with self.assertRaises(PlaywrightTimeoutError):
+            scrape.enter_course_page(page, '123', '高等数学', time.monotonic() + 90)
+        self.assertEqual(page.goto.call_count, 2)
+
+    def test_gateway_auth_redirect_stops_timeout_retry(self):
+        self.write_config({'scan': {'direct_course_entry': False}})
+        page = self.page()
+        page.url = 'https://sidportal.buct.edu.cn/login'
+        page.goto.side_effect = PlaywrightTimeoutError('login redirect')
+        with self.assertRaisesRegex(RuntimeError, '认证上下文失效'):
+            scrape.enter_course_page(page, '123', '高等数学', time.monotonic() + 90)
+        self.assertEqual(page.goto.call_count, 1)
+
+    def test_gateway_other_errors_are_not_retried(self):
+        self.write_config({'scan': {'direct_course_entry': False}})
+        page = self.page()
+        page.goto.side_effect = PlaywrightError('net::ERR_CONNECTION_REFUSED')
+        with self.assertRaises(PlaywrightError):
+            scrape.enter_course_page(page, '123', '高等数学', time.monotonic() + 90)
+        self.assertEqual(page.goto.call_count, 1)
+
+    def test_gateway_timeout_retry_keeps_direct_entry_fallback(self):
+        page = self.page()
+        page.goto.side_effect = [PlaywrightTimeoutError('slow direct page'),
+                                 PlaywrightTimeoutError('slow gateway'), None]
+        self.assertFalse(scrape.enter_course_page(page, '123', '高等数学', time.monotonic() + 90))
+        self.assertEqual([call.args[0] for call in page.goto.call_args_list],
+                         [DIRECT, GATEWAY, GATEWAY])

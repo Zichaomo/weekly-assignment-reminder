@@ -457,7 +457,7 @@ function showPreview(text, result = {}) {
       }
       const groups = [...grouped.values()].sort((a, b) =>
         message.indexOf('｜' + a[0].title) - message.indexOf('｜' + b[0].title));
-      const parts = message.split(/^   作业(?:原图|图片)随提醒发送（\d+ 张）。$/m);
+      const parts = message.split(/^(?: {3}|\u3000{2})作业(?:原图|图片)随提醒发送（\d+ 张）。$/m);
       if (parts.length === groups.length + 1) {
         parts.forEach((part, i) => {
           pane.appendChild(document.createTextNode(part));
@@ -819,7 +819,8 @@ function renderContentBrief(r, cell) {
   if (summary) {
     const labels = { ready: '已提取作业信息', generic_only: '没有具体题目 · 仅通用说明',
       needs_review: '自动附平台提示 · 可选调整', unavailable: '正文未就绪 · 自动附平台提示',
-      reference_only: '详细要求见北化在线', images: '原图随提醒发送 · 无需确认' };
+      reference_only: '详细要求见北化在线', omitted: '已按课程规则去除全部平台正文',
+      images: '原图随提醒发送 · 无需确认' };
     const info = document.createElement('div');
     info.className = 'effective-summary';
     const label = document.createElement('strong');

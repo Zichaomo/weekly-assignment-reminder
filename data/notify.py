@@ -17,6 +17,7 @@
 import argparse
 import base64
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -27,6 +28,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
+
+import run_history
 
 # Windows 下子进程 stdout 默认按 GBK(cp936) 编码，父进程用 utf-8 读会 UnicodeDecodeError。
 # 强制本进程以 utf-8 输出，保证被 weekly.py 调用时解码一致。
@@ -401,6 +405,58 @@ def send_pushplus(text: str, cfg: dict) -> bool:
 
 
 # ---------------------------------------------------------------- wecom
+def _wecom_failure(cfg, message):
+    message = run_history.redact(message)
+    errors = cfg.get('_delivery_errors')
+    if isinstance(errors, list):
+        errors.append(message)
+    run_history.emit(message)
+    print('ERROR: ' + message, file=sys.stderr)
+    return False
+
+
+def _refused_local_proxy(request, error):
+    reason = error.reason
+    refused = (isinstance(reason, ConnectionRefusedError)
+               or getattr(reason, 'errno', None) in (errno.ECONNREFUSED, 10061)
+               or getattr(reason, 'winerror', None) == 10061)
+    if not refused:
+        return False
+    proxy = urllib.request.getproxies().get(request.type)
+    target_host = urlsplit(request.full_url).netloc
+    if not proxy or urllib.request.proxy_bypass(target_host):
+        return False
+    try:
+        host = urlsplit(proxy if '://' in proxy else '//' + proxy).hostname
+    except ValueError:
+        return False
+    return host in ('localhost', '127.0.0.1', '::1')
+
+
+def _open_delivery_request(request, timeout):
+    # urllib mutates Request.host and may add proxy credentials while opening.
+    # Keep the original request fields for a fresh direct connection.
+    original_url = request.full_url
+    original_headers = dict(request.header_items())
+    original_method = request.get_method()
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.URLError as error:
+        if not _refused_local_proxy(request, error):
+            raise
+        run_history.emit('本机代理连接被拒绝，切换为直连重试')
+        # Refusal happens before the proxy accepts the request, so this retry
+        # cannot repeat a message already accepted by WeCom.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        direct_request = urllib.request.Request(original_url, data=request.data,
+                                               headers=original_headers, method=original_method)
+        try:
+            return opener.open(direct_request, timeout=timeout)
+        except Exception as direct_error:
+            raise urllib.error.URLError('本机代理连接被拒绝，直连失败 ' +
+                                        run_history.redact(direct_error)) from None
+
+
 def send_wecom(text: str, cfg: dict, *, image_bytes=None, markdown=False) -> bool:
     # _wecom_webhook_override：给「个人小群」用。环境变量 BUCT_WECOM_WEBHOOK 是
     # 定时任务用来定向班级群的，个人那条绝不能被它劫持到班级群去。
@@ -408,8 +464,7 @@ def send_wecom(text: str, cfg: dict, *, image_bytes=None, markdown=False) -> boo
             or (os.environ.get(WECOM_ENV) or "").strip()
             or (cfg.get("wecom_webhook") or "").strip())
     if not hook:
-        print("ERROR: wecom_webhook 为空，请在 config.json 填写。", file=sys.stderr)
-        return False
+        return _wecom_failure(cfg, '企业微信机器人地址为空，请在企微推送设置中填写')
     payload = {"msgtype": "text", "text": {"content": text}}
     if markdown:
         payload = {'msgtype':'markdown_v2', 'markdown_v2':{'content':text}}
@@ -423,17 +478,15 @@ def send_wecom(text: str, cfg: dict, *, image_bytes=None, markdown=False) -> boo
         headers={"Content-Type": "application/json", "User-Agent": UA},
     )
     try:
-        with urllib.request.urlopen(req, timeout=60 if image_bytes is not None else 20) as r:
+        with _open_delivery_request(req, timeout=60 if image_bytes is not None else 20) as r:
             res = json.loads(r.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001
-        print(f"ERROR: 企业微信请求失败 {type(e).__name__}", file=sys.stderr)
-        return False
+        return _wecom_failure(cfg, f'企业微信请求失败 {type(e).__name__} {e}')
     if res.get("errcode") == 0:
         # 成功提示一律走 stderr：stdout 要保持纯 JSON，避免调用方（console.ps1）解析失败
         print("企业微信机器人发送成功。", file=sys.stderr)
         return True
-    print(f"ERROR: 企业微信返回 {res}", file=sys.stderr)
-    return False
+    return _wecom_failure(cfg, f"企业微信返回错误 {res.get('errcode')} {res.get('errmsg', '')}")
 
 
 # ---------------------------------------------------------------- wechat ui
@@ -491,16 +544,27 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
         # Keep the reminder useful on text-only channels without claiming an
         # image was delivered. Original images are currently a WeCom feature.
         text = re.sub(r'作业(?:原图|图片)随提醒发送（\d+ 张）。', '图片作业详情参见北化在线。', text)
+        text = re.sub(r'补充图片随提醒发送（\d+ 张）。', '本项另有补充截图，请在作业控制台查看。', text)
         return fn(text, eff_cfg)
     import image_delivery
     try:
         # Validate every selected asset before the first component is sent.
         for entry in images:
             image_delivery.delivery_bytes(entry)
-    except (ValueError, OSError):
-        print('ERROR: 图片版本、选区或资产已变化，请重新预览。', file=sys.stderr)
-        return False
-    inline = image_delivery.inline_markdown(text, images)
+    except (ValueError, OSError) as error:
+        return _wecom_failure(eff_cfg, f'图片版本、选区或资产校验失败，请重新预览。{error}')
+    try:
+        inline = image_delivery.inline_markdown(text, images, hosting=eff_cfg.get('image_hosting'))
+        # Hosting and URL checks take time. Revalidate the complete selection
+        # before sending to catch edits made while those requests were running.
+        for entry in images:
+            image_delivery.delivery_bytes(entry)
+    except (ValueError, OSError) as error:
+        return _wecom_failure(eff_cfg, f'图文准备失败。{error}')
+    if images and not inline:
+        return _wecom_failure(eff_cfg, '原生图文消息需要可访问且与当前图片一致的 HTTPS 图片链接。请为本地补充截图或裁剪图配置图片托管链接，并检查平台原图链接。')
+    if inline and len(inline) > 1:
+        return _wecom_failure(eff_cfg, '本次提醒超过企业微信单条图文容量，请缩短提醒天数后重新预览。')
     # Partial-send receipts must track the actual layout/chunk boundaries too.
     bundle = image_delivery.bundle_key(text, images, rendered=inline)
     target = dedup_target(channel, cfg, audience)
@@ -530,18 +594,6 @@ def dispatch(text: str, channel: str, cfg: dict, audience: str = "class") -> boo
         return True
     for n, chunk in enumerate(image_delivery.text_chunks(text)):
         if not part(f'text:{n}', lambda: send_wecom(chunk, eff_cfg)):
-            return False
-    for i, entry in enumerate(images):
-        try:
-            raw = image_delivery.delivery_bytes(entry)
-            label = '作业裁剪图' if entry.get('crop') else '作业原图'
-            caption = f"{entry['course']}｜{entry['title']}\n截止：{entry['deadline']}\n{label}（{i+1}/{len(images)}）"
-            if not part(f'caption:{i}', lambda: send_wecom(caption, eff_cfg)):
-                return False
-            if not part(f'image:{i}', lambda: send_wecom('', eff_cfg, image_bytes=raw)):
-                return False
-        except (ValueError, OSError):
-            print('ERROR: 原图未发送，请查看北化在线；已成功发送的部分将在重试时跳过。', file=sys.stderr)
             return False
     return True
 

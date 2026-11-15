@@ -7,6 +7,7 @@ import tempfile
 import threading
 
 MODES = {'auto': '自动识别题号与任务', 'reference': '仅提示查看北化在线',
+         'omit': '去除全部作业正文',
          'physics': '去除通用提交说明', 'full': '保留全部纯文字', 'images': '发送正文原图'}
 DEFAULTS = [
     {'id': 'lab', 'course': '大学物理实验', 'match': 'prefix', 'mode': 'reference', 'lines': 3},
@@ -64,7 +65,7 @@ def resolve(course):
                name == r['course'] or (r['match'] == 'prefix' and name.startswith(r['course']))]
     # Exact match wins; among prefixes, the most specific course name wins.
     return max(matches, key=lambda r: (r['match'] == 'exact', len(r['course'])),
-               default={'mode': 'auto', 'lines': 3})
+               default={'mode': 'full', 'lines': 3})
 
 
 def change(payload):
