@@ -198,6 +198,7 @@ def run_list(days: int, fetch: bool, with_content: bool = False, sweep: bool = F
                 # here while waiting on that subprocess would deadlock.
                 if not weekly.ensure_login(check=False):
                     raise weekly.AuthenticationRequired('自动登录未成功，请在管理菜单的学校账号面板完成登录，再重新检索。')
+                run_history.emit('自动续登成功，正在重新检索课程')
                 if scan_id:
                     retry_id = uuid.uuid4().hex[:12]
                     extra = list(extra)

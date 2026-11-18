@@ -23,9 +23,10 @@
     const summary = task.summary || {};
     const events = task.events || [];
     const active = ['queued','running'].includes(task.status);
-    const coverage = progress ? `已完成 ${progress.done}/${progress.total} 门课程${progress.failed ? `，失败 ${progress.failed} 门` : ''}` : '';
+    const activity = taskActivityText(task);
+    const coverage = !activity && progress?.total > 0 ? `已完成 ${progress.done}/${progress.total} 门课程${progress.failed ? `，失败 ${progress.failed} 门` : ''}` : '';
     const counts = Number.isFinite(summary.platform_count) ? `平台条目 ${summary.platform_count} 条` : '';
-    const error = summary.error || progress?.error || '';
+    const error = summary.error || (!activity && progress?.error) || '';
     const detail = events.map(event => `${stamp(event.at)}  ${event.message}`).join('\n');
     const courses = progress ? [
       progress.completed_courses?.length ? '已完成课程 · '+progress.completed_courses.join('、') : '',

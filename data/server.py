@@ -712,11 +712,13 @@ class Handler(BaseHTTPRequestHandler):
                      "scan_id": rec.get("scan_id"),
                      "result": None, "error": rec.get("result_summary")}
             progress = task_progress(t)
+            activity = run_history.events(task_id, limit=1) if t.get('status') in ('queued', 'running') else []
             # 内部字段（_payload 等）必须剥掉：它含 datetime，直接序列化会抛错断连
             return self._send(200, {"ok": True,
                                     **{k: v for k, v in t.items() if k != "result"},
                                     "result": sanitize_result(t.get("result")),
-                                    "progress": progress})
+                                    "progress": progress,
+                                    "current_message": activity[-1]['message'] if activity else ''})
 
         return self._send(404, {"ok": False, "error": "not found"})
 

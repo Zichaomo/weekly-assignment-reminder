@@ -145,10 +145,13 @@ class DailyWorkflows(IsolatedCase):
 
     def test_manual_fetch_renews_expired_login_once_then_retries(self):
         self.fetch.side_effect=[weekly.AuthenticationRequired('expired'),{'ok':True,'homeworks':[]}]
-        with patch.object(weekly,'ensure_login',return_value=True) as login:
+        with patch.object(weekly,'ensure_login',return_value=True) as login, \
+             patch.object(hub.run_history, 'emit') as activity:
             result=hub.run_list(7,True)
         self.assertTrue(result['ok']);self.assertEqual(self.fetch.call_count,2)
         login.assert_called_once()
+        self.assertEqual([call.args[0] for call in activity.call_args_list],
+            ['登录状态已过期，正在自动续登', '自动续登成功，正在重新检索课程'])
 
     def test_manual_fetch_does_not_loop_on_login_failure(self):
         self.fetch.side_effect=weekly.AuthenticationRequired('expired')

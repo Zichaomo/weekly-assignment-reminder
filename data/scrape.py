@@ -1174,6 +1174,9 @@ def sweep_all_courses(ctx, page, debug=False, delay=None, skip_lids=None,
 #   「开始测试」是 <a onclick="return gotostart('150409458','client','new03')">，测试 id 带引号
 TEST_START_RE = re.compile(r"gotostart\(\s*'?(\d+)'?")
 TEST_URL = BASE + "/meol/common/question/test/student/testpaper.jsp?testId={tid}&strStyle=new03&tagbug=client"
+TEST_RESULT_PATH = '/meol/common/question/test/student/stu_qtest_navigate.jsp'
+TEST_CARD_LABELS = ('测试标题', '开始时间', '截止时间', '允许测试次数',
+                    '限制用时（分钟）', '开始测试', '交卷', '查看结果')
 
 
 def get_column_href(child, label: str, timeout: float = 30, retries: int = None):
@@ -1219,6 +1222,24 @@ def parse_test_table(page):
             };
         })).filter(r => r.length >= 6)""",
     )
+    # The platform also renders one vertical label/value table per test.
+    cards = page.eval_on_selector_all(
+        'table.valuelist',
+        """tables => tables.map(table => [...table.rows].map(row => {
+            const [label, value] = row.cells;
+            const link = value?.querySelector('a');
+            return [label?.textContent.trim(), {
+                text: (value?.textContent || '').trim(),
+                href: link?.href || null,
+                onclick: link?.getAttribute('onclick') || ''
+            }];
+        })).filter(card => card[0]?.[0] === '测试标题')""",
+    )
+    for card in cards:
+        fields = dict(card)
+        if len(fields) == len(card):
+            rows.append([fields.get(label, {'text': ''}) for label in TEST_CARD_LABELS])
+
     out = []
     for r in rows:
         title = (r[0]["text"] or "").strip()
@@ -1229,7 +1250,13 @@ def parse_test_table(page):
             continue
         start_cell = r[5] if len(r) > 5 else {"href": None, "onclick": ""}
         m = TEST_START_RE.search(start_cell.get("onclick") or "")
-        result_url = (r[7]["href"] if len(r) > 7 else None)
+        start_id = m.group(1) if m else None
+        start_url = TEST_URL.format(tid=start_id) if start_id else None
+        result_url = r[7].get('href') if len(r) > 7 else None
+        # Expired tests can have a result link while the start cell is empty.
+        result_id = _test_result_id(result_url)
+        if start_id and result_id and start_id != result_id:
+            continue
         out.append({
             "kind": "test",
             "title": title[:60],
@@ -1237,14 +1264,24 @@ def parse_test_table(page):
             "start_time": norm_deadline(r[1]["text"] if len(r) > 1 else ""),
             "allow_times": (r[3]["text"].strip() if len(r) > 3 else ""),
             "limit_minutes": (r[4]["text"].strip() if len(r) > 4 else ""),
-            "test_id": m.group(1) if m else None,
-            "content_url": (TEST_URL.format(tid=m.group(1)) if m else None),
-            "submit_url": (start_cell.get("href") if start_cell.get("href") else None),
-            "start_url": (TEST_URL.format(tid=m.group(1)) if m else None),
+            "test_id": start_id or result_id,
+            "content_url": start_url,
+            "submit_url": start_cell.get('href'),
+            "start_url": start_url,
             "result_url": result_url,
             "can_start": bool(m),
         })
     return out
+
+
+def _test_result_id(result_url):
+    if not result_url or _url_origin(result_url) != _url_origin(BASE):
+        return None
+    parts = urlsplit(result_url)
+    if parts.path != TEST_RESULT_PATH or parts.username or parts.password:
+        return None
+    ids = parse_qs(parts.query, keep_blank_values=True).get('testId', [])
+    return ids[0] if len(ids) == 1 and re.fullmatch(r'[0-9]+', ids[0]) else None
 
 
 LOGIN_PAGE_MARKERS = ("统一身份认证登录", "用户名密码", "忘记/修改密码", "涉密不上网")
@@ -1446,7 +1483,9 @@ def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
             target = table
             break
     text = _body_text(page)
-    header_ok = target is not None
+    cards = (sum(1 for table in evidence['tables']
+                 if table and table[0][:1] == ['测试标题'] and len(table[0]) <= 2)
+             if kind == 'test' else 0)
     total_match = TOTAL_RECORDS_RE.search(text)
     footer_total = int(total_match.group(1)) if total_match else None
     explicit_empty = (any(marker in text for marker in EMPTY_PAGE_MARKERS)
@@ -1454,11 +1493,11 @@ def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
     pagination_reason = _pagination_block_reason(page)
     if pagination_reason:
         return "incomplete", pagination_reason
-    if not header_ok:
+    if target is None and not cards:
         if evidence["tables"] or rows:
             return "invalid", "未找到带「标题/截止时间」的目标表格"
         return "invalid", "列表结构或空态证据不足"
-    data_rows = max(0, len(target) - 1)
+    data_rows = (len(target) - 1 if target else 0) + cards
     if data_rows == 0:
         if explicit_empty:
             return "empty", "目标表头有效且页面明确显示空态"
@@ -1473,9 +1512,11 @@ def classify_list_page(page, kind: str, rows: list[dict]) -> tuple[str, str]:
         return "incomplete", f"目标表有 {data_rows} 个数据行，但一条也未解析"
     if len(rows) < data_rows:
         return "incomplete", f"仅解析 {len(rows)}/{data_rows} 行，禁止覆盖旧缓存"
+    if cards and len(rows) != data_rows:
+        return "incomplete", "在线测试解析条数与页面条数不一致"
     if explicit_empty:
         return "invalid", "页面同时出现数据行和空态标记，结构不一致"
-    if kind == "test" and not any(str(r.get("test_id") or "") for r in rows):
+    if kind == "test" and any(not r.get('test_id') for r in rows):
         return "incomplete", "测试数据行缺少测试 ID"
     if kind == "homework" and not any(str(r.get("hwtid") or "") for r in rows):
         return "incomplete", "作业数据行缺少作业 ID"

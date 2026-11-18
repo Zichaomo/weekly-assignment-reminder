@@ -256,11 +256,18 @@ async function refreshList(){
   }
 }
 const taskLabels = { preview:'本地预览', publish:'发布提醒', fetch:'检索北化在线', content:'获取正文', 'refresh-courses':'刷新课程表', login:'学校登录', 'check-login':'检查登录' };
+function taskActivityText(task) {
+  if (!['queued', 'running'].includes(task.status)) return '';
+  const message = task.current_message ?? task.events?.at(-1)?.message;
+  return typeof message === 'string' && message.includes('正在自动续登') ? message : '';
+}
 function taskProgressText(task) {
+  const activity = taskActivityText(task);
+  if (activity) return ' · '+activity;
   const progress = task.progress || {};
   const done = progress.done ?? progress.course_done;
   const total = progress.total ?? progress.course_total;
-  return Number.isFinite(done) && Number.isFinite(total) ? ` · 已完成 ${done}/${total} 门课程` : '';
+  return Number.isFinite(done) && Number.isFinite(total) && total > 0 ? ` · 已完成 ${done}/${total} 门课程` : '';
 }
 function taskFailure(task, result, operation) {
   if (typeof result?.error === 'string') return result.error;

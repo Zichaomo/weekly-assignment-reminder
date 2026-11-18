@@ -50,6 +50,25 @@ def hw_page(ids, total, *, next_href=None, anchors=None, text=None,
             "anchors": page_anchors}
 
 
+def vertical_test(*, result_url=None, start_id=None, deadline='2026-11-17 12:10:00.0'):
+    return [
+        ('测试标题', _cell('测试 A')),
+        ('开始时间', _cell('2026-11-17 11:47:00.0')),
+        ('截止时间', _cell(deadline)),
+        ('允许测试次数', _cell('1')),
+        ('限制用时（分钟）', _cell('20')),
+        ('开始测试', {**_cell(''), 'onclick': f"return gotostart('{start_id}')" if start_id else ''}),
+        ('交卷', _cell('')),
+        ('查看结果', _cell('', result_url)),
+    ]
+
+
+def vertical_test_page(*cards):
+    return {'tables': [[[label, cell['text']] if cell['text'] else [label]
+                        for label, cell in card] for card in cards],
+            'test_cards': list(cards), 'text': '在线测试'}
+
+
 class PagedFakePage:
     """A desensitized route-based page: no network, no credentials."""
 
@@ -81,6 +100,8 @@ class PagedFakePage:
             return route.get("tables", [])
         if selector == "table tr":
             return route.get("row_cells", [])
+        if selector == "table.valuelist":
+            return route.get("test_cards", [])
         if selector in ("a,button,input", "a"):
             return route.get("anchors", [])
         return []
@@ -114,6 +135,41 @@ class PaginationFlowTests(IsolatedCase):
             page, kind, start, "123", time.monotonic() + 30,
             False, "offline")
         return page, rows, status, why, landed
+
+    def test_vertical_test_list_keeps_expired_result_and_available_start(self):
+        test_list = BASE + '/meol/common/question/test/student/list.jsp?cateId=7'
+        result = BASE + '/meol/common/question/test/student/stu_qtest_navigate.jsp?testId=41'
+        expired = vertical_test(result_url=result)
+        available = vertical_test(start_id='42')
+        layout = vertical_test_page(expired, available)
+        _page, rows, status, why, _landed = self.collect({test_list: layout}, test_list, 'test')
+        self.assertEqual(status, 'ok', why)
+        self.assertEqual([row['test_id'] for row in rows], ['41', '42'])
+        self.assertEqual(rows[0]['deadline'], '2026-11-17 12:10')
+        self.assertEqual(rows[0]['result_url'], result)
+        self.assertFalse(rows[0]['can_start'])
+        self.assertIsNone(rows[0]['start_url'])
+        self.assertIsNone(rows[0]['submit_url'])
+        self.assertTrue(rows[1]['can_start'])
+
+    def test_vertical_test_list_rejects_partial_records(self):
+        test_list = BASE + '/meol/common/question/test/student/list.jsp?cateId=7'
+        for invalid in (vertical_test(), vertical_test(start_id='42', deadline='日期未加载'),
+                vertical_test(result_url='https://elsewhere.invalid/stu_qtest_navigate.jsp?testId=42')):
+            with self.subTest(invalid=invalid):
+                layout = vertical_test_page(vertical_test(start_id='41'), invalid)
+                _page, rows, status, why, _landed = self.collect({test_list: layout}, test_list, 'test')
+                self.assertEqual(rows, [])
+                self.assertEqual(status, 'incomplete', why)
+
+    def test_vertical_test_list_checks_page_totals(self):
+        test_list = BASE + '/meol/common/question/test/student/list.jsp?cateId=7'
+        layout = vertical_test_page(vertical_test(start_id='41'))
+        layout['text'] = '在线测试 共 2 条记录'
+        _page, rows, status, why, _landed = self.collect({test_list: layout}, test_list, 'test')
+        self.assertEqual(rows, [])
+        self.assertEqual(status, 'incomplete', why)
+        self.assertIn('页脚总记录数', why)
 
     def test_34_rows_across_two_pages_is_complete(self):
         routes = {

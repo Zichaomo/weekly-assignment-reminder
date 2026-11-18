@@ -78,6 +78,36 @@ class ServerApiTests(IsolatedCase):
         self.assertEqual(data["source_version"], "v1")
         self.assertEqual(data["blocks"][0]["text"], "正文")
 
+    def test_task_poll_exposes_current_login_activity_from_persistent_events(self):
+        import run_history
+        task_id = 'renewing-login'
+        cache_store.register_task(task_id, self.scope+'|fetch|renewing', 'fetch', {})
+        cache_store.update_task(task_id, 'running', scan_id='api-scan')
+        cache_store.register_task('another-task', self.scope+'|fetch|other', 'fetch', {})
+        run_history.emit('另一任务正在执行', 'another-task')
+        with patch.dict(self.server_mod.TASKS, {}, clear=True):
+            for message in ('登录状态已过期，正在自动续登', '自动续登成功，正在重新检索课程'):
+                run_history.emit(message, task_id)
+                status, data = self.get('/api/tasks/'+task_id)
+                self.assertEqual(status, 200)
+                self.assertEqual(data.get('current_message'), message)
+            cache_store.update_task(task_id, 'error', result_summary={'error': '自动续登失败，请重新登录'})
+            _, data = self.get('/api/tasks/'+task_id)
+            self.assertFalse(data.get('current_message'))
+
+    def test_task_poll_redacts_current_activity_and_supports_no_events(self):
+        import run_history
+        task_id = 'activity-redaction'
+        cache_store.register_task(task_id, self.scope+'|fetch|redaction', 'fetch', {})
+        cache_store.update_task(task_id, 'running')
+        with patch.dict(self.server_mod.TASKS, {}, clear=True):
+            _, data = self.get('/api/tasks/'+task_id)
+            self.assertEqual(data.get('current_message'), '')
+            run_history.emit('正在自动续登 token=fixture-private-value', task_id)
+            _, data = self.get('/api/tasks/'+task_id)
+            self.assertIn('正在自动续登', data.get('current_message', ''))
+            self.assertNotIn('fixture-private-value', json.dumps(data))
+
     def test_runs_api_recovers_history_without_exposing_task_params(self):
         cache_store.register_task('history-api', self.scope+'|fetch|api', 'fetch', {'key':'private-fixture'})
         cache_store.update_task('history-api', 'error', result_summary={'error':'fixture timeout key=secret-fixture'})
