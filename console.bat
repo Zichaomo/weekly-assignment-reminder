@@ -21,11 +21,15 @@ rem    Any non-ASCII text here or in the child process output rendered as
 rem    mojibake in a real console window. ASCII cannot be mangled, so the
 rem    launcher speaks English only. The web UI is fully Chinese.
 rem ============================================================================
-setlocal
+setlocal DisableDelayedExpansion
+if not defined HOMEWORK_LAUNCH_PYTHON (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0data\launch_with_python.ps1" -Launcher console
+    exit /b
+)
 rem Keep the console code page at the system ANSI page (936 on zh-CN) so that
 rem helper tools behave consistently. No non-ASCII is printed either way.
 chcp 936 >nul 2>&1
-set "PY=%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
+set "PY=%HOMEWORK_LAUNCH_PYTHON%"
 set "SRV=%~dp0data\server.py"
 set "VBS=%~dp0data\run_hidden.vbs"
 set "FOCUS=%~dp0data\focus_console.py"
@@ -132,8 +136,8 @@ exit /b 1
 :no_python
 echo.
 echo   [ERROR] Python interpreter not found:
-echo           %PY%
-echo   Edit the PY variable at the top of console.bat
+echo           "%PY%"
+echo   Run setup.bat to prepare a Python environment.
 pause
 exit /b 1
 

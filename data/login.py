@@ -56,8 +56,8 @@ POLL_STEP = 2
 def launch_ctx(p, headless=False, retries=3):
     """本机 Edge 偶发启动即崩，重试几次。
 
-    持久 profile 可复用 Edge 保存的自动填充资料。
-    控制台重新认证使用独立临时上下文和已保存的账号凭据。
+    日常重新登录和定时续登共用该 profile，复用浏览器会话和设备信任状态。
+    账号设置待验证时，由 run_auto 使用独立上下文重新认证。
     """
     last = None
     for i in range(retries):
@@ -505,8 +505,8 @@ def run_auto(headless=False, no_wait=False, fresh=False) -> int:
             if has_captcha(page) and not warned_captcha:
                 warned_captcha = True
                 print("=" * 64)
-                print("⚠️ 平台弹出了验证码（腾讯滑块 / 短信验证码）。")
-                print("   请在已打开的浏览器窗口里拖动滑块完成验证 —— 脚本会继续等，")
+                print("⚠️ 平台要求额外验证。")
+                print("   请按认证页面上的要求完成人机或短信验证，脚本会继续等，")
                 print("   一登录成功就自动保存会话并退出。")
                 print("=" * 64)
 

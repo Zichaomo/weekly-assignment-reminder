@@ -6,6 +6,21 @@ const assert = require('node:assert/strict');
 const { PYTHON, chromium } = require('./browser_runtime');
 let fixture, browser;
 
+async function assertEnvironmentLayout(page) {
+  const selection = await page.locator('#setupPythonMode').boundingBox();
+  const details = await page.locator('#setupPythonResult').boundingBox();
+  const pathLine = await page.locator('#setupPython').boundingBox();
+  const scroll = await page.locator('#dlgSetup .settings-scroll').boundingBox();
+  assert(details && selection.y + selection.height <= details.y,
+    'Show the running environment below the Python selection');
+  assert(pathLine.y >= details.y && pathLine.y + pathLine.height <= Math.min(
+    details.y + details.height, scroll.y + scroll.height),
+    'Keep the detected path within the visible result');
+  assert(details.x >= scroll.x && details.x + details.width <= scroll.x + scroll.width,
+    'Keep long Python paths within the guide width');
+  assert((await page.locator('#setupPythonResult').innerText()).includes('当前运行环境'));
+}
+
 async function main() {
   const output = path.join(__dirname, 'artifacts', 'setup');
   fs.mkdirSync(output, { recursive: true });
@@ -40,9 +55,48 @@ async function main() {
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin);
   await page.waitForSelector('#dlgSetup[open]');
-  await page.screenshot({ animations: 'disabled', path: path.join(output, 'guide.png') });
   assert((await page.locator('#dlgSetup').innerText()).includes('首次部署'));
+  assert.equal(await page.locator('#setupPythonMode').inputValue(), 'auto');
+  await assertEnvironmentLayout(page);
+  assert.equal(await page.locator('#setupPythonSave').isVisible(), false);
+  assert.equal(await page.locator('#setupPythonPath').isVisible(), false);
+  await page.screenshot({ animations: 'disabled', path: path.join(output, 'guide-auto.png') });
+  const currentPython = await page.locator('#setupPython').innerText();
+  assert(currentPython.endsWith('python.exe'));
+  await page.locator('#setupPythonMode').press('ArrowDown');
+  assert.equal(await page.locator('#setupPythonMode').inputValue(), 'custom');
+  await page.keyboard.press('Tab');
+  assert.equal(await page.locator('#setupPythonPath').evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.locator('#setupPythonSave').innerText(), '检查并保存');
+  await assertEnvironmentLayout(page);
+  await page.locator('#setupPythonPath').fill('python.exe');
+  await page.locator('#setupPythonSave').click();
+  await page.waitForFunction(() => document.querySelector('#setupPythonStatus').textContent.includes('绝对路径'));
+  await page.locator('#setupPythonPath').fill(currentPython);
+  await page.locator('#setupPythonSave').click();
+  await page.waitForFunction(() => document.querySelector('#setupPythonStatus').textContent.includes('已保存'));
+  await page.screenshot({ animations: 'disabled', path: path.join(output, 'guide.png') });
+  await page.locator('#setupClose').click();
+  await page.setViewportSize({ width: 390, height: 700 });
+  await page.locator('#menuBtn').click(); await page.locator('#openSetup').click();
+  await page.waitForSelector('#dlgSetup[open]');
+  assert.equal(await page.locator('#setupPythonMode').inputValue(), 'custom');
+  assert.equal(await page.locator('#setupPythonPath').inputValue(), currentPython);
+  const guide = await page.locator('#dlgSetup').boundingBox();
+  assert(guide.x >= 0 && guide.x + guide.width <= 391 && guide.y + guide.height <= 701);
+  await assertEnvironmentLayout(page);
+  await page.screenshot({ animations: 'disabled', path: path.join(output, 'guide-small.png') });
+  await page.locator('#setupPythonMode').selectOption('auto');
+  assert.equal(await page.locator('#setupPythonSave').innerText(), '恢复自动检测');
+  await page.locator('#setupPythonSave').click();
+  await page.waitForFunction(() => document.querySelector('#setupPythonStatus').textContent.includes('已恢复自动检测'));
+  assert.equal(await page.locator('#setupPythonPath').isVisible(), false);
+  assert.equal(await page.locator('#setupPythonSave').isVisible(), false);
+  await assertEnvironmentLayout(page);
+  await page.screenshot({ animations: 'disabled', path: path.join(output, 'guide-auto-small.png') });
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator('#setupAccount').click();
+  await page.waitForFunction(() => document.querySelector('#accountStatus').textContent.includes('尚未'));
   await page.locator('#accountUsername').fill('fixture-student');
   await page.locator('#accountPassword').fill('fixture-password');
   await page.locator('#accountSave').click();
@@ -63,6 +117,7 @@ async function main() {
   await page.waitForFunction(() => document.querySelector('#accountStatus').textContent.includes('已验证'));
   await page.locator('#accountClose').click();
   await page.locator('#menuBtn').click(); await page.locator('#openWecom').click();
+  await page.waitForFunction(() => document.querySelector('#wecomMainState').textContent.includes('未配置'));
   await page.locator('#wecomChannel').selectOption('wecom');
   await page.locator('#wecomMain').fill('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-only');
   await page.locator('#wecomSave').click();
@@ -85,6 +140,7 @@ async function main() {
   await page.locator('#wecomClose').click();
   await page.locator('#menuBtn').click(); await page.locator('#openSetup').click();
   await page.locator('#setupFinish').click();
+  await page.waitForSelector('#dlgSetup[open]', { state: 'hidden' });
   await page.reload();
   await page.waitForSelector('#list .item');
   assert.equal(await page.locator('#dlgSetup[open]').count(), 0);
@@ -101,5 +157,5 @@ async function main() {
   assert.deepEqual(external, []);
   console.log('First deployment and settings browser acceptance passed. External requests 0.');
 }
-main().catch(error => { console.error(error.message); process.exitCode = 1; })
+main().catch(error => { console.error(error.stack); process.exitCode = 1; })
   .finally(async () => { await browser?.close(); fixture?.kill(); });

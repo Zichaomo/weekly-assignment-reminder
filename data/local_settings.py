@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -268,14 +270,74 @@ def setup_status():
         courses = {}
     if (cfg.get('school_account') or {}).get('courses_pending'):
         courses = {}
+    selected_python = cfg.get('python_path', '')
+    if not isinstance(selected_python, str):
+        selected_python = ''
     return {'revision': revision, 'needs_setup': not config_path().exists() or cfg.get('setup_completed') is False,
             'python': sys.version.split()[0], 'python_path': sys.executable,
+            'selected_python_path': selected_python,
+            'selected_python_available': bool(selected_python and Path(selected_python).is_file()),
             'playwright': importlib.util.find_spec('playwright') is not None,
             'pillow': importlib.util.find_spec('PIL') is not None,
             'edge': any((Path(base) / 'Microsoft' / 'Edge' / 'Application' / 'msedge.exe').is_file()
                         for base in (os.environ.get('ProgramFiles(x86)', ''),
                                      os.environ.get('ProgramFiles', ''), os.environ.get('LOCALAPPDATA', '')) if base),
             'account': account_status(), 'wecom': wecom_status(), 'course_count': len(courses)}
+
+
+_PYTHON_CHECK = """
+import importlib
+import json
+import sys
+
+missing = []
+if sys.version_info >= (3, 10):
+    for module, package in [('playwright.sync_api', 'Playwright'), ('PIL.Image', 'Pillow')]:
+        try:
+            importlib.import_module(module)
+        except (ImportError, OSError):
+            missing.append(package)
+print(json.dumps({'version': list(sys.version_info[:3]), 'missing': missing}))
+"""
+
+
+def save_python(payload):
+    with LOCK:
+        cfg = _edit(payload)
+        value = payload.get('python_path')
+        if not isinstance(value, str):
+            raise ValueError('请填写 Python 解释器路径')
+        value = value.strip().strip('"')
+        if not value:
+            cfg.pop('python_path', None)
+            _write(cfg)
+            return setup_status()
+
+        # The Windows launchers pass this through cmd. Keep it a literal, local path.
+        if not re.fullmatch(r'[a-zA-Z]:[\\/][^\x00-\x1f:"%<>|?*]+', value):
+            raise ValueError('请填写本机 Python 解释器的绝对路径，例如 D:\\Python\\python.exe')
+        python = Path(os.path.normpath(value))
+        if (python.name.lower() != 'python.exe' or not python.is_file()
+                or 'windowsapps' in (part.lower() for part in python.parts)):
+            raise ValueError('找不到 Python 解释器，请选择现有的 python.exe')
+        try:
+            result = subprocess.run([str(python), '-E', '-B', '-c', _PYTHON_CHECK], cwd=python.parent,
+                                    capture_output=True, check=True, timeout=10,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            check = json.loads(result.stdout.splitlines()[-1])
+            version = tuple(check['version'])
+            missing = check['missing']
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError, TypeError):
+            raise ValueError('无法启动或检测该 Python 解释器，请检查所选环境') from None
+        if version < (3, 10):
+            raise ValueError('请选择 Python 3.10 或更新版本')
+        if missing:
+            command = f'"{python}" -m pip install playwright Pillow'
+            raise ValueError(f'所选 Python 缺少 {"、".join(missing)}。请先在终端运行 {command}')
+
+        cfg['python_path'] = str(python)
+        _write(cfg)
+        return {**setup_status(), 'selected_python_version': '.'.join(map(str, version))}
 
 
 def complete_setup(payload):

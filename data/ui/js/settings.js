@@ -25,7 +25,7 @@
       <button class="btn ghost danger" id="accountClear">移除控制台保存</button></div>
     <div class="manage-row"><button class="btn line" id="accountLogin">重新登录</button>
       <button class="btn ghost" id="accountCheck">检查登录状态</button></div>
-    <p class="settings-help">重新登录会打开学校认证窗口。遇到验证码时在该窗口完成，后台会保存成功后的会话。</p>`,
+    <p class="settings-help">重新登录与定时续登共用项目专用 Edge 配置。遇到人机或短信验证时，在打开的学校认证窗口完成，后台会保存验证后的会话。</p>`,
   '<button class="btn solid" id="accountSave" type="submit" form="accountForm">保存账号</button>');
   let accountRevision;
   function showAccount(data, message) {
@@ -129,25 +129,91 @@
   const setup = dialog('dlgSetup', '首次部署与使用指引', `
     <p class="settings-help">依次完成环境检查、学校登录、推送设置和课程初始化。此指引可随时从管理菜单打开。</p>
     <ol class="setup-steps">
-      <li><h4>检查运行环境</h4><p id="setupEnvironment"></p><p id="setupPython" class="settings-path"></p></li>
+      <li>
+        <h4>检查运行环境</h4>
+        <div class="setup-python">
+          <form id="setupPythonForm" class="setup-python-form">
+            <label class="field">
+              <span class="lbl">Python 环境</span>
+              <select id="setupPythonMode"><option value="auto">自动检测</option><option value="custom">自选 Python 环境</option></select>
+            </label>
+            <div id="setupPythonCustom" hidden>
+              <label class="field">
+                <span class="lbl">解释器路径</span>
+                <input id="setupPythonPath" placeholder="例如 D:\\venv\\Scripts\\python.exe" autocomplete="off" spellcheck="false" maxlength="1024">
+              </label>
+            </div>
+            <div id="setupPythonActions" hidden>
+              <button class="btn line" id="setupPythonSave" type="submit">检查并保存</button>
+            </div>
+          </form>
+          <p id="setupPythonStatus" class="setup-python-status" role="status"></p>
+          <div class="setup-python-result" id="setupPythonResult">
+            <p class="setup-python-result-label">当前运行环境</p>
+            <p id="setupEnvironment"></p>
+            <p id="setupPython" class="settings-path"></p>
+          </div>
+        </div>
+      </li>
       <li><h4>保存学校账号并登录</h4><p id="setupAccountState"></p><button class="btn line" id="setupAccount">打开学校账号</button></li>
       <li><h4>配置提醒渠道</h4><p id="setupWecomState"></p><button class="btn line" id="setupWecom">打开企微推送</button></li>
       <li><h4>刷新课程表</h4><p id="setupCoursesState"></p><button class="btn line" id="setupCourses">刷新课程表</button></li>
       <li><h4>检索、预览和定时发布</h4><p>关闭指引后点“检索北化在线”，检查列表和两份本地预览。确认提醒范围后，可从管理菜单设置定时发布。</p></li>
     </ol><p id="setupStatus" role="status"></p>`,
   '<button class="btn solid" id="setupFinish">完成指引</button>');
-  let setupRevision;
+  let setupRevision, savedCustomPython = false;
+  const pythonMode = $('#setupPythonMode');
+  const pythonPath = $('#setupPythonPath');
+  const pythonStatus = $('#setupPythonStatus');
+  const pythonSave = $('#setupPythonSave');
+  const pythonRestart = '从管理菜单停止控制台服务，再双击 console.bat 生效。';
+  function updatePythonMode() {
+    const custom = pythonMode.value === 'custom';
+    $('#setupPythonCustom').hidden = !custom;
+    pythonPath.required = custom;
+    $('#setupPythonActions').hidden = !custom && !savedCustomPython;
+    pythonSave.textContent = custom ? '检查并保存' : '恢复自动检测';
+  }
+  pythonMode.onchange = () => {
+    updatePythonMode();
+    pythonStatus.textContent = '';
+  };
   function showSetup(data) {
     setupRevision = data.revision;
     $('#setupEnvironment').textContent = `Python ${data.python} · Playwright ${data.playwright ? '已安装' : '缺失'} · Pillow ${data.pillow ? '已安装' : '缺失'} · Edge ${data.edge ? '已安装' : '未找到'}`;
     $('#setupPython').textContent = data.python_path;
+    pythonPath.value = data.selected_python_path || '';
+    savedCustomPython = Boolean(pythonPath.value);
+    pythonMode.value = savedCustomPython ? 'custom' : 'auto';
+    updatePythonMode();
+    const current = data.python_path.replace(/pythonw\.exe$/i, 'python.exe');
+    pythonStatus.textContent = '';
+    if (pythonPath.value && !data.selected_python_available) {
+      pythonStatus.textContent = '已保存的解释器路径不可用。启动时会使用自动检测。';
+    } else if (pythonPath.value && pythonPath.value.toLowerCase() !== current.toLowerCase()) {
+      pythonStatus.textContent = '已保存自选环境。' + pythonRestart;
+    }
     $('#setupAccountState').textContent = data.account.password_saved ? '已保存账号。请在账号面板检查登录状态或重新登录。' : '可录入账号密码，或导入已有 Edge 凭据后登录。';
     $('#setupWecomState').textContent = `当前渠道为 ${data.wecom.channel}，主用企微地址${data.wecom.configured.wecom_webhook ? '已配置' : '未配置'}。`;
     $('#setupCoursesState').textContent = `本账号课程表 ${data.course_count} 门。首次登录或换账号后请刷新。`;
   }
+  $('#setupPythonForm').onsubmit = operation(setup, pythonStatus, async () => {
+    const custom = pythonMode.value === 'custom';
+    if (!custom && !savedCustomPython) return;
+    const path = pythonPath.value.trim();
+    if (custom && !path) throw Error('请填写 Python 解释器路径');
+    pythonStatus.textContent = custom ? '正在检查 Python 版本和依赖…' : '正在保存…';
+    const data = requireOk(await api('/api/settings/python', {
+      expected_revision: setupRevision, python_path: custom ? path : '',
+    }));
+    showSetup(data);
+    pythonStatus.textContent = custom
+      ? '已保存 Python ' + data.selected_python_version + '，Playwright 和 Pillow 检查通过。' + pythonRestart
+      : '已恢复自动检测。' + pythonRestart;
+  });
   async function openSetup() {
-    openDlg(setup);
     showSetup(requireOk(await api('/api/setup')));
+    openDlg(setup);
   }
   $('#setupAccount').onclick = guarded(async () => { setup.close(); await openAccount(); });
   $('#setupWecom').onclick = guarded(async () => { setup.close(); await openWecom(); });
@@ -168,7 +234,14 @@
   (async () => {
     try {
       const data = requireOk(await api('/api/setup'));
-      if (data.needs_setup) { showSetup(data); openDlg(setup); }
+      if (data.needs_setup) {
+        showSetup(data);
+        if (scheduledFailureDialog.open) {
+          scheduledFailureDialog.addEventListener('close', () => openDlg(setup), { once: true });
+        } else {
+          openDlg(setup);
+        }
+      }
     } catch (error) { report(error); }
   })();
 })();

@@ -44,6 +44,7 @@ for _s in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(ROOT))
 import notify  # noqa: E402  复用 webhook 解析，避免「哪个群」有两套说法
+from schedule_status import failure_reason
 import task_notice
 
 TASK_LOG = ROOT / "task_log.jsonl"
@@ -226,7 +227,8 @@ def main() -> int:
             task_notice.launch('failure', elapsed)
         log_line(f'[task_run] 执行未完成：{type(exc).__name__}，用时 {elapsed:.0f} 秒')
         log_task(kind=args.kind, ok=False, exit_code=1, elapsed_sec=round(elapsed, 1),
-                 wecom=args.wecom, error=type(exc).__name__)
+                 wecom=args.wecom, channel='none' if args.dry_run else args.channel,
+                 error=type(exc).__name__)
         if not args.dry_run:
             _alert('task-failed', '作业提醒定时任务未完成',
                    '执行程序无法启动或已超过30分钟上限；请检查日志，部分消息可能已发送。')
@@ -249,6 +251,8 @@ def main() -> int:
         rows=fetch.get("rows"), failed_count=fetch.get("failed_count"),
         error="" if ok else (r.stderr or "").strip()[-300:],
     )
+    if not ok:
+        rec['failure_reason'] = failure_reason(r.stderr, r.returncode)
     log_task(**rec)
 
     if ok:

@@ -274,6 +274,20 @@ class DailyWorkflows(IsolatedCase):
             self.assertEqual(task_run.main(), 1)
         alert.assert_not_called()
 
+    def test_scheduled_failure_receipt_keeps_reason_before_log_tail(self):
+        error = 'ERROR: 企业微信请求失败。网络超时 token=fixture-private\n' + '通知输出' * 100
+        with patch.dict('os.environ', {}, clear=False), \
+             patch.object(task_run.notify, 'load_config', return_value={'task_local_notice': False}), \
+             patch.object(task_run.notify, 'resolve_webhook', return_value=('https://unit.invalid', 'fixture')), \
+             patch.object(task_run, 'push_status_today', return_value={'class':False,'personal':False,'personal_enabled':False}), \
+             patch.object(task_run.subprocess, 'run', return_value=SimpleNamespace(returncode=1,stdout='',stderr=error)), \
+             patch.object(task_run, '_alert'), patch.object(task_run, 'log_task') as receipt, \
+             patch.object(sys, 'argv', ['task_run.py']), redirect_stdout(io.StringIO()):
+            self.assertEqual(task_run.main(), 1)
+        reason = receipt.call_args.kwargs.get('failure_reason', '')
+        self.assertIn('企业微信请求失败', reason)
+        self.assertNotIn('fixture-private', reason)
+
     def test_manual_edit_delete_and_invalid_date_preserve_saved_data(self):
         deadline=(datetime.now()+timedelta(days=2)).strftime('%Y-%m-%d %H:%M')
         self.assertTrue(manual_call({'action':'add','course':'手动课程',

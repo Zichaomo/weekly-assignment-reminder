@@ -64,6 +64,8 @@ html,body{height:100%;overflow:hidden}
 .schedule-editor .modal{width:100%;max-height:inherit;box-shadow:none;border-radius:inherit}
 .system-box{white-space:pre-wrap;padding:12px;border:1px solid var(--line);border-radius:8px;margin:10px 0}.manage-row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
 .settings-dialog{width:640px;max-width:calc(100dvw - 24px);max-height:calc(100dvh - 32px)}
+#dlgScheduledFailure .cf-main{padding-top:22px}
+.scheduled-failure-body{min-width:0;overflow-wrap:anywhere}
 .supplement-dialog{width:680px;max-width:calc(100dvw - 24px);max-height:calc(100dvh - 24px)}
 .supplement-scroll{display:grid;gap:16px;flex:1;min-height:0}
 .supplement-scroll .settings-help{margin:8px 0 0}.supplement-scroll input{max-width:100%}
@@ -84,6 +86,13 @@ html,body{height:100%;overflow:hidden}
 .settings-path{font-size:12px;overflow-wrap:anywhere;color:var(--ink-3)}
 .setup-steps{padding-left:24px;display:grid;gap:20px}.setup-steps h4{font-size:14px;margin:0 0 7px}
 .setup-steps p{font-size:13px;line-height:1.7;margin:0 0 8px}
+.setup-python-form{display:grid;gap:8px}
+.setup-python p{margin:0;overflow-wrap:anywhere}
+.setup-python .setup-python-status:not(:empty){margin-top:8px;color:var(--ink-2)}
+.setup-python-result{margin-top:10px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--paper-2)}
+.setup-python-result .setup-python-result-label{font-size:12px;font-weight:600;color:var(--ink-2)}
+.setup-python-result p+p{margin-top:3px}
+.setup-python-result .settings-path{font-size:12px;color:var(--ink-2)}
 .menu{width:min(590px,calc(100dvw - 32px));padding:10px;max-height:calc(100dvh - 90px);overflow:auto}
 .menu-guide{padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid var(--line)}
 .menu-guide button{background:var(--olive-wash);color:var(--olive)}

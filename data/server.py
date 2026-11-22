@@ -225,7 +225,7 @@ def run_task(op, params):
         return result
     if op in ('login', 'check-login'):
         command = [sys.executable, str(ROOT / 'login.py')]
-        command += ['--check'] if op == 'check-login' else ['--auto', '--fresh']
+        command += ['--check'] if op == 'check-login' else ['--auto']
         try:
             result = subprocess.run(command, cwd=ROOT, capture_output=True,
                                     env=dict(os.environ, PYTHONIOENCODING='utf-8'),
@@ -604,6 +604,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             return self._send(200, {"ok": True, "channel": load_channel(),
                                     "port": PORT,
+                                    "scheduled_failure": schedule_status.today_failure(),
                                     "content_ttl_sec": cache_store.cache_settings()["content_ttl_sec"],
                                     "publish_fresh_sec": cache_store.cache_settings()["publish_fresh_sec"]})
 
@@ -749,6 +750,7 @@ class Handler(BaseHTTPRequestHandler):
 
         settings_writes = {'/api/settings/account': local_settings.save_account,
                            '/api/settings/wecom': local_settings.save_wecom,
+                           '/api/settings/python': local_settings.save_python,
                            '/api/setup': local_settings.complete_setup}
         if u.path in settings_writes:
             if not self._settings_origin_allowed(mutation=True):
@@ -764,7 +766,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._send(400, {'ok': False, 'error': str(exc)})
                 self.activity_op = {'/api/settings/account': '学校账号设置',
-                                    '/api/settings/wecom': '企微推送设置', '/api/setup': '部署指引'}[u.path]
+                                    '/api/settings/wecom': '企微推送设置',
+                                    '/api/settings/python': 'Python 环境设置', '/api/setup': '部署指引'}[u.path]
                 return self._send(200, {'ok': True, **result})
 
         if u.path == '/api/course-rules/preview':

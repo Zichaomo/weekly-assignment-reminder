@@ -1,9 +1,12 @@
 """Regression coverage for the standalone Windows Python runtime and profile."""
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from helpers import DATA, ROOT
@@ -15,11 +18,13 @@ import task_register
 
 
 class RuntimePathTests(unittest.TestCase):
-    def test_windows_launchers_use_installed_python_314(self):
-        for name in ('console.bat', 'login.bat'):
+    def test_windows_launchers_keep_python_314_as_the_preferred_default(self):
+        launcher = (DATA / 'launch_with_python.ps1').read_text(encoding='utf-8')
+        self.assertIn('Programs\\Python\\Python314\\python.exe', launcher)
+        for name in ('console.bat', 'login.bat', 'setup.bat'):
             with self.subTest(name=name):
                 source = (ROOT / name).read_text(encoding='utf-8')
-                self.assertTrue('%LOCALAPPDATA%\\Programs\\Python\\Python314\\python.exe' in source, name)
+                self.assertIn('launch_with_python.ps1', source, name)
                 self.assertFalse('.work' + 'buddy' in source.lower(), name)
         source = (DATA / 'console.ps1').read_text(encoding='utf-8')
         self.assertTrue('$env:LOCALAPPDATA' in source)
@@ -29,6 +34,45 @@ class RuntimePathTests(unittest.TestCase):
         current = str(ROOT / 'test python' / 'python.exe')
         with patch.object(task_register.sys, 'executable', current):
             self.assertEqual(task_register.find_python(), current)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows launcher')
+    def test_windows_launchers_honor_selected_interpreter_and_auto_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / 'data'
+            data.mkdir()
+            shutil.copyfile(DATA / 'launch_with_python.ps1', data / 'launch_with_python.ps1')
+            config = root / 'config.json'
+            marker = root / 'selected.txt'
+            selected = root / '自选环境 ñ 🚀' / 'python.exe'
+            selected.parent.mkdir()
+            selected.touch()
+            default = root / 'Programs' / 'Python' / 'Python314' / 'python.exe'
+            default.parent.mkdir(parents=True)
+            default.touch()
+            env = dict(os.environ, LOCALAPPDATA=str(root), HOMEWORK_CONFIG_PATH=str(config),
+                       RUNTIME_TEST_MARKER=str(marker))
+            env.pop('HOMEWORK_LAUNCH_PYTHON', None)
+            for name in ('console', 'setup', 'login'):
+                source = (ROOT / (name + '.bat')).read_text(encoding='utf-8')
+                stub = source.split('set "PY=', 1)[0] + (
+                    'powershell -NoProfile -Command '
+                    '"[IO.File]::WriteAllText($env:RUNTIME_TEST_MARKER,$env:HOMEWORK_LAUNCH_PYTHON)"\n'
+                    'exit /b %ERRORLEVEL%\n'
+                )
+                launcher = root / (name + '.bat')
+                launcher.write_text(stub, encoding='ascii')
+                for saved, expected in [(str(selected), selected), ('', default),
+                                        (str(root / 'missing' / 'python.exe'), default)]:
+                    with self.subTest(name=name, expected=expected):
+                        config.write_text(json.dumps({'python_path': saved}, ensure_ascii=False), encoding='utf-8')
+                        marker.unlink(missing_ok=True)
+                        result = subprocess.run(
+                            ['cmd', '/d', '/c', str(launcher)], cwd=root, env=env,
+                            capture_output=True, timeout=20,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(marker.read_text(encoding='utf-8'), str(expected))
 
     def test_login_scraping_and_credentials_share_project_profile(self):
         for module in (login, scrape, edge_cred):

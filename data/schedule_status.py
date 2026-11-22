@@ -7,6 +7,9 @@ import re
 import subprocess
 import threading
 import time
+from datetime import date
+
+import run_history
 
 ROOT=Path(__file__).resolve().parent
 _cache=None
@@ -72,9 +75,48 @@ def _records(name):
 
 
 def _safe_error(text):
-    text=re.sub(r'https?://\S+','[链接已隐藏]',str(text or ''))
-    text=re.sub(r'(?i)(?:key|token|secret)\s*[=:]\s*\S+','[凭据已隐藏]',text)
-    return text[-240:]
+    text = re.sub(r'https?://\S+', '[链接已隐藏]', str(text or ''))
+    return run_history.redact(text)[-240:]
+
+
+def failure_reason(output, exit_code):
+    """Choose a concise diagnostic from both the current and older task logs."""
+    output = str(output or '')
+    if '登录状态检查超时' in output:
+        return '北化在线登录状态检查超时。'
+    if '自动登录超时' in output:
+        return '北化在线自动续登超时，请在「管理 → 学校账号」重新登录。'
+    if any(text in output for text in ('自动登录未成功', '自动登录也失败', '自动续登失败')):
+        return '北化在线登录已失效，自动续登失败，请在「管理 → 学校账号」重新登录。'
+    if '未解析到企业微信 webhook' in output:
+        return '企业微信机器人地址缺失，请在「管理 → 企微推送」检查配置。'
+    if output.strip() == 'TimeoutExpired':
+        return '定时任务执行超时。'
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith(('ERROR:', '推送失败:', '推送异常：', '个人推送异常：',
+                            '抓取失败：', '发送前覆盖或新鲜度已变化', '本次扫描未通过发布检查')):
+            return _safe_error(line.removeprefix('ERROR:').strip())
+    if lines:
+        return _safe_error(lines[-1])
+    return f'定时任务退出码为 {exit_code}，运行台账没有记录具体原因。' if exit_code else '运行台账没有记录具体原因。'
+
+
+def today_failure():
+    """Find today's latest real scheduled attempt without querying Windows."""
+    today = date.today().isoformat() + ' '
+    for row in reversed(_records('task_log.jsonl')):
+        timestamp = row.get('time')
+        if (not isinstance(timestamp, str) or not timestamp.startswith(today)
+                or row.get('kind') not in ('scheduled', 'catchup', 'boot-check')
+                or row.get('channel') in ('none', 'clipboard') or row.get('wecom') == 'test'):
+            continue
+        if row.get('ok') is True:
+            return None
+        if row.get('ok') is False and not row.get('skipped'):
+            reason = row.get('failure_reason') or failure_reason(row.get('error'), row.get('exit_code'))
+            return {'time': timestamp, 'reason': _safe_error(reason)}
+    return None
 
 
 def snapshot(force=False):

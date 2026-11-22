@@ -8,15 +8,15 @@
 
 ## 首次部署
 
-1. 准备 Windows 和 Microsoft Edge。安装 Python 3.14，安装目录选择 `%LOCALAPPDATA%\Programs\Python\Python314\`，与项目启动器默认路径一致。安装包可从官方 Windows 下载页获取。[Python Windows 下载页](https://www.python.org/downloads/windows/)
-2. 双击项目根目录的 `setup.bat`。它会为该 Python 安装 Playwright 和 Pillow，然后打开控制台。首次安装依赖需要网络。项目复用系统 Edge。
-3. 新部署首次打开时会显示「首次部署与使用指引」。也可随时从「管理 → 部署指引」打开，查看解释器、依赖、Edge 和课程初始化状态。
+1. 准备 Windows、Microsoft Edge 和 Python 3.10 或更新版本。启动器默认优先使用 `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`，也会检测 PATH 里的 Python。[Python Windows 下载页](https://www.python.org/downloads/windows/)
+2. 双击项目根目录的 `setup.bat`。它会为所选 Python 安装 Playwright 和 Pillow，然后打开控制台。启动器找不到 Python 时，可输入解释器的完整路径。首次安装依赖需要网络。项目复用系统 Edge。
+3. 新部署首次打开时会显示「首次部署与使用指引」。也可随时从「管理 → 部署指引」打开。在「检查运行环境」中，可保留自动检测或填写自选环境的 `python.exe` 完整路径。保存时会检查 Python 版本及 Playwright、Pillow。通过「管理 → 停止控制台服务」停止服务，再双击 `console.bat` 可切换环境。
 4. 在「管理 → 学校账号」录入账号密码，或点击「导入 Edge 已存凭据」。保存后点「重新登录」，在学校认证窗口中完成验证码，再用「检查登录状态」确认结果。
 5. 在「管理 → 企微推送」选择提醒渠道，填写主用机器人地址。按需填写个人、测试和正式备用地址。可先使用「复制到剪贴板」或「仅生成本地文案」。
 6. 回到部署指引点击「刷新课程表」，再通过课程管理设置三个名单，检索北化在线并查看两份推送预览。
 7. 需要自动提醒时，从「管理 → 定时发布」设置每周日时间和提醒天数，后续补推检查包含在主任务中。
 
-账号密码及企微链接均可在控制台管理，配置文件由保存操作自动创建。日常双击 `console.bat` 即可。使用其他 Python 安装目录时，也可用已安装依赖的解释器运行 `python data/server.py`，打开 `http://127.0.0.1:8277`。CLI 注册计划任务、网页定时设置和后台子进程跟随入口解释器。
+账号密码及企微链接均可在控制台管理，配置文件由保存操作自动创建。日常双击 `console.bat` 即可。也可用已安装依赖的解释器运行 `python data/server.py`，打开 `http://127.0.0.1:8277`。新建或重新保存的定时任务会使用当时运行控制台的解释器。已注册的任务保留原解释器，切换环境后可在「管理 → 定时发布」重新保存。
 
 ### 学校账号与企微推送管理
 

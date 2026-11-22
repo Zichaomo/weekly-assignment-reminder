@@ -1,4 +1,5 @@
 import json
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from helpers import IsolatedCase
@@ -8,6 +9,45 @@ import server
 
 
 class SystemStatus(IsolatedCase):
+    def scheduled_failure(self, records):
+        (self.root/'task_log.jsonl').write_text('\n'.join(map(json.dumps, records)), encoding='utf-8')
+        handler = object.__new__(server.Handler)
+        handler.path = '/api/config'
+        handler._send = lambda code, data: data
+        with patch.object(schedule, 'ROOT', self.root), \
+             patch.object(schedule, '_query_windows', side_effect=AssertionError('startup must not query Windows')):
+            return handler._do_GET().get('scheduled_failure')
+
+    def attempt(self, minute, **fields):
+        return {'time': f'{date.today()} 09:{minute:02}:00', 'kind': 'scheduled',
+                'channel': 'wecom', 'wecom': 'config', 'ok': False, 'exit_code': 1, **fields}
+
+    def test_startup_reports_todays_scheduled_failure_and_readable_reason(self):
+        attempt = self.attempt(30, error='登录态失效，尝试自动登录\n自动登录未成功，需人工双击 login.bat 重新登录。\n已发送登录失效告警。')
+        result = self.scheduled_failure([attempt])
+        self.assertEqual(result['time'], attempt['time'])
+        self.assertIn('北化在线', result['reason'])
+        self.assertIn('自动续登失败', result['reason'])
+
+    def test_startup_failure_ignores_test_runs_and_is_cleared_by_successful_retry(self):
+        failure = self.attempt(0, error='ERROR: 企业微信请求失败 token=fixture-private-secret https://unit.invalid/?key=private')
+        ignored = [self.attempt(10, kind='manual', ok=True), self.attempt(15, channel='none', ok=True),
+                   self.attempt(20, wecom='test', ok=True)]
+        result = self.scheduled_failure([failure, *ignored])
+        self.assertIn('企业微信请求失败', result['reason'])
+        self.assertNotIn('fixture-private-secret', result['reason'])
+        self.assertNotIn('unit.invalid', result['reason'])
+        self.assertIsNone(self.scheduled_failure([failure, *ignored, self.attempt(30, ok=True)]))
+        self.assertIsNone(self.scheduled_failure([failure, *ignored,
+            self.attempt(30, ok=True, skipped=True, reason='already-pushed-today', channel=None)]))
+
+    def test_startup_does_not_report_old_or_test_only_failures(self):
+        yesterday = date.today() - timedelta(days=1)
+        self.assertIsNone(self.scheduled_failure([
+            self.attempt(0, time=f'{yesterday} 09:00:00'),
+            self.attempt(20, wecom='test'), self.attempt(30, channel='none'),
+            self.attempt(40, kind='manual')]))
+
     def test_disabled_task_has_no_next_run_but_retains_setting_and_history(self):
         task={'name':'BUCT-Homework-Weekly','registered':True,'enabled':False,
               'next_run':'2099-01-04 09:00:00','schedule_time':'09:00','days':7,'last_run':'old'}

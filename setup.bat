@@ -1,11 +1,15 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
+if not defined HOMEWORK_LAUNCH_PYTHON (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0data\launch_with_python.ps1" -Launcher setup
+    exit /b
+)
 chcp 936 >nul 2>&1
-set "PY=%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
+set "PY=%HOMEWORK_LAUNCH_PYTHON%"
 if not exist "%PY%" (
-    echo [ERROR] Install Python 3.14 for the current user with the default path.
+    echo [ERROR] Install Python 3.10 or newer.
     echo         https://www.python.org/downloads/windows/
-    echo         Expected: %PY%
+    echo         Expected: "%PY%"
     pause
     exit /b 1
 )

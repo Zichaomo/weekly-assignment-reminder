@@ -62,6 +62,7 @@ def main():
     # entry point may run inside the fixture.
     cache_store._load_config = lambda: {}
     server.load_channel = lambda: "none"
+    server.schedule_status.ROOT = tmp
     server.schedule_status.snapshot = lambda *a: {'available':True,'tasks':[
         {'name':'BUCT-Homework-Weekly','registered':True,'enabled':True,'state':3,
          'next_run':'2099-01-04 09:00:00','last_run':None,'matches_project':True}],

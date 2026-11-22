@@ -1,10 +1,14 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
+if not defined HOMEWORK_LAUNCH_PYTHON (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0data\launch_with_python.ps1" -Launcher login
+    exit /b
+)
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
-set "PY=%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
+set "PY=%HOMEWORK_LAUNCH_PYTHON%"
 if not exist "%PY%" (
-    echo [ERROR] Python 3.14 interpreter not found: %PY%
+    echo [ERROR] Python interpreter not found: "%PY%"
     pause
     exit /b 1
 )

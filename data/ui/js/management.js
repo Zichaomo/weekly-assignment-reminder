@@ -36,8 +36,25 @@ schedule.addEventListener('cancel', event => {
   if (!scheduleChanging) setScheduleEditor(false);
 });
 document.body.append(schedule);
+const scheduledFailureDialog = $('#dlgScheduledFailure');
+$('#scheduledFailureDetails').onclick = () => {
+  scheduledFailureDialog.close();
+  $('#scheduleDetails').open = true;
+  $('#openSystem').click();
+};
+function showScheduledFailure(failure) {
+  if (!failure) return;
+  $('#scheduledFailureTime').textContent = '最近一次失败 · '+failure.time;
+  $('#scheduledFailureReason').textContent = failure.reason;
+  openDlg(scheduledFailureDialog);
+}
 (async()=>{
-  try{const config=await api('/api/config');state.channel=config.ok?config.channel:null;await loadCourses();await refreshList();
+  try {
+    const config = await api('/api/config');
+    state.channel = config.ok ? config.channel : null;
+    if (config.ok) showScheduledFailure(config.scheduled_failure);
+    await loadCourses();
+    await refreshList();
     const pending=JSON.parse(sessionStorage.getItem('homeworkUiTasks')||'[]');
     for(const t of pending)pollTask(t.id,t.op).then(refreshList).catch(report);
   }catch(e){report(e);}

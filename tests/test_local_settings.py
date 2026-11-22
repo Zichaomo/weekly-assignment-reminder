@@ -1,6 +1,8 @@
 """First-run setup and console-managed credentials and delivery settings."""
 import importlib
 import json
+import sys
+import venv
 from unittest.mock import patch
 
 from helpers import IsolatedCase
@@ -29,6 +31,61 @@ class SettingsApiTests(IsolatedCase):
         code, _ = handler._do_POST()
         self.assertEqual(code, 403)
 
+    def test_python_selection_uses_the_same_origin_and_revision_checks(self):
+        path = '/api/settings/python'
+        before = self.config_path.read_bytes()
+        body = {'expected_revision': 'stale', 'python_path': sys.executable}
+        self.assertEqual(self.handler(path, body, 'https://example.com')._do_POST()[0], 403)
+        self.assertEqual(self.handler(path, body)._do_POST()[0], 409)
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_custom_python_is_checked_and_persists_until_automatic_is_selected(self):
+        settings = server.local_settings
+        setup = settings.setup_status()
+        self.assertEqual(setup['selected_python_path'], '')
+        environment = self.root / '自选环境'
+        venv.EnvBuilder(system_site_packages=True).create(environment)
+        python = environment / 'Scripts' / 'python.exe'
+        code, result = self.handler('/api/settings/python', {
+            'expected_revision': setup['revision'], 'python_path': str(python),
+        })._do_POST()
+        self.assertEqual(code, 200)
+        self.assertEqual(result['selected_python_path'], str(python))
+        self.assertEqual(settings.setup_status()['selected_python_path'], str(python))
+        self.assertEqual(settings.setup_status()['python_path'], sys.executable)
+        self.assertEqual(json.loads(self.config_path.read_bytes())['python_path'], str(python))
+
+        code, result = self.handler('/api/settings/python', {
+            'expected_revision': result['revision'], 'python_path': '',
+        })._do_POST()
+        self.assertEqual(code, 200)
+        self.assertEqual(result['selected_python_path'], '')
+        self.assertNotIn('python_path', json.loads(self.config_path.read_bytes()))
+
+    def test_python_missing_dependencies_cannot_replace_selection(self):
+        environment = self.root / 'empty environment'
+        venv.EnvBuilder().create(environment)
+        before = self.config_path.read_bytes()
+        code, result = self.handler('/api/settings/python', {
+            'expected_revision': server.local_settings.setup_status()['revision'],
+            'python_path': str(environment / 'Scripts' / 'python.exe'),
+        })._do_POST()
+        self.assertEqual(code, 400)
+        self.assertIn('缺少 Playwright、Pillow', result['error'])
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_invalid_python_selection_keeps_settings(self):
+        before = self.config_path.read_bytes()
+        revision = server.local_settings.setup_status()['revision']
+        for path in ('python.exe', str(self.root / 'missing' / 'python.exe'), str(self.root / 'other.exe')):
+            with self.subTest(path=path):
+                code, result = self.handler('/api/settings/python', {
+                    'expected_revision': revision, 'python_path': path,
+                })._do_POST()
+                self.assertEqual(code, 400)
+                self.assertIn('Python', result['error'])
+                self.assertEqual(self.config_path.read_bytes(), before)
+
     def test_login_tasks_do_not_persist_credential_parameters(self):
         with patch.object(server, 'submit_task', return_value=('fixture-login', False)) as submit:
             code, _ = self.handler('/api/tasks', {'op': 'login', 'password': 'fixture'})._do_POST()
@@ -42,13 +99,19 @@ class SettingsApiTests(IsolatedCase):
 
     def test_login_child_is_bounded_and_output_is_not_returned(self):
         from types import SimpleNamespace
+        import weekly
         with patch.object(server.subprocess, 'run', return_value=SimpleNamespace(
                 returncode=0, stdout='fixture-private-output', stderr='')) as run:
             result = server.run_task('login', {})
+            login_command = run.call_args.args[0]
+            login_timeout = run.call_args.kwargs['timeout']
+            self.assertTrue(weekly.ensure_login(check=False))
+            renewal_command = run.call_args.args[0]
         self.assertTrue(result['ok'])
         self.assertFalse('fixture-private-output' in json.dumps(result))
-        self.assertIn('--fresh', run.call_args.args[0])
-        self.assertEqual(run.call_args.kwargs['timeout'], 600)
+        self.assertEqual(login_command[1:], renewal_command[1:-2])
+        self.assertEqual(renewal_command[-2:], ['--headless', '--no-wait'])
+        self.assertEqual(login_timeout, 600)
 
     def test_course_completion_updates_config_under_platform_lock(self):
         def mark():
@@ -96,7 +159,7 @@ class LocalSettingsTests(IsolatedCase):
     def test_first_deploy_launcher_installs_dependencies_and_opens_console(self):
         from helpers import ROOT
         source = (ROOT / 'setup.bat').read_text(encoding='utf-8')
-        self.assertTrue('Python314\\python.exe' in source)
+        self.assertIn('launch_with_python.ps1', source)
         self.assertTrue('-m pip install playwright Pillow' in source)
         self.assertTrue('console.bat' in source)
 

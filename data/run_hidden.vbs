@@ -42,7 +42,7 @@ If Len(watchPid) > 0 Then
   inner = inner & " --watch-pid " & watchPid
 End If
 inner = inner & " >> """ & logFile & """ 2>&1"
-cmd = "cmd /c """ & inner & """"
+cmd = "cmd /d /v:off /c """ & inner & """"
 
 ' 0 = 隐藏窗口, False = 不等待（服务在后台跑，由 --watch-pid 自行退出）
 sh.Run cmd, 0, False

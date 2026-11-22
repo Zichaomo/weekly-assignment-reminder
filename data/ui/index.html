@@ -262,6 +262,21 @@
   </footer>
 </dialog>
 
+<dialog class="dlg dlg-confirm" id="dlgScheduledFailure" aria-labelledby="scheduledFailureTitle" aria-describedby="scheduledFailureReason">
+  <div class="cf-main scroll">
+    <span class="cf-icon danger" aria-hidden="true"><i data-lucide="info"></i></span>
+    <div class="scheduled-failure-body">
+      <h3 id="scheduledFailureTitle">定时推送失败</h3>
+      <p id="scheduledFailureTime"></p>
+      <p id="scheduledFailureReason"></p>
+    </div>
+  </div>
+  <footer class="dlg-foot">
+    <button class="btn line" id="scheduledFailureDetails">查看定时状态</button>
+    <button class="btn solid" data-close autofocus>知道了</button>
+  </footer>
+</dialog>
+
 <div class="toast" id="toast" popover="manual" role="status" aria-live="polite"><i data-lucide="info"></i><span></span></div>
 
 <script src="./js/app.js"></script>
