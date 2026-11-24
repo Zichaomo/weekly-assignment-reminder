@@ -131,7 +131,7 @@ function render(){
         <button class="item" role="option" aria-selected="${row.item_key === state.selected}" data-key="${esc(row.item_key)}" data-group="${parts.group}">
           <span class="when"><span class="t">${parts.date ? timeText(parts.date) : '—'}</span>
             <span class="d">${parts.offset === 0 || parts.offset === 1 ? parts.relative : esc(parts.date ? weekday(parts.date) + ' ' + (parts.date.getMonth()+1) + '/' + parts.date.getDate() : '')}</span></span>
-          <span class="meta"><span class="course"><span class="c">${esc(row.course)}</span>${tags(row)}</span><span class="title">${esc(row.title)}</span></span>
+          <span class="meta"><span class="course"><span class="c">${esc(row.course)}</span>${tags(row)}${row.reminder_excluded ? '<span class="src other">不推送</span>' : ''}</span><span class="title">${esc(row.title)}</span></span>
           <span class="remain ${parts.heat}">${parts.short}</span>
         </button>`).join('')}
     </div>`;
@@ -155,8 +155,10 @@ function renderDetail(){
   document.querySelectorAll('[data-for="platform"]').forEach(b=>b.hidden=!r||isManual(r));
   document.querySelectorAll('[data-for="manual"]').forEach(b=>b.hidden=!isManual(r));
   $('#reviewBtn').hidden=!r||isManual(r)||r.kind==='test';
+  $('#reminderBtn').hidden = !r?.item_key || isManual(r) || !Number.isInteger(r.identity_generation);
+  $('#reminderBtn').textContent = r?.reminder_excluded ? '恢复推送' : '不推本条作业';
   $('#retryCourse').disabled=!r?.lid;
-  $('#footNote').textContent=r?(isManual(r)?'手动补录 · 仅保存在本机':r.content_stale?'正文已过期，请刷新':r.content_error || '本人已提交也会提醒班级同学'):'';
+  $('#footNote').textContent=r?(isManual(r)?'手动补录 · 仅保存在本机':r.content_stale?'正文已过期，请刷新':r.content_error || (r.reminder_excluded ? '' : '本人已提交也会提醒班级同学')):'';
   if(!r){$('#detail').innerHTML='<div class="empty-detail">选择作业查看详情</div>';return;}
   const summary = r.content_summary?.text || r.note || (r.content_summary?.status === 'images'
     ? '作业要求见下方图片。' : isManual(r) ? '未填写备注' : r.content_summary?.reason || '正文尚未就绪，可刷新正文查看。');
@@ -166,8 +168,9 @@ function renderDetail(){
       <div class="deadline">${deadlineMarkup(r)}</div>
       <div class="flags">
         ${isManual(r) ? '' : `<span class="${r.submit_state === 'submitted' ? 'done' : ''}"><i data-lucide="${r.submit_state === 'submitted' ? 'circle-check' : 'circle-dashed'}"></i>${submittedLabel(r)}</span>`}
-        ${elective(r) ? '<span class="off"><i data-lucide="circle-minus"></i>不进入班级提醒（选修）</span>' : '<span class="on"><i data-lucide="users"></i>进入班级提醒</span>'}
-        <span class="on"><i data-lucide="user"></i>进入个人提醒</span>
+        ${r.reminder_excluded ? '<span><i data-lucide="circle-minus"></i>已跳过班级和个人提醒</span>' : `
+          ${elective(r) ? '<span class="off"><i data-lucide="circle-minus"></i>不进入班级提醒（选修）</span>' : '<span class="on"><i data-lucide="users"></i>进入班级提醒</span>'}
+          <span class="on"><i data-lucide="user"></i>进入个人提醒</span>`}
       </div>
       <div class="sec"><div class="sec-h">任务摘要</div><p class="summary">${esc(summary)}</p></div>
       ${!isManual(r) && r.kind !== 'test' ? `
@@ -351,7 +354,7 @@ function renderPreview(){
   const p=state.preview;if(!p)return;
   $('#seg').dataset.v=state.target;
   $('#seg').querySelectorAll('button').forEach(b=>{b.setAttribute('aria-selected',String(b.dataset.v===state.target));b.querySelector('b').textContent=b.dataset.v==='class'?p.count:p.count_personal;});
-  $('#pvMeta').textContent=`${state.target==='class'?'班级提醒 · 排除选修':'个人完整提醒 · 含选修'} · 班级渠道 ${state.channel||'未知'}`;
+  $('#pvMeta').textContent=`${state.target==='class'?'班级提醒 · 排除选修':'个人提醒 · 含选修'} · 班级渠道 ${state.channel||'未知'}`;
   renderPreviewMessage($('#bubble'),
     (state.target==='class'?p.message:p.message_personal) || '',
     (state.target==='class'?p.images:p.images_personal) || []);

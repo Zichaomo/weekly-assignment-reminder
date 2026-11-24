@@ -103,6 +103,8 @@ def build_rows(platform_hw: list, manual_items: list, days: int,
             "submit_url": hw.get("submit_url"),
             "result_url": hw.get("result_url"),
             "item_key": hw.get("item_key"),
+            "identity_generation": hw.get("identity_generation"),
+            "reminder_excluded": bool(hw.get("reminder_excluded")),
             "platform_id": hw.get("platform_id"),
             "content_status": hw.get("content_status"),
             "content_ready": bool(hw.get("content_ready")),
@@ -426,7 +428,7 @@ def run_publish(days: int, no_send: bool, channel: str, sweep: bool = False,
     manual = weekly.load_manual()
     picked = weekly.merge_and_filter(data, manual, days)
 
-    # 两份文案：班级群（去选修课）/ 个人小群（完整清单）。
+    # 两份文案都跳过已排除的条目，班级群另排除选修课。
     # 与定时任务走的是同一段逻辑（weekly.split_items / format_message），
     # 绝不在这里另写一套筛选规则。
     elec = weekly._elective_lids_from_disk(data)

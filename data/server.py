@@ -745,7 +745,8 @@ class Handler(BaseHTTPRequestHandler):
                       '/api/runtime/update':'更新后台', '/api/shutdown':'停止后台'}
         self.activity_op = operations.get(u.path)
         if u.path.startswith('/api/assignments/'):
-            self.activity_op = {'review':'正文确认', 'view':'保存裁剪', 'supplement':'补充作业'}.get(u.path.rsplit('/', 1)[-1])
+            self.activity_op = {'review':'正文确认', 'view':'保存裁剪', 'supplement':'补充作业',
+                                'reminder':'单条推送设置'}.get(u.path.rsplit('/', 1)[-1])
         self.activity_started = time.time()
 
         settings_writes = {'/api/settings/account': local_settings.save_account,
@@ -827,6 +828,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "task_id": task_id,
                                     "deduped": deduped,
                                     "status": "already-active" if deduped else "queued"})
+
+        if u.path.startswith('/api/assignments/') and u.path.endswith('/reminder'):
+            if not self._settings_origin_allowed(mutation=True):
+                return self._send(403, {'ok': False, 'error': '请从本机控制台修改推送设置'})
+            key = unquote(u.path[len('/api/assignments/'):-len('/reminder')])
+            with LIFECYCLE_LOCK:
+                if _RESTARTING or runtime_busy():
+                    return self._send(409, {'ok': False, 'error': '请等待当前任务结束后再修改推送设置'})
+                try:
+                    cache_store.set_reminder_excluded(key, p.get('excluded'), p.get('expected_identity_generation'))
+                except cache_store.VersionConflict as exc:
+                    return self._send(409, {'ok': False, 'error': str(exc)})
+                except LookupError as exc:
+                    return self._send(404, {'ok': False, 'error': str(exc)})
+                except ValueError as exc:
+                    return self._send(400, {'ok': False, 'error': str(exc)})
+            return self._send(200, {'ok': True})
 
         if u.path.startswith('/api/assignments/') and u.path.endswith('/supplement'):
             import assignment_supplements

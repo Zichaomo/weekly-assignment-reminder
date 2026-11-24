@@ -6,6 +6,7 @@ import time
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import quote
 from unittest.mock import patch
 
 from helpers import IsolatedCase
@@ -78,6 +79,52 @@ class DailyWorkflows(IsolatedCase):
     def run_weekly(self, *args):
         with patch.object(sys, 'argv', ['weekly.py', *args]), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return weekly.main()
+
+    def set_reminder(self, item, excluded, *, origin='http://127.0.0.1:8277'):
+        handler = object.__new__(server.Handler)
+        handler.path = '/api/assignments/' + quote(item['item_key'], safe='') + '/reminder'
+        handler.headers = {'Host': '127.0.0.1:8277', 'Origin': origin, 'Content-Type': 'application/json'}
+        handler._body = lambda: {'excluded': excluded, 'expected_identity_generation': item.get('identity_generation')}
+        handler._send = lambda status, data: (status, data)
+        return handler._do_POST()[0]
+
+    def test_skip_one_assignment_in_both_preview_and_scheduled_reminders(self):
+        skipped, *others = hub.run_list(7, False)['rows']
+        self.assertEqual(self.set_reminder(skipped, True), 200)
+        rows = hub.run_list(7, False)['rows']
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(rows[0]['reminder_excluded'])
+        self.assertFalse(rows[1]['reminder_excluded'])
+        preview = hub.run_publish(7, True, 'none')
+        self.assertEqual((preview['count'], preview['count_personal']), (2, 2))
+        for field in ('message', 'message_personal'):
+            self.assertNotIn(skipped['title'], preview[field])
+            self.assertIn(others[0]['title'], preview[field])
+
+        cache_store.save_content(skipped['item_key'], {
+            'status': 'ready', 'source_version': 'changed', 'text': '补交入口已更新',
+            'blocks': [{'id': 'p', 'type': 'paragraph', 'text': '补交入口已更新'}]})
+        self.assertEqual(self.run_weekly('--no-send', '--days', '7'), 0)
+        for filename in ('last_message.txt', 'last_message_personal.txt'):
+            message = (self.root / filename).read_text(encoding='utf-8')
+            self.assertNotIn(skipped['title'], message)
+            self.assertIn(others[0]['title'], message)
+        self.send.assert_not_called()
+
+        raw = {'hwtid': skipped['hwtid'], 'lid': skipped['lid'], 'title': skipped['title']}
+        self.assertEqual(weekly.split_items([raw], set()), ([], []))
+        self.assertEqual(self.set_reminder(skipped, False), 200)
+        self.assertIn(skipped['title'], hub.run_publish(7, True, 'none')['message'])
+
+    def test_skip_setting_rejects_stale_identity_and_external_origin(self):
+        cache_store.bind_identity('first')
+        item = hub.run_list(7, False)['rows'][0]
+        self.assertEqual(self.set_reminder(item, True, origin='https://example.invalid'), 403)
+        self.assertEqual(self.set_reminder(item, 'true'), 400)
+        self.assertEqual(self.set_reminder(item, True), 200)
+        cache_store.bind_identity('second', allow_change=True)
+        self.assertFalse(cache_store.get_item(item['item_key'])['reminder_excluded'])
+        self.assertEqual(self.set_reminder(item, True), 409)
 
     def test_filters_lists_and_audience_preview_use_same_rules(self):
         self.assertEqual(hub.run_list(1, False)['rows'], [])

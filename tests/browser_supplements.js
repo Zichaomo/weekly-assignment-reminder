@@ -72,6 +72,38 @@ async function main() {
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator('#pvClose').click();
+  await page.getByRole('button', { name: '不推本条作业', exact: true }).click();
+  await page.locator('#dlgConfirm #cfOk').click();
+  await page.waitForSelector('#dlgConfirm[open]', { state: 'hidden' });
+  const excluded = page.locator('#list .item').filter({ hasText: 'fixture通用说明' });
+  assert.match(await excluded.innerText(), /不推送/);
+  assert.match(await page.locator('#detail .flags').innerText(), /已跳过班级和个人提醒/);
+  await page.reload();
+  await excluded.click();
+  assert.match(await excluded.innerText(), /不推送/);
+  assert.equal(await page.locator('#assignmentSupplement img').count(), 2);
+  await page.locator('#pvBtn').click();
+  await page.waitForFunction(() => !document.querySelector('#copyBtn').disabled);
+  for (const audience of ['class', 'personal']) {
+    await page.locator('#seg button[data-v="' + audience + '"]').click();
+    assert.doesNotMatch(await page.locator('#bubble').innerText(), /fixture通用说明|PPT 第 12 页/);
+    assert.match(await page.locator('#bubble').innerText(), /fixture有效摘要/);
+    assert.equal(await page.locator('#bubble img').count(), 0);
+  }
+  await page.locator('#pvClose').click();
+  await page.setViewportSize({ width: 390, height: 700 });
+  const restore = page.getByRole('button', { name: '恢复推送', exact: true });
+  const restoreBox = await restore.boundingBox();
+  assert(restoreBox && restoreBox.x >= 0 && restoreBox.y >= 0);
+  assert(restoreBox.x + restoreBox.width <= 391 && restoreBox.y + restoreBox.height <= 701);
+  await page.screenshot({ path: path.join(output, 'reminder-excluded-small.png'), animations: 'disabled' });
+  await restore.click();
+  await page.getByRole('button', { name: '不推本条作业', exact: true }).waitFor();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('#pvBtn').click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubble img').length === 2);
+  assert.match(await page.locator('#bubble').innerText(), /fixture通用说明/);
+  await page.locator('#pvClose').click();
   // Same titles in different courses and both image types stay with their item.
   const previewOrder = await page.evaluate(() => {
     const host = document.createElement('div');

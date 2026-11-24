@@ -2,7 +2,7 @@
 import re
 import course_rules
 
-RULE_VERSION = '2026-11-15.2'
+RULE_VERSION = '2026-11-24.1'
 QUESTION_LIST = re.compile(r'\d+\s*[-－—]\s*\d+(?:\s*[,，、]\s*\d+\s*[-－—]\s*\d+)*\s*[。.]?')
 SUBMISSION_SLOT = re.compile(r'(?:(?:第[一二三四五六七八九十百零两\d]+[周章节次])|本周)?\s*作业\s*(?:请)?\s*提交(?:在)?(?:这里|此处)[。！!]?')
 ANCHOR = re.compile(r'^(?:习题|题号|页码|作业范围|本次要求|本周要求|本次作业|本周作业|完成|解答|求解|证明|计算|阅读|预习|复习|第[一二三四五六七八九十百\d]+[章节页题])')
@@ -16,7 +16,7 @@ GENERIC = [re.compile(x) for x in (
     r'(?:此外[，,]\s*)?原始数据中若缺少教师签字.*',
     r'请各位同学将写好的实验报告扫描或拍照.*', r'文件统一命名为\s*[:：].*',
     r'请各位同学按时提交实验报告.*', r'对于卡点提交导致报告无法正常上传的情况.*',
-    r'提交图片[。.]?$', r'一页作为一张照片[，,].*',
+    r'按要求提交[。.!！]?', r'提交图片[。.]?$', r'一页作为一张照片[，,].*',
     r'扫描推荐使用.*扫描软件.*', r'无论是计算题.*求解(?:过程|思路).*',
     r'一定要在截止时间之前完成作业提交.*', r'晚交作业超过\d+次.*')]
 
@@ -71,11 +71,9 @@ def summarize(item, rule=None):
             or item.get('content_error') or item.get('content_identity_stale')):
         result['reason'] = '正文缺失、过期或获取失败，尚不能确认作业内容'
         return result
-    if item.get('content_review_stale'):
-        result.update(status='needs_review', reason='原文已更新，自动提醒查看北化在线；可按需重新确认正文')
-        return result
+    review_stale = item.get('content_review_stale')
     review = item.get('content_review')
-    if review and review.get('source_version') == item.get('source_version'):
+    if not review_stale and review and review.get('source_version') == item.get('source_version'):
         result.update(status='ready' if review['mode'] == 'include' else 'generic_only',
                       text=review.get('text', ''), origin='manual',
                       reason='已人工确认推送正文' if review['mode'] == 'include'
@@ -85,14 +83,6 @@ def summarize(item, rule=None):
     pieces = list(_pieces(blocks))
     if not pieces and item.get('content_text'):
         pieces = [(None, item['content_text'])]
-    if mode == 'images':
-        import content_pipeline
-        images = list(content_pipeline._iter_images(blocks))
-        if images and all(im.get('status') == 'ready' and im.get('asset_id') for im in images):
-            result.update(status='images', text='', origin='course_rule',
-                          asset_ids=list(dict.fromkeys(im['asset_id'] for im in images)),
-                          reason='本课程正文图片随提醒发送；有有效裁剪时使用裁剪图，无需人工确认')
-            return result
     if mode == 'physics' and not _has_visual(blocks):
         kept = []
         for block_id, text in pieces:
@@ -109,12 +99,26 @@ def summarize(item, rule=None):
                         result['removed_excerpts'].append(excerpt)
                     else:
                         kept.append(excerpt)
-        if kept:
-            result.update(status='ready', text='\n'.join(x['text'] for x in kept),
-                          excerpts=kept, origin='course_rule', reason='去除已知通用提交说明，保留其余全部要求')
-        else:
-            result.update(status='generic_only', reason='仅通用提交说明，没有具体任务')
+        # An expired review must not republish requirements, but a body that
+        # now consists entirely of known boilerplate needs no fallback text.
+        if not review_stale or (not kept and result['removed_excerpts']):
+            if kept:
+                result.update(status='ready', text='\n'.join(x['text'] for x in kept),
+                              excerpts=kept, origin='course_rule', reason='去除已知通用提交说明，保留其余全部要求')
+            else:
+                result.update(status='generic_only', reason='仅通用提交说明，没有具体任务')
+            return result
+    if review_stale:
+        result.update(status='needs_review', reason='原文已更新，自动提醒查看北化在线；可按需重新确认正文')
         return result
+    if mode == 'images':
+        import content_pipeline
+        images = list(content_pipeline._iter_images(blocks))
+        if images and all(im.get('status') == 'ready' and im.get('asset_id') for im in images):
+            result.update(status='images', text='', origin='course_rule',
+                          asset_ids=list(dict.fromkeys(im['asset_id'] for im in images)),
+                          reason='本课程正文图片随提醒发送；有有效裁剪时使用裁剪图，无需人工确认')
+            return result
     # The user confirmed that every textual requirement in this course matters.
     # Keep wording, internal spaces, command arguments and list numbering intact.
     if mode == 'full':

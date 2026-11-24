@@ -390,16 +390,10 @@ def check_freshness() -> int:
 
 
 def split_items(items: list, elective_lids) -> tuple:
-    """把待办切成两份。
-
-    班级群那条：**删掉选修课**（那门课班里多数人没上，进群就是噪音）
-    个人那条　：**完整清单**（含选修课）—— 你自己要看全部，一条不漏
-
-    只按 lid 判断（课程名会重名，不可靠）。手动条目没有 lid，一律进班级群。
-    """
+    """班级和个人提醒都跳过单条排除，班级提醒另排除选修课。"""
     elec = {str(x) for x in (elective_lids or set())}
     class_items, personal_items = [], []
-    for it in items:
+    for it in cache_store.remindable_items(items):
         personal_items.append(it)
         if str(it.get("lid") or "") in elec:
             continue
@@ -496,7 +490,8 @@ def main() -> int:
             # List freshness does not prove body freshness. Refresh the due
             # bodies in the scraper's authenticated context before formatting.
             due = [item for item in merge_and_filter(cached_payload, [], args.days)
-                   if item.get('kind') not in ('test', 'manual')
+                   if not item.get('reminder_excluded')
+                   and item.get('kind') not in ('test', 'manual')
                    and course_rules.resolve(item.get('course'))['mode'] != 'reference'
                    and (not item.get('content_ready') or item.get('content_stale')
                         or item.get('content_error') or item.get('content_identity_stale'))]
@@ -599,7 +594,7 @@ def main() -> int:
     picked = merge_and_filter(data, manual, args.days)
     print(f"未来 {args.days} 天内待交：{len(picked)} 条")
 
-    # ---- 两份文案：班级群（去选修课）/ 个人小群（完整清单）----
+    # ---- 班级和个人提醒共用单条排除设置 ----
     elec = _elective_lids_from_disk(data)
     class_items, personal_items = split_items(picked, elec)
     class_msg = format_message(class_items, args.days)
@@ -608,13 +603,13 @@ def main() -> int:
                                   elective_lids=elec)
     if elec:
         print(f"选修课 {len(elec)} 门：班级群那条剔除 "
-              f"{len(picked) - len(class_items)} 条，个人那条保留全部 {len(personal_items)} 条")
+              f"{len(personal_items) - len(class_items)} 条选修作业")
 
     print("-" * 40)
     print("【班级群 · 已去选修课】")
     print(class_msg)
     print("-" * 40)
-    print("【个人小群 · 完整清单】")
+    print("【个人小群 · 含选修课】")
     print(personal_msg)
     print("-" * 40)
 

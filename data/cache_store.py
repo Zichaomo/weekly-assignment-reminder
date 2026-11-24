@@ -424,6 +424,10 @@ def init_db() -> None:
             text TEXT NOT NULL DEFAULT '', images_json TEXT NOT NULL DEFAULT '[]',
             revision INTEGER NOT NULL, updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS assignment_reminder_exclusions (
+            item_key TEXT PRIMARY KEY REFERENCES assignments(item_key),
+            identity_generation INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_registry (
             task_id TEXT PRIMARY KEY, signature TEXT NOT NULL, op TEXT NOT NULL,
             params_json TEXT NOT NULL, status TEXT NOT NULL,
@@ -836,6 +840,56 @@ def coverage(scope: str | None = None, *, expected_lids: Iterable[str] | None = 
     }
 
 
+def _reminder_exclusion_keys(con, scope, generation):
+    return {row['item_key'] for row in con.execute(
+        """SELECT a.item_key FROM assignment_reminder_exclusions e
+           JOIN assignments a ON a.item_key=e.item_key
+           WHERE a.account_scope=? AND a.platform=? AND e.identity_generation=?""",
+        (scope, PLATFORM, generation))}
+
+
+def set_reminder_excluded(item_key, excluded, expected_identity_generation):
+    if not isinstance(excluded, bool):
+        raise ValueError('请指定是否跳过提醒')
+    init_db()
+    scope = account_scope()
+    with connection(write=True) as con:
+        item = con.execute(
+            'SELECT 1 FROM assignments WHERE item_key=? AND account_scope=? AND platform=?',
+            (item_key, scope, PLATFORM)).fetchone()
+        if not item:
+            raise LookupError('作业条目不存在，请刷新列表')
+        generation = _scope_identity_generation(scope, con)
+        if type(expected_identity_generation) is not int or expected_identity_generation != generation:
+            raise VersionConflict('学校账号已变化，请刷新列表后再修改推送设置')
+        if excluded:
+            con.execute('INSERT OR REPLACE INTO assignment_reminder_exclusions VALUES(?,?)',
+                        (item_key, generation))
+        else:
+            con.execute('DELETE FROM assignment_reminder_exclusions WHERE item_key=?', (item_key,))
+
+
+def remindable_items(items):
+    """Apply the current account's per-assignment choices to a delivery snapshot."""
+    scope = account_scope()
+    keys = []
+    for item in items:
+        key = item.get('item_key')
+        if not key and item.get('source') != 'manual':
+            # The legacy pending pool emits platform IDs without cache keys.
+            kind = item.get('kind') or 'homework'
+            platform_id = item.get('test_id' if kind == 'test' else 'hwtid')
+            if platform_id and item.get('lid'):
+                key, _ = _assignment_key(scope, item['lid'], kind, platform_id, '', '', 0)
+        keys.append(key)
+    if not any(keys):
+        return items
+    init_db()
+    with connection() as con:
+        excluded = _reminder_exclusion_keys(con, scope, _scope_identity_generation(scope, con))
+    return [item for item, key in zip(items, keys) if key not in excluded]
+
+
 def load_items(scope: str | None = None, *, include_inactive: bool = False,
                exclude_lids: Iterable[str] | None = None,
                exclude_test_lids: Iterable[str] | None = None) -> list[dict]:
@@ -846,6 +900,7 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
     where = "" if include_inactive else " AND a.active=1"
     with connection() as con:
         generation = _scope_identity_generation(scope, con)
+        reminder_exclusions = _reminder_exclusion_keys(con, scope, generation)
         rows = con.execute(
             f"""SELECT a.*, c.status AS content_status, c.source_checked_at,
                        c.ttl_sec AS content_ttl_sec, c.source_hash, c.source_version,
@@ -883,6 +938,7 @@ def load_items(scope: str | None = None, *, include_inactive: bool = False,
                 item["blocks_json"] = "[]"
                 item["asset_ids_json"] = "[]"
             item["identity_generation"] = generation
+            item["reminder_excluded"] = item["item_key"] in reminder_exclusions
             version = item.get("source_version")
             if version:
                 view = con.execute(

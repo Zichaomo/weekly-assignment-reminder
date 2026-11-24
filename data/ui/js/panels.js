@@ -121,6 +121,32 @@ for(const [id,mode] of [['reviewAuto','auto'],['reviewOmit','omit'],['reviewSave
     drafts.delete(reviewItem.item_key);reviewDialog.close();await refreshList();toast('正文确认已保存');
   }finally{reviewSaving=false;}
 });
+$('#reminderBtn').onclick = guarded(async () => {
+  const item = currentItem();
+  if (!item || $('#reminderBtn').hidden) return;
+  const excluded = !item.reminder_excluded;
+  const save = async () => {
+    $('#reminderBtn').disabled = true;
+    try {
+      requireOk(await api(itemUrl(item, 'reminder'), {
+        excluded, expected_identity_generation: item.identity_generation,
+      }));
+      await refreshList();
+      toast(excluded ? '已跳过本条作业的推送' : '已恢复本条作业的推送');
+    } finally {
+      $('#reminderBtn').disabled = false;
+    }
+  };
+  if (excluded) {
+    confirmDlg({
+      title: '不推本条作业？',
+      body: item.course + ' · ' + item.title + '。班级和个人提醒都将跳过这条作业。作业仍会保留在列表中，可随时恢复推送。',
+      ok: '不推本条作业', icon: 'circle-minus', action: save,
+    });
+  } else {
+    await save();
+  }
+});
 const crop={item:null,asset:null,box:[0,0,1,1],other:[],regions:[],index:0,dirty:false,saving:false,reset:false};
 function cropRegionOptions(){const select=$('#cropRegion');select.innerHTML=crop.regions.map((r,i)=>`<option value="${i}">区域 ${i+1}</option>`).join('');select.value=String(crop.index);}
 function drawCrop(){

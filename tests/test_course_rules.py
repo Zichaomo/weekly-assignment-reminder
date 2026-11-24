@@ -97,3 +97,27 @@ class CourseRulesTests(IsolatedCase):
             self.assertIn('课程｜作业', message)
             self.assertIn('⏰', message)
             self.assertNotIn('详细要求见北化在线', message)
+
+    def test_lab_submission_phrase_is_removed_but_specific_requirements_remain(self):
+        rule = dict(id='electronics-lab', course='电子技术实验（Ⅰ)', match='exact', mode='physics', lines=3)
+        self.save(rule)
+        original = '按要求提交。\n画出放大电路的频率响应曲线。\n按要求提交测量记录。'
+        preview = rules.preview({'rule': rule, 'text': original})
+        self.assertEqual([entry['text'] for entry in preview['removed_excerpts']], ['按要求提交。'])
+        self.assertEqual(preview['push_text'], '画出放大电路的频率响应曲线。\n按要求提交测量记录。')
+
+    def test_generic_only_lab_body_can_be_filtered_after_an_old_review_expires(self):
+        rule = dict(id='electronics-lab', course='电子技术实验（Ⅰ)', match='exact', mode='physics', lines=3)
+        self.save(rule)
+        item = dict(course=rule['course'], title='实验二', deadline='2099-01-02 23:59',
+                    content_ready=True, content_review_stale=True, content_text='按要求提交')
+        summary = content_summary.summarize(item)
+        self.assertEqual(summary['status'], 'generic_only')
+        self.assertEqual([entry['text'] for entry in summary['removed_excerpts']], ['按要求提交'])
+        message = weekly.format_message([item], 7)
+        self.assertIn('实验二', message)
+        self.assertIn('⏰', message)
+        self.assertNotIn('按要求提交', message)
+        self.assertNotIn('详细要求见北化在线', message)
+        item['content_text'] += '。\n画出放大电路的频率响应曲线。'
+        self.assertEqual(content_summary.summarize(item)['status'], 'needs_review')
